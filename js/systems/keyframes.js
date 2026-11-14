@@ -250,6 +250,52 @@
     return c;
   }
 
+  /* v7.5.0：四角扭曲参与补间。
+     以前 interpolateObject 是深拷贝起点关键帧、压根不碰 distort ——
+     所以整条段内变形都是「定住起点那一下」的状态，到下一点硬切过去。
+     现在四个角点跟着段曲线走：段上设了缓入缓出，变形也跟着缓进缓出，
+     和位置 / 旋转用的是同一个进度。
+
+     两条规则：
+       · 两端任一端开着扭曲，这一段就按扭曲渲染（不然「只在终点开启」的段
+         会硬切，跟用户要的补间正好相反）；哪一端是关的，就用「单位四边形」当它的角点，
+         于是「开启」= 从不变形慢慢长出来、「关闭」= 慢慢收回不变形。
+       · baseW/baseH 是「盒子变了之后角点怎么等比缩放」的基准，两端不同就一起插，
+         否则主体被拉伸时变形幅度会跳一下。 */
+  function neutralCorners(bw, bh) {
+    const hw = (bw > 0 ? bw : 100) / 2, hh = (bh > 0 ? bh : 100) / 2;
+    return [
+      { x: -hw, y: -hh }, { x: hw, y: -hh },
+      { x: hw, y: hh }, { x: -hw, y: hh }
+    ];
+  }
+
+  function interpDistort(obj, o1, o2, prog) {
+    const d1 = o1 && o1.distort, d2 = o2 && o2.distort;
+    const has1 = !!(d1 && d1.corners && d1.corners.length === 4);
+    const has2 = !!(d2 && d2.corners && d2.corners.length === 4);
+    if (!has1 && !has2) return;
+    const on1 = has1 && !!d1.enabled;
+    const on2 = has2 && !!d2.enabled;
+    if (!on1 && !on2) return;                    /* 两端都没开：这一整段就是不变形 */
+    if (!obj.distort) obj.distort = {};
+    const d = obj.distort;
+    const bw = (d1 && d1.baseW > 0) ? d1.baseW : ((d2 && d2.baseW > 0) ? d2.baseW : 100);
+    const bh = (d1 && d1.baseH > 0) ? d1.baseH : ((d2 && d2.baseH > 0) ? d2.baseH : 100);
+    const q1 = on1 ? d1.corners : neutralCorners(bw, bh);
+    const q2 = on2 ? d2.corners : neutralCorners(bw, bh);
+    const t = prog('distort');
+    d.corners = q1.map((c, i) => ({
+      x: lerp(c.x, q2[i].x, t),
+      y: lerp(c.y, q2[i].y, t)
+    }));
+    d.enabled = true;
+    d.baseW = bw;
+    d.baseH = bh;
+    /* frame0（冻结框架）不插：它是「姿势变了也不重算盒子」的快照，属于离散量；
+       derived 对象是一次性的，getFrozenFrame 补拍也不会污染关键帧。 */
+  }
+
   function interpolateObject(o1, o2, u, ctx) {
     if (!isReal(o1) || !isReal(o2)) return null;
     ctx = ctx || {};
@@ -358,6 +404,7 @@
         obj.pinnedPos = { footL: null, footR: null, handL: null, handR: null, pelvis: null };
       }
       if (ctx.enforcePins) ctx.enforcePins(obj);
+      interpDistort(obj, o1, o2, prog);
       return obj;
     }
 
@@ -371,6 +418,7 @@
       obj.ay = lerp(o1.ay || 0, o2.ay || 0, tt);
       if (o1.w !== undefined && o2.w !== undefined) obj.w = lerp(o1.w, o2.w, prog('width'));
       if (o1.h !== undefined && o2.h !== undefined) obj.h = lerp(o1.h, o2.h, prog('height'));
+      interpDistort(obj, o1, o2, prog);
       return obj;
     }
 
@@ -398,6 +446,7 @@
         if (o1.fillColor && o2.fillColor) obj.fillColor = col(o1.fillColor, o2.fillColor, tt);
         if (o1.strokeColor && o2.strokeColor) obj.strokeColor = col(o1.strokeColor, o2.strokeColor, tt);
       }
+      interpDistort(obj, o1, o2, prog);
       return obj;
     }
 
@@ -413,6 +462,7 @@
       obj.ay = lerp(o1.ay || 0, o2.ay || 0, tt);
       if (o1.w !== undefined && o2.w !== undefined) obj.w = lerp(o1.w, o2.w, prog('width'));
       if (o1.h !== undefined && o2.h !== undefined) obj.h = lerp(o1.h, o2.h, prog('height'));
+      interpDistort(obj, o1, o2, prog);
       return obj;
     }
 
@@ -433,6 +483,7 @@
     if (o1.scale !== undefined || o2.scale !== undefined) obj.scale = lerpScale(o1.scale, o2.scale, prog('scale'));
     if (o1.rot !== undefined || o2.rot !== undefined) obj.rot = lerp(o1.rot || 0, o2.rot || 0, prog('rot'));
     obj.alpha = lerp(o1.alpha == null ? 1 : o1.alpha, o2.alpha == null ? 1 : o2.alpha, tt);
+    interpDistort(obj, o1, o2, prog);
     return obj;
   }
 
