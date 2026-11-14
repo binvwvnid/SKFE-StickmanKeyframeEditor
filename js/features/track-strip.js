@@ -39,6 +39,9 @@
   let api = null;
   let enabled = false;
   let colW = 26;
+  /* v7.4.9：左列宽度在样式里是跟着断点变的（桌面 108 / 手机 84），
+     所以只能在渲染时读一次 --ts-gutter 存这儿，不能再用写死的 GUTTER 算播放头。 */
+  let gutterPx = GUTTER;
   let panelH = 240;        /* 面板高度默认值：约 4~5 条轨道，屏幕上还留得出画布 */
   let drag = null;
   let selClip = null;      /* 最近点选的那一条长条 { id, a, b } —— 分割认它 */
@@ -64,6 +67,15 @@
   function tracksMap() { return api ? api.tracks() : {}; }
   function totalFrames() { return Math.max(1, api ? api.totalFrames() : 1); }
   function fps() { const f = api && api.fps ? api.fps() : 12; return (f > 0 ? f : 12); }
+
+  /* 左列（眼睛 + 元件名）实际多宽 —— 单一真值来源是样式里的 --ts-gutter。
+     手机断点下它是 84px，JS 再写死 108 的话播放头会整体右偏一格多（v7.4.9 修的）。 */
+  function readGutter() {
+    const strip = $('trackStrip');
+    if (!strip) return GUTTER;
+    const v = parseFloat(getComputedStyle(strip).getPropertyValue('--ts-gutter'));
+    return (isFinite(v) && v > 0) ? v : GUTTER;
+  }
 
   /* ---------------- 关键帧 token ----------------
      '轨道id|帧号'。轨道 id 里不会有 '|'（都是数字或 UUID），所以从后往前找分隔符最稳。 */
@@ -186,7 +198,7 @@
     /* 缩略图开关 / 图案版本也算进指纹：不然改了动作、切了缩略图，长条上的小图不跟着换 */
     const thumbOn = (api && api.thumbMode && api.thumbMode()) ? 'T' : 't';
     const thumbRev = (api && api.thumbRev) ? api.thumbRev() : 0;
-    let s = totalFrames() + '#' + colW + '#' + thumbOn + thumbRev + '#';
+    let s = gutterPx + '@' + totalFrames() + '#' + colW + '#' + thumbOn + thumbRev + '#';
     for (const id in map) {
       const arr = (map[id] && map[id].frames) || [];
       s += id + ':' + arr.length + ':' + (map[id].name || '') + ':';
@@ -237,6 +249,7 @@
     const wrap = $('trackStrip');
     const cv = $('tsCanvas');
     if (!wrap || !cv) return;
+    gutterPx = readGutter();   /* v7.4.9：先量左列宽，播放头 / 画布宽度都要用它 */
     lastSig = signature();
 
     const map = tracksMap();
@@ -246,7 +259,7 @@
     const total = Math.max(totalFrames(), 1);
     const width = total * colW;
     const rowsH = Math.max(ids.length, 1) * ROW_H;
-    cv.style.width = (GUTTER + width) + 'px';
+    cv.style.width = (gutterPx + width) + 'px';
     cv.style.height = (RULER_H + rowsH) + 'px';
     cv.style.setProperty('--cw', colW + 'px');
 
@@ -321,7 +334,7 @@
     });
 
     /* 播放头放在所选帧的正中间 */
-    html += '<div class="ts-playhead" style="left:' + (GUTTER + cur * colW + colW / 2) + 'px;height:' + (RULER_H + rowsH) + 'px"></div>';
+    html += '<div class="ts-playhead" style="left:' + (gutterPx + cur * colW + colW / 2) + 'px;height:' + (RULER_H + rowsH) + 'px"></div>';
 
     cv.innerHTML = html;
     if (root.SKFEApplyIcons) root.SKFEApplyIcons(cv);
@@ -334,15 +347,15 @@
     if (!sc || !enabled) return;
     const x = api.currentFrame() * colW;
     const viewL = sc.scrollLeft;
-    const viewR = viewL + sc.clientWidth - GUTTER;
+    const viewR = viewL + sc.clientWidth - gutterPx;
     if (x < viewL) sc.scrollLeft = Math.max(0, x - colW * 2);
-    else if (x > viewR - colW) sc.scrollLeft = x - (sc.clientWidth - GUTTER) + colW * 3;
+    else if (x > viewR - colW) sc.scrollLeft = x - (sc.clientWidth - gutterPx) + colW * 3;
   }
 
   function syncPlayhead() {
     const ph = document.querySelector('#tsCanvas .ts-playhead');
     if (!ph) return;
-    ph.style.left = (GUTTER + api.currentFrame() * colW + colW / 2) + 'px';
+    ph.style.left = (gutterPx + api.currentFrame() * colW + colW / 2) + 'px';
   }
 
   /* ---------------- 写回工具 ---------------- */
@@ -666,6 +679,41 @@
     setClipSel(items.map(c => ({ id: c.id, a: c.a + d, b: c.b + d })));
   }
 
+  /* ---------------- 多条长条整组拉长 / 缩短（v7.4.9） ----------------
+     框选一堆长条之后抓任意一端，整组一起变长变短（d 帧），不用一条一条拉。
+     每条各走一遍 applyDrag：配饰的跟随、裁短时「剩下的尾巴定格成保留锚点」、
+     裁掉的帧里关键帧一并取消 —— 这些语义全都和单条完全一致，
+     另写一套数据逻辑只会和单条的行为分叉。 */
+  function applyClipsResize(items, d, mode) {
+    if (!d || !items.length) return;
+    items.forEach((c) => {
+      applyDrag({ id: c.id, a: c.a, b: c.b, mode: mode }, d);
+    });
+    /* 长度变了：按新范围重选，接着还能继续拉 */
+    setClipSel(items.map(c => (mode === 'r'
+      ? { id: c.id, a: c.a, b: c.b + d }
+      : { id: c.id, a: c.a + d, b: c.b })));
+  }
+
+  /* 整组伸缩的夹紧区间：各条各自算，再取交集（和整组平移同一个思路） */
+  function multiResizeBounds(items, mode) {
+    let lo = -MAX_FRAMES, hi = MAX_FRAMES;
+    items.forEach((c) => {
+      const bd = moveBounds(c.id, c.a, c.b);
+      if (mode === 'r') {
+        lo = Math.max(lo, c.a - c.b);     /* 至少剩 1 帧 */
+        hi = Math.min(hi, bd.hi);         /* 不能吃掉后面那一段 */
+      } else {
+        lo = Math.max(lo, bd.lo);         /* 不能吃掉前面那一段 */
+        hi = Math.min(hi, c.b - c.a);
+      }
+    });
+    if (!isFinite(lo)) lo = -MAX_FRAMES;
+    if (!isFinite(hi)) hi = MAX_FRAMES;
+    if (lo > hi) return { lo: 0, hi: 0 };
+    return { lo: lo, hi: hi };
+  }
+
   /* ---------------- 关键帧平移 / 复制 / 粘贴 ----------------
      v7.4.3 语义调整：拖关键帧 = 改它落在第几帧（用户最初要的就是这个），
      想保留原来那颗就按住 Alt（= 复制到落点）。单颗和整组用同一套键位。 */
@@ -986,16 +1034,99 @@
   }
 
   /* ---------------- 交互绑定 ---------------- */
+
+  /* v7.4.9：长条 / 关键帧改成「长按 1 秒才进入拖动」。
+     手指按在长条上本来分不清「想拖」还是「想滚」——一按下就认定要拖，
+     结果手指还没动，位置就先被挪了一格。现在的分工：
+       · 按住 1 秒 → 震一下、进入拖动（松手才算数，中途数据不动）
+       · 1 秒内抬手 → 当作点一下（选中这一行 / 跳到这一帧）
+       · 1 秒内划走 → 当作滚动轨道（长条铺满整行，不给平移就没法滚）
+     鼠标不受影响：PC 端按下即拖，加延时只会变难用。 */
+  const LONG_PRESS_MS = 1000;
+  const PAN_SLOP = 8;        /* 长按计时期间允许的手抖 */
+
+  let press = null;   /* 待判定的长按：{ sx, sy, timer, tap } */
+  let pan = null;     /* 长按没等到就划走了 → 平移轨道 */
+
+  function clearPress() {
+    if (!press) return;
+    clearTimeout(press.timer);
+    press = null;
+  }
+
+  /* 列的基准：任意一条 lane 都和长条左端对齐，横向滚动时一起动；
+     canvas 是视口，拿它算会在滚动后错位。 */
+  function laneRef() {
+    const cv = $('tsCanvas');
+    return cv.querySelector('.ts-lane') || cv;
+  }
+
+  /* 屏幕横坐标 → 第几帧（夹在 0 … 总帧数-1 之内） */
+  function frameAt(clientX) {
+    const r = laneRef().getBoundingClientRect();
+    const i = Math.floor((clientX - r.left) / colW);
+    return Math.max(0, Math.min(totalFrames() - 1, i));
+  }
+
   function bindDrag() {
     const cv = $('tsCanvas');
     if (!cv || cv.dataset.bound === '1') return;
     cv.dataset.bound = '1';
+
+    /* begin = 真正开始拖（建 drag + 加 .dragging）；tap = 短按做什么 */
+    const armOrBegin = (e, begin, tap) => {
+      if (e.pointerType === 'mouse') { begin(); return; }
+      clearPress();
+      try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+      press = {
+        sx: e.clientX, sy: e.clientY, tap: tap || null,
+        timer: setTimeout(() => {
+          if (!press) return;
+          press = null;
+          begin();
+          if (navigator.vibrate) navigator.vibrate(28);
+        }, LONG_PRESS_MS)
+      };
+    };
+
+    /* 空白处短按：跳帧 + 选中这一行的长条 + 选中这一行的元件。
+       先跳帧再选：goToFrame 会重建 AppState.objects，反过来的话选中的是旧对象。 */
+    const tapFrameAt = (i, rowId) => {
+      if (i >= 0 && i < totalFrames()) api.goToFrame(i);
+      if (rowId) {
+        lastPickedId = rowId;
+        const segEl = clipAt(rowId, i);
+        if (segEl) setClipSel([{ id: rowId, a: +segEl.dataset.a, b: +segEl.dataset.b }]);
+        api.selectTrack(rowId);
+        markRow(rowId);
+      }
+      render();
+    };
+
+    /* 关键帧短按：把播放头挪过去 + 选中这一行的元件。
+       （点在一条「这一帧本来空白」的轨上，不挪播放头就 selectTrack 不到元件。） */
+    const tapKeys = (items) => {
+      if (!items || !items.length) return;
+      if (items.length === 1 && items[0].i !== api.currentFrame()) api.goToFrame(items[0].i);
+      api.selectTrack(items[0].id);
+    };
 
     cv.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
 
       /* 放大 / 缩小、眼睛都是「按一下」的动作，交给 click 处理（键盘也能用），这里只让路 */
       if (e.target.closest('[data-zoom]') || e.target.closest('[data-eye]')) return;
+
+      /* v7.4.9：刻度尺（时间显示那一栏）按住拖 = 刷时间线，按一下 = 跳到那一帧。
+         放在最前面：这一栏只有 22px 高，拖它的人想的是拖时间线，不该起框选。 */
+      if (e.target.closest('.ts-ruler')) {
+        const i0 = frameAt(e.clientX);
+        drag = { kind: 'scrub', last: i0, moved: false };
+        if (i0 !== api.currentFrame()) api.goToFrame(i0);
+        try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+        return;
+      }
 
       /* 关键帧菱形：单拖改这一帧的时间；Ctrl / ⌘ / Shift 点 = 加选或减选 */
       const kEl = e.target.closest('.ts-key');
@@ -1028,28 +1159,31 @@
         });
 
         const items = liveSelKeys();
-        const byTok = Object.create(null);
-        cv.querySelectorAll('.ts-key').forEach((el) => { byTok[ktok(el.dataset.id, el.dataset.i)] = el; });
-        const els = [];
-        items.forEach((it) => {
-          const el = byTok[ktok(it.id, it.i)];
-          if (el) els.push({ i: it.i, el });
-        });
-
-        drag = {
-          kind: 'keys',
-          items,
-          els,
-          startX: e.clientX,
-          d: 0,
-          alt: !!e.altKey,
-          moved: false
-        };
         selClip = null;
         lastPickedId = kid;
         markRow(kid);
-        els.forEach(x => x.el.classList.add('dragging'));
-        try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+
+        const begin = () => {
+          const byTok = Object.create(null);
+          cv.querySelectorAll('.ts-key').forEach((el) => { byTok[ktok(el.dataset.id, el.dataset.i)] = el; });
+          const els = [];
+          items.forEach((it) => {
+            const el = byTok[ktok(it.id, it.i)];
+            if (el) els.push({ i: it.i, el });
+          });
+          drag = {
+            kind: 'keys',
+            items,
+            els,
+            startX: e.clientX,
+            d: 0,
+            alt: !!e.altKey,
+            moved: false
+          };
+          els.forEach(x => x.el.classList.add('dragging'));
+          try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+        };
+        armOrBegin(e, begin, () => tapKeys(items));
         e.preventDefault();
         return;
       }
@@ -1077,8 +1211,8 @@
           el.classList.toggle('sel', isClipSelected(el.dataset.id, +el.dataset.a, +el.dataset.b));
         });
 
-        /* 多选 + 抓中间 = 整组平移；抓两端只动这一条 */
-        const group = (mode === 'm' && selClips.length > 1) ? selClips.slice() : null;
+        /* v7.4.9：多选之后抓中间 = 整组平移，抓任意一端 = 整组一起拉长 / 缩短 */
+        const group = selClips.length > 1 ? selClips.slice() : null;
         const els = [];
         if (group) {
           group.forEach((c) => {
@@ -1087,34 +1221,40 @@
           });
         }
 
-        drag = {
-          kind: 'clip',
-          id: cid,
-          si: +clip.dataset.si,
-          a: ca,
-          b: cb,
-          mode,
-          startX: e.clientX,
-          d: 0,
-          el: clip,
-          group: group,
-          els: els,
-          moved: false
+        const begin = () => {
+          drag = {
+            kind: 'clip',
+            id: cid,
+            si: +clip.dataset.si,
+            a: ca,
+            b: cb,
+            mode,
+            startX: e.clientX,
+            d: 0,
+            el: clip,
+            group: group,
+            els: els,
+            moved: false
+          };
+          (group ? els.map(x => x.el) : [clip]).forEach(el => el.classList.add('dragging', 'drag-' + mode));
+          try { cv.setPointerCapture(e.pointerId); } catch (_) {}
         };
-        (group ? els.map(x => x.el) : [clip]).forEach(el => el.classList.add('dragging', 'drag-' + mode));
-        try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+        armOrBegin(e, begin, () => {
+          /* 短按 = 只选中这个元件和这条长条，不切子轨、不动帧号 */
+          api.selectTrack(cid);
+          render();
+        });
         e.preventDefault();
         return;
       }
 
-      /* v7.4.5：面板任意空白处都能起框选 —— 轨道行、左侧标签列、刻度尺、行间空隙都算。
+      /* v7.4.5：面板任意空白处都能起框选 —— 轨道行、左侧标签列、行间空隙都算
+         （刻度尺现在归「刷时间线」，长条 / 关键帧 / 按钮在上面各自 return）。
          短按 = 跳帧 + 选中这一行的元件；按住拖 = 框选多条长条。
-         （长条、关键帧、把手、缩放/眼睛按钮在上面已经各自 return，摸不到这里。） */
+         这一处**不加长按门槛**：空白处本来就是手机上唯一能原生滚动的区域，
+         一加延时反而把滚动抢走了。 */
       const rowEl = e.target.closest('.ts-row[data-id]');
-      /* 列的起点以任意一条 lane 为准：它们左端对齐，横向滚动时也跟着一起动；
-         canvas 本身是视口，拿它算会在滚动后错位。 */
-      const refEl = e.target.closest('.ts-lane') || cv.querySelector('.ts-lane') || cv;
-      const lr = refEl.getBoundingClientRect();
+      const lr = laneRef().getBoundingClientRect();
       paintMarquee();   /* v7.4.6：每次起手重新按当前主题上色 */
       drag = {
         kind: 'marquee',
@@ -1150,6 +1290,22 @@
     });
 
     cv.addEventListener('pointermove', (e) => {
+      /* 长按还没到就划走了：不是拖长条，是想滚轨道 —— 改成平移 */
+      if (press && !drag) {
+        const dx = e.clientX - press.sx, dy = e.clientY - press.sy;
+        if (Math.abs(dx) > PAN_SLOP || Math.abs(dy) > PAN_SLOP) {
+          clearPress();
+          const sc = $('tsScroll');
+          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop };
+        }
+        return;
+      }
+      if (pan) {
+        pan.sc.scrollLeft = pan.left - (e.clientX - pan.x);
+        pan.sc.scrollTop = pan.top - (e.clientY - pan.y);
+        return;
+      }
+
       if (!drag) {
         /* 光标提示：手柄处左右箭头，关键帧上抓手 */
         const clip = e.target.closest('.ts-clip');
@@ -1158,6 +1314,16 @@
           const dx = e.clientX - rect.left;
           clip.style.cursor = (dx <= HANDLE_W || rect.width - dx <= HANDLE_W) ? 'ew-resize' : 'grab';
         }
+        return;
+      }
+
+      /* 刷时间线：手指划到哪一帧就跳哪一帧 */
+      if (drag.kind === 'scrub') {
+        const i = frameAt(e.clientX);
+        if (i === drag.last) return;
+        drag.last = i;
+        drag.moved = true;
+        api.goToFrame(i);
         return;
       }
 
@@ -1199,8 +1365,8 @@
       const raw = Math.round((e.clientX - drag.startX) / colW);
       let d = raw;
       if (drag.group) {
-        /* 整组平移：所有选中长条共用一套夹紧区间 */
-        const bd = multiMoveBounds(drag.group);
+        /* 整组：抓中间一起平移；抓两端一起拉长 / 缩短 */
+        const bd = (drag.mode === 'm') ? multiMoveBounds(drag.group) : multiResizeBounds(drag.group, drag.mode);
         d = Math.max(bd.lo, Math.min(bd.hi, d));
       } else if (drag.mode === 'm') {
         const bd = moveBounds(drag.id, drag.a, drag.b);
@@ -1219,9 +1385,15 @@
       /* 只动 DOM，不碰数据 */
       if (drag.group) {
         drag.els.forEach((x) => {
-          x.el.style.left = ((x.c.a + d) * colW) + 'px';
+          const c = x.c;
+          let ta = c.a, tb = c.b;
+          if (drag.mode === 'm') { ta = c.a + d; tb = c.b + d; }
+          else if (drag.mode === 'r') { tb = c.b + d; }
+          else { ta = c.a + d; }
+          x.el.style.left = (ta * colW) + 'px';
+          x.el.style.width = Math.max(colW, (tb - ta + 1) * colW) + 'px';
           const lab = x.el.querySelector('.ts-lab');
-          if (lab) lab.textContent = (x.c.a + d + 1) + (x.c.b > x.c.a ? '–' + (x.c.b + d + 1) : '');
+          if (lab) lab.textContent = (ta + 1) + (tb > ta ? '–' + (tb + 1) : '');
         });
         return;
       }
@@ -1240,6 +1412,20 @@
     });
 
     const finish = (e) => {
+      const isCancel = !!(e && e.type === 'pointercancel');
+      /* 长按没到就抬手 = 短按：走 tap，不碰数据（被系统打断取消时不算点选） */
+      if (press) {
+        const p = press;
+        clearPress();
+        try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (p.tap && !isCancel) p.tap();
+        return;
+      }
+      if (pan) {
+        pan = null;
+        try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+        return;
+      }
       if (!drag) return;
       const st = drag;
       drag = null;
@@ -1248,23 +1434,15 @@
       if (st.els) st.els.forEach(x => x.el.classList.remove('dragging'));
       else if (st.el) st.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m');
 
+      /* 刷时间线：一路上已经跳过去了，松手什么都不用做，也不进历史 */
+      if (st.kind === 'scrub') return;
+
       if (st.kind === 'marquee') {
         if (!st.moved) {
-          /* 短按 = 跳帧；点在哪一行就把「这一行的长条」设为选中（已经选中的不会被清掉）。
+          /* 短按 = 跳帧 + 选中这一行的长条（已经选中的不会被清掉）。
              v7.4.6：以前这里会 clearClipSel + clearKeySel —— 点一下旁边空白，
-             正在编辑的那条轨就掉了选中，很别扭。现在只有 Esc 才清选择。
-             先跳帧再选：goToFrame 会重建 AppState.objects，反过来的话选中的是旧对象。 */
-          if (st.i >= 0 && st.i < totalFrames()) api.goToFrame(st.i);
-          if (st.rowId) {
-            lastPickedId = st.rowId;
-            const segEl = clipAt(st.rowId, st.i);
-            if (segEl) {
-              setClipSel([{ id: st.rowId, a: +segEl.dataset.a, b: +segEl.dataset.b }]);
-            }
-            api.selectTrack(st.rowId);
-            markRow(st.rowId);
-          }
-          render();
+             正在编辑的那条轨就掉了选中，很别扭。现在只有 Esc 才清选择。 */
+          tapFrameAt(st.i, st.rowId);
           return;
         }
         const hits = clipsInRect(st.rect || { x: 0, y: 0, w: 0, h: 0 });
@@ -1278,22 +1456,15 @@
         /* 主选 = 最上面那条；用户框完直接按 Delete 就能整段删 */
         setClipSel(hits, hits[0]);
         render();
-        api.toast(T('track.marqueeDone', '已选中 %n 段长条：可以整组拖动，或按删除').replace('%n', hits.length));
+        api.toast(T('track.marqueeDone', '已选中 %n 段长条：可以整组拖动、整组拉长 / 缩短，或按删除').replace('%n', hits.length));
         return;
       }
 
       if (st.kind === 'keys') {
         if (!st.moved) {
           /* v7.4.4：点轨道上的关键帧也算「点了这一行」，顺手把这行的元件选上，
-             用户点完就能直接去左上属性面板改它。
-             v7.4.7：单颗点时先把播放头挪到这颗关键帧上 —— 不然点在一条
-             「这一帧本来空白」的轨上，selectTrack 找不到元件，属性面板是空的。 */
-          if (st.items.length) {
-            if (st.items.length === 1 && st.items[0].i !== api.currentFrame()) {
-              api.goToFrame(st.items[0].i);
-            }
-            api.selectTrack(st.items[0].id);
-          }
+             用户点完就能直接去左上属性面板改它。 */
+          tapKeys(st.items);
           return;
         }
         if (st.items.length === 1) {
@@ -1315,7 +1486,12 @@
         return;
       }
       if (st.group) {
-        withTx(T('track.moveClipLabel', '整体移动长条'), () => applyClipsMove(st.group, st.d));
+        /* 整组：平移 / 整组拉长缩短 —— 一步撤销 */
+        withTx(st.mode === 'm' ? T('track.moveClipLabel', '整体移动长条') : T('track.resizeClipLabel', '整体拉长 / 缩短长条'),
+          () => {
+            if (st.mode === 'm') applyClipsMove(st.group, st.d);
+            else applyClipsResize(st.group, st.d, st.mode);
+          });
       } else {
         withTx(T('track.dragLabel', '调整轨道'), () => applyDrag(st, st.d));
       }
@@ -1492,6 +1668,14 @@
       bindDrag();
       bindToolbar();
       bindKeys();
+
+      /* v7.4.9：视口宽度一变，样式断点可能换掉左列宽（108 ↔ 84）—— 量到的宽度变了就重画，
+         否则播放头会按旧的左列宽偏着走。 */
+      window.addEventListener('resize', () => {
+        if (!enabled) return;
+        if (readGutter() === gutterPx) return;
+        render();
+      });
 
       /* 完全被动地跟随现有事件总线：不改 app.js 里任何一个函数，
          现有功能该发什么事件照发，这边只是「听到就顺手更新一下自己」。 */

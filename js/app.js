@@ -8576,6 +8576,14 @@ function importActionPresets() {
   const tweenMoreMenu = document.getElementById('tweenMoreMenu');
   const tweenEaseName = document.getElementById('tweenEaseName');
   const tweenEaseMenu = document.getElementById('tweenEaseMenu');
+  /* v7.4.9：把曲线菜单挂到 <body> 下（它本来就是 position:fixed，位置全由 positionEaseMenu 算）。
+     之前它留在 #timeline 里，而 #timeline 有 z-index:20 会形成层叠上下文 ——
+     菜单自己的 z-index:60 只在 #timeline 内部有效，一旦控制面板（#ui，z-index 26）展开，
+     整个菜单就被压在面板底下：表现出来就是「点曲线没反应 / 点不开」。
+     这个 bug 之前用「补一次位移」修过好几回，根子在层叠上下文，不在坐标，所以老复发。 */
+  if (tweenMoreMenu && tweenMoreMenu.parentNode !== document.body) {
+    document.body.appendChild(tweenMoreMenu);
+  }
   /* v7.0.5：时间轴上的「⚙️ 高级设置」按钮已移除（内容搬到控制面板底部栏的「高级」分区），
      这里保持判空，v6/v7 的调用点不用逐个改。 */
   const advSettingsBtn = document.getElementById('btnAdvancedSettings');
@@ -15124,7 +15132,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       const isCollapsed = ui.classList.contains('collapsed');
 
       let bottomOffset = 0;
-      if (timelineDock === 'bottom' && visible) {
+      /* v7.4.9：轨道模式下面板**盖**在轨道面板上（z 轴），不再把它顶开（y 轴）。
+         理由：轨道面板本来就贴着屏幕底边，面板一展开就把它整块挤到看不清，
+         而且面板高度/轨道高度任一个刚变过，这个偏移就会算错，露出一条不三不四的轨道。
+         直接叠上去最干脆 —— 收起面板就看见轨道，位置也不来回跳。 */
+      const trackModeOn = !!(tl && tl.classList.contains('track-mode'));
+      if (timelineDock === 'bottom' && visible && !trackModeOn) {
         bottomOffset = h;
       }
 

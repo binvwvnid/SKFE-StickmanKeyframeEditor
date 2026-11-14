@@ -1,7 +1,7 @@
 /* SKFE locale: English */
 window.SKFE_LOCALES = window.SKFE_LOCALES || {};
 window.SKFE_LOCALES['en'] = {
-  "app.title": "SKFE | Stickman Keyframe Editor v7.4.8",
+  "app.title": "SKFE | Stickman Keyframe Editor v7.4.9",
   "tbox.move": "Drag to move the whole object",
   "tbox.scale": "Drag to scale proportionally (enable Free Stretch to scale X/Y separately)",
   "tbox.rotate": "Drag to rotate",
@@ -23,7 +23,7 @@ window.SKFE_LOCALES['en'] = {
   "cameraPreview.closeTitle": "Close preview",
   "cameraPreview.hint": "Always shows the camera export view for the current frame",
   "timeline.show": "Frame panel",
-  "watermark.title": "SKFE | Stickman Keyframe Editor v7.4.8",
+  "watermark.title": "SKFE | Stickman Keyframe Editor v7.4.9",
   "watermark.author": "by binvwvnid · QQ group: 1121039855",
   "panel.title": "Control panel",
   "lang.toggle": "EN/中",
@@ -596,7 +596,8 @@ window.SKFE_LOCALES['en'] = {
 "track.keyCopyLabel": "Copy keyframe to drop point",
 "track.moveClipLabel": "Move bars together",
 "track.marqueeNone": "Nothing inside the marquee — drag it over the bars",
-"track.marqueeDone": "%n bar(s) selected: drag them together, or press Delete",
+"track.resizeClipLabel": "Stretch / trim bars together",
+"track.marqueeDone": "%n bar(s) selected: drag, stretch / trim together, or press Delete",
 "track.delDoneMulti": "%n bar(s) deleted",
 "track.keyNoPose": "No drawing at or near this frame — draw something first",
 "track.keyDelLabel": "Delete keyframes",

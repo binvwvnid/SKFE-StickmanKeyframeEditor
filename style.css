@@ -1741,9 +1741,9 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #timeline.timeline-top .adv-panel { /* 置顶状态下的高级设置面板 */
     top: calc(100% + 10px); bottom: auto; /* 面板显示在时间轴下方 */
   } /* 样式结束 */
-  #timeline.timeline-top .tween-more-menu { /* 置顶状态下的补间菜单 */
-    top: calc(100% + 8px); bottom: auto; /* 菜单显示在按钮下方 */
-  } /* 样式结束 */
+  /* v7.4.9：原来这里有一条 #timeline.timeline-top .tween-more-menu { top: calc(100% + 8px) }
+     的旧规则（position:absolute 时代留下的）。菜单现在由 JS 挪到 <body> 下，
+     这条选择器再也命中不了 —— 留着只会让人以为它在起作用，所以删掉。 */
   #timeline.timeline-top #btnHideTimeline { /* 置顶状态下的收起按钮 */
     top: auto; bottom: -30px; left: 20px; right: auto; /* 位置在时间轴下方偏左 */
   } /* 样式结束 */
@@ -1923,7 +1923,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #timeline.track-mode #frameBar,
   #timeline.track-mode #kfCurveWrap { display: none; }
   #timeline.track-mode #trackStrip { display: block; }
-  #trackStrip { display: none; flex: 1 1 auto; min-height: 0; margin: 2px -10px -4px; }
+  #trackStrip { display: none; flex: 1 1 auto; min-height: 0; margin: 2px -10px -4px; --ts-gutter: 108px; }
   #trackStrip[hidden] { display: none !important; }
 
   /* 轨道模式下控制栏只留「播放组 + 分割 / 删除 / 关键帧 / 插 N 帧 / 曲线」 */
@@ -1957,10 +1957,12 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     background: var(--bg-panel);
   }
 
-  /* 左列：吸在横向滚动的最左边，不跟着滚走 */
+  /* 左列：吸在横向滚动的最左边，不跟着滚走。
+     宽度只有一个真值来源 —— --ts-gutter（手机断点下由 CSS 改成 84），
+     JS 靠它算播放头位置，所以这里千万别再写死像素值。 */
   .ts-gutter {
     position: sticky; left: 0; z-index: 4;
-    width: 108px; min-width: 108px; box-sizing: border-box;
+    width: var(--ts-gutter, 108px); min-width: var(--ts-gutter, 108px); box-sizing: border-box;
     display: flex; align-items: center; gap: 5px; padding: 0 8px;
     background: var(--bg-panel);
     border-right: 1px solid var(--border-color);
@@ -1988,7 +1990,8 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     background-image: repeating-linear-gradient(to right, var(--border-color) 0 1px, transparent 1px var(--cw, 26px));
     background-repeat: repeat-x;
   }
-  .ts-ruler { border-bottom: 1px solid var(--border-color); }
+  /* 刻度尺那一栏：v7.4.9 起按住拖 = 刷时间线（所以 touch-action 关掉原生滚动） */
+  .ts-ruler { border-bottom: 1px solid var(--border-color); touch-action: none; cursor: ew-resize; }
   .ts-gutter-head { justify-content: flex-start; gap: 4px; font-size: 11px; color: var(--text-sub); }
   .ts-gutter-head > span { margin-right: auto; }
   /* 刻度尺左边的放大 / 缩小 */
@@ -2096,7 +2099,10 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .ts-empty { padding: 18px 14px; font-size: 12px; color: var(--text-sub); }
 
   @media (max-width: 768px) { /* 手机上轨道区更紧凑 */
-    .ts-gutter { width: 84px; min-width: 84px; padding: 0 6px; }
+    /* v7.4.9：左列窄一点，但只改这一个变量 —— JS 读它算播放头，
+       以前这里单独把 .ts-gutter 写成 84px，JS 还按 108 算，播放头就整体右偏一格多。 */
+    #trackStrip { --ts-gutter: 84px; }
+    .ts-gutter { padding: 0 6px; }
     #btnTrackMode { padding: 4px 10px; font-size: 11px; }
     /* 手机上控制栏本来就横向滚动，复制/粘贴只留图标，把位置让给播放组 */
     #btnTrackKeyCopy span, #btnTrackKeyPaste span { display: none; }

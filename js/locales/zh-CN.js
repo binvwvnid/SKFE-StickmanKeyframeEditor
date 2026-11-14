@@ -1,7 +1,7 @@
 /* SKFE locale: Simplified Chinese (default) */
 window.SKFE_LOCALES = window.SKFE_LOCALES || {};
 window.SKFE_LOCALES['zh-CN'] = {
-  "app.title": "SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.4.8",
+  "app.title": "SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.4.9",
   "tbox.move": "拖动整体移动",
   "tbox.scale": "拖动等比缩放（开启自由拉伸后按 X/Y 分别拉伸）",
   "tbox.rotate": "拖动旋转",
@@ -23,7 +23,7 @@ window.SKFE_LOCALES['zh-CN'] = {
   "cameraPreview.closeTitle": "关闭预览",
   "cameraPreview.hint": "始终显示当前帧的摄像机导出画面",
   "timeline.show": "帧动画面板",
-  "watermark.title": "SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.4.8",
+  "watermark.title": "SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.4.9",
   "watermark.author": "作者 binvwvnid · QQ 交流群 1121039855",
   "panel.title": "控制面板",
   "lang.toggle": "中/EN",
@@ -595,7 +595,8 @@ window.SKFE_LOCALES['zh-CN'] = {
 "track.keyCopyLabel": "复制关键帧到落点",
 "track.moveClipLabel": "整体移动长条",
 "track.marqueeNone": "框选范围内没有长条 —— 要把框拖到长条上",
-"track.marqueeDone": "已选中 %n 段长条：可以整组拖动，或按删除",
+"track.resizeClipLabel": "整体拉长 / 缩短长条",
+"track.marqueeDone": "已选中 %n 段长条：可以整组拖动、整组拉长 / 缩短，或按删除",
 "track.delDoneMulti": "已删除 %n 段",
 "track.keyNoPose": "这一帧和前后都没有画面，先画点东西再打关键帧",
 "track.keyDelLabel": "删除关键帧",
