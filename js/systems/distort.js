@@ -1072,10 +1072,11 @@ SKFE.systems.distort = (function () {
     const toS = (p) => call('worldToScreen', p);
     const hs = handlePositions(mp);
 
-    /* v5.5.0：网格只在「真的在拖控制点」时画。
-       常驻网格会盖住画面，让人判断不了预览和导出的真实效果。
-       拖动是唯一需要看清网格的时刻，其余时间只保留外轮廓。 */
-    const showMesh = !!dragState;
+    /* v7.5.3：四角形变不再给任何元件叠加辅助网格。
+       网格（3×3 线 + 角点连线）会盖住半透明素材与地面阴影，
+       在网格贴膜后的画面上形成明显的遮挡/裁切错觉。
+       现在只保留外轮廓 + 8 个控制点，变形本身不受影响。 */
+    const showMesh = false;
 
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);

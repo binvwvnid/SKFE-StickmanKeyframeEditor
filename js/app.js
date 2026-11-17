@@ -62,7 +62,7 @@
   const targetFigureSelect = document.getElementById('targetFigure');
   const uiPanel = document.getElementById('ui');
   const exportHDCheckbox = document.getElementById('exportHD');
-  const btnToggleLock = document.getElementById('btnToggleLock');
+  const btnToggleLock = document.getElementById('btnStripLock');
   const timelineEl = document.getElementById('timeline');
 
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 768;
@@ -141,6 +141,21 @@
   let thumbVersion = 0;
   /* 子轨道缩略图缓存：key = trackId + '|' + frameIndex */
   const trackThumbCache = new Map();
+
+  /* perf-v7.5.1：缩略图惰性生成。
+     旧实现在 updateFrameBar 的逐帧循环里同步 createElement('canvas') + renderScene +
+     toDataURL，900 帧时一次冷渲染约 360ms。这里把生成改为：
+       1) 复用同一张离屏 canvas；
+       2) 只把任务入队，由 requestIdleCallback / rAF 分批生成（可见帧优先）；
+       3) 复用帧块 DOM 与 <img> 节点，只更新 src。
+     缓存校验仍沿用 thumbVersion（全局失效作为正确性兜底），但失效本身是 O(F) 的
+     删缓存操作，不再触发任何同步 PNG 编码。 */
+  const THUMB_SIZE = 96;
+  let thumbCanvas = null;
+  let thumbCtx = null;
+  let thumbQueue = [];
+  let thumbScheduled = false;
+  let thumbIdleId = 0;
 
   /* 多轨道：'all' = 全局主时间轴；其它值 = 元件 id 的子轨道 */
   let otherTracksVisibility = 'show';
@@ -941,6 +956,150 @@ function syncDistortToAllFrames(obj) {
     });
   }
 
+  /* ==================== 项目库（IndexedDB：导入自动保存 / 帧数 / 删除） ====================
+     localStorage 通常只有 ~5MB，一份 900 帧工程就有 1.7MB；这里改用 IndexedDB，
+     配额按磁盘计算，在桌面应用里基本没有空间顾虑。写库失败只提示，不影响导入主流程。 */
+  const PROJECT_LIB_DB_NAME = 'skfe_project_library_v1';
+  const PROJECT_LIB_STORE = 'projects';
+  let projectLibDB = null;
+  let projectLibOpenPromise = null;
+
+  function openProjectLibDB() {
+    if (projectLibOpenPromise) return projectLibOpenPromise;
+    projectLibOpenPromise = new Promise((resolve, reject) => {
+      try {
+        const req = indexedDB.open(PROJECT_LIB_DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(PROJECT_LIB_STORE)) {
+            db.createObjectStore(PROJECT_LIB_STORE, { keyPath: 'id' });
+          }
+        };
+        req.onsuccess = (e) => { projectLibDB = e.target.result; resolve(projectLibDB); };
+        req.onerror = (e) => reject(e.target.error);
+      } catch (err) { reject(err); }
+    });
+    return projectLibOpenPromise;
+  }
+
+  function saveProjectToLibrary(data, name) {
+    const rec = {
+      id: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+      name: String(name || tr2('project.unnamed', '未命名项目')),
+      frameCount: Array.isArray(data && data.frames) ? data.frames.length : 0,
+      savedAt: Date.now(),
+      version: (data && data.version) || PROJECT_VERSION,
+      data: data
+    };
+    return openProjectLibDB().then(db => new Promise((resolve, reject) => {
+      try {
+        const tx = db.transaction(PROJECT_LIB_STORE, 'readwrite');
+        tx.objectStore(PROJECT_LIB_STORE).put(rec);
+        tx.oncomplete = () => resolve(rec);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      } catch (err) { reject(err); }
+    }));
+  }
+
+  function listProjectsFromLibrary() {
+    return openProjectLibDB().then(db => new Promise((resolve, reject) => {
+      try {
+        const req = db.transaction(PROJECT_LIB_STORE, 'readonly').objectStore(PROJECT_LIB_STORE).getAll();
+        req.onsuccess = () => resolve((req.result || []).sort((a, b) => b.savedAt - a.savedAt));
+        req.onerror = () => reject(req.error);
+      } catch (err) { reject(err); }
+    }));
+  }
+
+  function getProjectFromLibrary(id) {
+    return openProjectLibDB().then(db => new Promise((resolve, reject) => {
+      try {
+        const req = db.transaction(PROJECT_LIB_STORE, 'readonly').objectStore(PROJECT_LIB_STORE).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      } catch (err) { reject(err); }
+    }));
+  }
+
+  function deleteProjectFromLibrary(id) {
+    return openProjectLibDB().then(db => new Promise((resolve, reject) => {
+      try {
+        const tx = db.transaction(PROJECT_LIB_STORE, 'readwrite');
+        tx.objectStore(PROJECT_LIB_STORE).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      } catch (err) { reject(err); }
+    }));
+  }
+
+  /* 项目库列表：与动作库共用 .preset-item 样式，显示「名称 / 帧数 · 时间」，可打开、可删除 */
+  function updateProjectListUI() {
+    const listEl = document.getElementById('projectList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    listProjectsFromLibrary().then(items => {
+      if (!items.length) {
+        listEl.innerHTML = tr2('project.libEmpty', '<div class="empty-state">暂无项目，导入项目后会自动保存到这里</div>');
+        return;
+      }
+      items.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'preset-item';
+
+        const info = document.createElement('div');
+        info.className = 'preset-info';
+        const name = document.createElement('div');
+        name.className = 'preset-name';
+        name.textContent = p.name || tr2('project.unnamed', '未命名项目');
+        const meta = document.createElement('div');
+        meta.className = 'preset-meta';
+        let dateText = '';
+        try { dateText = new Date(p.savedAt).toLocaleString(); } catch (_) {}
+        meta.textContent = (p.frameCount || 0) + tr2('timeline.frameSuffix', ' 帧') + (dateText ? ' · ' + dateText : '');
+        info.appendChild(name);
+        info.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'preset-actions';
+        const openBtn = document.createElement('button');
+        openBtn.className = 'btn-soft btn-xs';
+        openBtn.textContent = tr2('project.libOpen', '打开');
+        openBtn.onclick = (e) => {
+          e.stopPropagation();
+          getProjectFromLibrary(p.id).then(data => {
+            if (!data) return;
+            applyLoadedProject(data).then(() => {
+              EventBus.emit('history:save', '打开项目库项目');
+              alert(tr2('project.libLoadOk', '项目库项目已打开'));
+            });
+          }).catch(err => alert(tr2('project.libLoadFail', '打开失败: ') + err.message));
+        };
+        const delBtn = document.createElement('div');
+        delBtn.className = 'preset-del';
+        delBtn.innerHTML = ic('close');
+        delBtn.title = tr2('project.libDelete', '删除项目');
+        delBtn.onclick = (e) => {
+          e.stopPropagation();
+          if (!confirm(tr2('project.libDelConfirm', '确定删除这个项目吗？'))) return;
+          deleteProjectFromLibrary(p.id).then(updateProjectListUI)
+            .catch(err => alert(tr2('project.libDelFail', '删除失败: ') + err.message));
+        };
+        actions.appendChild(openBtn);
+        actions.appendChild(delBtn);
+
+        div.appendChild(info);
+        div.appendChild(actions);
+        listEl.appendChild(div);
+      });
+    }).catch(err => {
+      const box = document.createElement('div');
+      box.className = 'empty-state';
+      box.textContent = tr2('project.libUnavailable', '项目库不可用：') + String((err && err.message) || err);
+      listEl.appendChild(box);
+    });
+  }
+
   function importProjectJSON(file) {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -959,6 +1118,11 @@ function syncDistortToAllFrames(obj) {
           EventBus.emit('history:save', '导入项目');
           const n = data.version || 1;
           alert(n >= 3 ? tr2('project.importOk', '项目导入成功') : tr2('project.importOkOld', '项目导入成功（旧格式 v') + n + tr2('project.importOkOldTail', '，已按普通帧加载）'));
+          /* v7.5.2：导入即自动进项目库（IndexedDB），列表显示帧数，可打开/删除。
+             写库失败不影响导入结果，只记录到控制台。 */
+          saveProjectToLibrary(data, (file && file.name ? file.name : 'project').replace(/\.json$/i, ''))
+            .then(updateProjectListUI)
+            .catch(err => console.warn('[ProjectLibrary] 自动保存导入项目失败', err));
         });
       } catch (err) {
         alert(tr2('project.importFail', '导入失败: ') + err.message);
@@ -967,21 +1131,25 @@ function syncDistortToAllFrames(obj) {
     reader.readAsText(file);
   }
 
+  function buildCurrentProjectData() {
+    return {
+      version: PROJECT_VERSION,
+      minVersion: PROJECT_MIN_VERSION,
+      frames: serializeFrames(),
+      tracks: serializeTracks(),
+      currentFrameIndex: AppState.currentFrameIndex, defaultFPS,
+      groundLineEnabled, groundLineY,
+      onionEnabled, onionBefore, onionAfter,
+      canvasBounds: AppState.canvasBounds, canvasBoundsEnabled: AppState.canvasBoundsEnabled,
+      pageBgColor, gridEnabled, gridSize,
+      canvasMaskEnabled, canvasMaskAlpha,
+      canvasMaskBgColor, canvasMaskGridColor, // 新增
+    };
+  }
+
   function saveProjectToLocal() {
     try {
-      const projectData = {
-        version: PROJECT_VERSION,
-        minVersion: PROJECT_MIN_VERSION,
-        frames: serializeFrames(),
-        tracks: serializeTracks(),
-        currentFrameIndex: AppState.currentFrameIndex, defaultFPS,
-        groundLineEnabled, groundLineY,
-        onionEnabled, onionBefore, onionAfter,
-        canvasBounds: AppState.canvasBounds, canvasBoundsEnabled: AppState.canvasBoundsEnabled,
-        pageBgColor, gridEnabled, gridSize,
-        canvasMaskEnabled, canvasMaskAlpha,
-        canvasMaskBgColor, canvasMaskGridColor, // 新增
-      };
+      const projectData = buildCurrentProjectData();
       localStorage.setItem(PROJECT_SAVE_KEY, JSON.stringify(projectData));
       alert(tr2('project.savedLocal', '已保存到本地'));
     } catch (err) {
@@ -1016,6 +1184,19 @@ function syncDistortToAllFrames(obj) {
   };
   document.getElementById('btnSaveProjectLocal').onclick = saveProjectToLocal;
   document.getElementById('btnLoadProjectLocal').onclick = loadProjectFromLocal;
+  {
+    const btnLib = document.getElementById('btnSaveProjectToLibrary');
+    if (btnLib) btnLib.onclick = () => {
+      const data = buildCurrentProjectData();
+      const name = tr2('project.libAutoName', '项目 ') + new Date().toLocaleString();
+      saveProjectToLibrary(data, name)
+        .then(() => {
+          updateProjectListUI();
+          alert(tr2('project.libSaved', '已保存到项目库'));
+        })
+        .catch(err => alert(tr2('project.libSaveFail', '保存到项目库失败: ') + err.message));
+    };
+  }
 
   /* ==================== IndexedDB 自动存档 ==================== */
 
@@ -3616,10 +3797,14 @@ function importActionPresets() {
     const savedCtx = ctx;
     const savedQueue = renderQueue;
     let ok = true;
+    let deferredGlow = null;
     ctx = sctx;
     renderQueue = [];
     try {
-      queueFigure(f, false, isExporting, Object.assign({}, opts, { __noDistort: true }));
+      queueFigure(f, false, isExporting, Object.assign({}, opts, {
+        __noDistort: true,
+        __deferGlow: (fn) => { deferredGlow = fn; }
+      }));
       const items = renderQueue;
       items.sort((a, b) => a.level - b.level);
       for (const it of items) it.draw();
@@ -3647,6 +3832,28 @@ function importActionPresets() {
            两者都没开 = 纯预览态，只留关节点。 */
       }
     });
+
+    /* v7.5.5：描边阴影单独在主画布上一次性绘制。
+       它原本和人物一起被画进 scratch，再走 16×16 网格贴膜；半透明阴影在
+       相邻切片边缘重叠会叠深，形成截图里那种斜向网格纹。
+       这里用对象中心 + 两条盒基向量求「未变形世界 → 变形后世界」仿射，
+       再让 glowDraw 自己按世界坐标 drawImage，整张阴影只画一次，无接缝。 */
+    if (typeof deferredGlow === 'function') {
+      renderQueue.push({
+        level: minOwnLayer - 1,
+        draw: () => {
+          /* v7.5.7：这里【不能】再叠任何仿射。drawFigureGlow 内部：
+             · getObjectBounds() 已经把扭曲四角并进包围盒（变形后坐标）；
+             · 它自己的 renderScene([f], ...) 也会走同一套四角扭曲贴膜生成剪影；
+             也就是说 glowDraw 产出的阴影已经位于「变形后世界坐标」。
+             之前在这里补的 affineFromTriPoints 仿射等于二次变形，
+             导致 X/Y=0 时描边仍明显偏向一侧。直接播放即可：
+             defer 本身已经让它避开 scratch 的 16×16 网格贴膜，不会带回网格纹。 */
+          try { deferredGlow(); }
+          catch (err) { try { console.warn('[distort] 描边阴影绘制失败', err); } catch (_) {} }
+        }
+      });
+    }
 
     /* v5.5.0：变形状态下恢复关节手柄。
        手柄画在「映射后」的位置（和用户看到的图像完全重合），
@@ -3728,20 +3935,20 @@ function importActionPresets() {
     const glowOn = f.glow && f.glow.enabled &&
       ((+f.glow.blur || 0) > 0 || (+f.glow.spread || 0) > 0 || (+f.glow.offsetX || 0) !== 0 || (+f.glow.offsetY || 0) !== 0);
     if (!isGhost && glowOn) {
-      renderQueue.push({
-        level: minOwnLayer - 1,
-        /* 包一层 try/catch：描边阴影出任何岔子都只是「没有阴影」，
-           绝不能把人物的绘制一起带崩（否则整个画布都画不出来）。 */
-        /* 注意：这里**不能**套 wrapFig。剪影是在离屏里用 renderScene 重画的，
-           人物自身的 f.rot / f.mirror 已经在那一次里烘焙进去了；再套一层 wrapFig
-           会把整张阴影贴图按 f.x/f.y 再转一次 —— 表现就是「影子转到人物另一边」。 */
-        draw: () => {
-          const st = ctx.save ? (ctx.save(), true) : false;
-          try { drawFigureGlow(f, j, curLW, radius, alphaMul, armLpts, armRpts, legLpts, legRpts); }
-          catch (err) { try { console.warn('[glow] 描边阴影绘制失败：', err); } catch (_) {} }
-          finally { if (st) { try { ctx.restore(); } catch (_) {} } }
-        }
-      });
+      /* 包一层 try/catch：描边阴影出任何岔子都只是「没有阴影」，
+         绝不能把人物的绘制一起带崩（否则整个画布都画不出来）。
+         注意：不能套 wrapFig —— 剪影离屏里已经烘焙了 f.rot / f.mirror。 */
+      const glowDraw = () => {
+        const st = ctx.save ? (ctx.save(), true) : false;
+        try { drawFigureGlow(f, j, curLW, radius, alphaMul, armLpts, armRpts, legLpts, legRpts); }
+        catch (err) { try { console.warn('[glow] 描边阴影绘制失败：', err); } catch (_) {} }
+        finally { if (st) { try { ctx.restore(); } catch (_) {} } }
+      };
+      /* v7.5.5：变形贴膜时不要把这个半透明阴影画进离屏画布。
+         16×16 切片之间为了消缝会重叠 1 像素，半透明像素叠加就会在阴影上
+         形成深色网格纹。交给 queueFigureBitmapWarp 在主画布上一次性绘制。 */
+      if (typeof opts.__deferGlow === 'function') opts.__deferGlow(glowDraw);
+      else renderQueue.push({ level: minOwnLayer - 1, draw: glowDraw });
     }
 
     if (!isGhost && f.shadowEnabled) {
@@ -7155,12 +7362,16 @@ function importActionPresets() {
     });
 
     if (AppState.selected && btnToggleLock) {
-      btnToggleLock.style.display = 'block';
+      btnToggleLock.style.display = 'inline-flex';
       if (AppState.selected.locked) {
-        btnToggleLock.innerHTML = ic('unlock') + tr2('lock.unlock', '解锁');
+        btnToggleLock.innerHTML = ic('unlock');   /* 只留图标，文字走 title / aria-label */
+        btnToggleLock.title = tr2('lock.unlock', '解锁');
+        btnToggleLock.setAttribute('aria-label', tr2('lock.unlock', '解锁'));
         btnToggleLock.classList.add('danger');
       } else {
-        btnToggleLock.innerHTML = ic('lock') + tr2('lock.lock', '锁定');
+        btnToggleLock.innerHTML = ic('lock');     /* 只留图标，文字走 title / aria-label */
+        btnToggleLock.title = tr2('lock.lock', '锁定');
+        btnToggleLock.setAttribute('aria-label', tr2('lock.lock', '锁定'));
         btnToggleLock.classList.remove('danger');
       }
     } else if (btnToggleLock) {
@@ -7175,6 +7386,7 @@ function importActionPresets() {
     btnToggleLock.onclick = () => {
       if (AppState.selected) {
         AppState.selected.locked = !AppState.selected.locked;
+        updateLayerList();   /* 立即刷新右端按钮的锁定/解锁图标与文字 */
         EventBus.emit('need:syncUI');
         EventBus.emit('need:render');
         EventBus.emit('history:save', '锁定/解锁对象');
@@ -7612,15 +7824,150 @@ function importActionPresets() {
   let pressTimer = null;
   let dragStartX = 0, dragStartY = 0;
 
+  /* perf-v7.5.1: 缩略图缓存的键 / 版本 / 惰性生成队列 */
+  function thumbKeyOf(idx, trackId) {
+    return (trackId == null ? 'main' : String(trackId)) + '|' + idx;
+  }
+  function revokeThumbURL(url) {
+    if (typeof url === 'string' && url.indexOf('blob:') === 0) {
+      /* 延迟回收：帧块可能还在显示这张图，立刻 revoke 会出现破图 */
+      setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, 2000);
+    }
+  }
+  function discardThumbEntry(entry) {
+    if (entry && entry.url) revokeThumbURL(entry.url);
+  }
+  let thumbGenSeq = 0;
+  const thumbTokens = new Map();
+  function bumpThumbToken(key) {
+    thumbTokens.set(key, (thumbTokens.get(key) || 0) + 1);
+  }
+  function thumbTokenOf(key) {
+    return thumbTokens.get(key) || 0;
+  }
+
   function invalidateFrameThumb(idx, trackId) {
-    if (AppState.frames[idx]) delete AppState.frames[idx]._thumb;
-    if (trackId != null) trackThumbCache.delete(String(trackId) + '|' + idx);
+    const key = thumbKeyOf(idx, trackId);
+    bumpThumbToken(key);
+    const fr = AppState.frames[idx];
+    if (fr && fr._thumb) { discardThumbEntry(fr._thumb); delete fr._thumb; }
+    if (trackId != null) {
+      discardThumbEntry(trackThumbCache.get(key));
+      trackThumbCache.delete(key);
+    }
+    /* 已入队但未生成的任务直接作废，避免旧姿态写回缓存 */
+    thumbQueue = thumbQueue.filter(t => t.key !== key);
   }
 
   function invalidateAllFrameThumbs() {
-    AppState.frames.forEach(fr => delete fr._thumb);
+    for (const fr of AppState.frames) {
+      if (fr && fr._thumb) { discardThumbEntry(fr._thumb); delete fr._thumb; }
+    }
+    trackThumbCache.forEach(discardThumbEntry);
     trackThumbCache.clear();
+    thumbQueue.length = 0;
+    thumbTokens.clear();
+    thumbGenSeq++;
+    thumbVersion++;
     bumpKfEval();
+  }
+
+  /* 生成一张缩略图：复用离屏 canvas + toBlob（编码不在同步渲染栈里） */
+  function getThumbCanvas() {
+    if (!thumbCanvas) {
+      thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = THUMB_SIZE;
+      thumbCanvas.height = THUMB_SIZE;
+      thumbCtx = thumbCanvas.getContext('2d');
+    }
+    return thumbCanvas;
+  }
+
+  function generateOneThumb(task) {
+    if (task.v !== thumbVersion) return;               /* 全局失效：丢弃 */
+    if (thumbTokenOf(task.key) !== task.token) return;   /* 单帧失效：丢弃 */
+    let url = null;
+    try {
+      const cv = getThumbCanvas();
+      renderFrameToDataURL(task.fr, THUMB_SIZE, THUMB_SIZE,
+        { transparent: true, ignoreCamera: !!task.ignoreCamera },
+        task.isSub ? task.trackId : undefined, cv);
+      const finish = (u) => {
+        if (u && (task.v !== thumbVersion || thumbTokenOf(task.key) !== task.token)) {
+          revokeThumbURL(u);
+          return;
+        }
+        const entry = { v: thumbVersion, url: u };
+        if (task.isSub) {
+          if (trackThumbCache.has(task.key)) { revokeThumbURL(u); return; }
+          trackThumbCache.set(task.key, entry);
+        } else {
+          const frNow = AppState.frames[task.idx];
+          if (!frNow || frNow !== task.fr || frNow._thumb) { revokeThumbURL(u); return; }
+          frNow._thumb = entry;
+        }
+        /* 帧块可能被复用给别的帧了，只有仍指向同一 key 的 <img> 才更新 */
+        if (task.img && task.img.isConnected && task.img.__thumbKey === task.key && u) {
+          task.img.src = u;
+        }
+      };
+      if (cv.toBlob && typeof URL.createObjectURL === 'function') {
+        cv.toBlob(function (blob) { finish(blob ? URL.createObjectURL(blob) : null); }, 'image/png');
+      } else {
+        finish(cv.toDataURL('image/png'));
+      }
+    } catch (_) {
+      /* 单帧缩略图失败不影响其它帧 */
+    }
+  }
+
+  function scheduleThumbBatch() {
+    if (thumbScheduled || !thumbQueue.length) return;
+    thumbScheduled = true;
+    const runBatch = (deadline) => {
+      thumbScheduled = false;
+      /* 当前帧附近的先生成：配合 scrollIntoView，可见帧最先出现 */
+      thumbQueue.sort((a, b) => Math.abs(a.idx - AppState.currentFrameIndex) - Math.abs(b.idx - AppState.currentFrameIndex));
+      let done = 0;
+      while (thumbQueue.length && done < 20) {
+        if (deadline && typeof deadline.timeRemaining === 'function' &&
+            deadline.timeRemaining() < 2 && done > 0) break;
+        generateOneThumb(thumbQueue.shift());
+        done++;
+      }
+      if (thumbQueue.length) scheduleThumbBatch();
+    };
+    if (typeof requestIdleCallback === 'function') {
+      thumbIdleId = requestIdleCallback(runBatch, { timeout: 200 });
+    } else {
+      setTimeout(() => runBatch(null), 16);
+    }
+  }
+
+  function queueThumb(key, idx, fr, isSub, trackId, ignoreCamera, img) {
+    if (!fr) return;
+    for (const t of thumbQueue) {
+      if (t.key === key) { if (img) t.img = img; return; }  /* 去重：复用最新节点 */
+    }
+    thumbQueue.push({
+      key, idx, fr, isSub, trackId: trackId, ignoreCamera: !!ignoreCamera, img,
+      v: thumbVersion, token: thumbTokenOf(key)
+    });
+    scheduleThumbBatch();
+  }
+
+  /* 命中缓存立即显示；未命中只入队，不在同步渲染栈里生成 PNG */
+  function applyFrameThumb(fr, idx, isSub, trackId, ignoreCamera, img) {
+    if (!img) return;
+    const key = thumbKeyOf(idx, isSub ? trackId : null);
+    img.__thumbKey = key;
+    const entry = isSub ? trackThumbCache.get(key) : (fr && fr._thumb);
+    if (entry && entry.v === thumbVersion && entry.url) {
+      img.src = entry.url;
+      return;
+    }
+    /* 保留旧图，惰性生成完成后再替换，避免快速滚动时出现空白闪烁 */
+    queueThumb(key, idx, fr, isSub, trackId, ignoreCamera, img);
   }
 
   /* v7.0.0：时间轴下方的段曲线可视化。
@@ -7762,7 +8109,9 @@ function importActionPresets() {
     if (hasKey && hasKey === hasContent) return 'key';
     if (hasKey) return 'partial';
     if (hasDerived) return 'derived';
-    return 'plain';
+    /* v7.5.3：有内容但既不是关键帧也不是补间帧 = 用户自己调节的帧。
+       这类帧不会被关键帧补间重新计算，轨道上单独标记，便于和补间帧区分。 */
+    return 'manual';
   }
 
   /* D10：这一帧「部分关键帧」到底是哪几个元件有锚点（主轨显示用） */
@@ -8036,14 +8385,30 @@ function importActionPresets() {
       bar.appendChild(dragIndicator);
     }
 
-    const chips = bar.querySelectorAll('.frame-chip');
-    chips.forEach(c => c.remove());
+    /* perf-v7.5.1: 帧块 DOM 复用 —— 900 帧时不再每帧 destroy/create。
+       监听器只在节点首次出现时挂一次，事件里从 chip.__frameIndex 读当前帧号。 */
+    const onFrameChipPointerDownRef = { fn: null };
+    const chips = Array.from(bar.querySelectorAll('.frame-chip'));
+    const frameCount = AppState.frames.length;
+    while (chips.length > frameCount) chips.pop().remove();
+    while (chips.length < frameCount) {
+      const c = document.createElement('div');
+      bar.insertBefore(c, dragIndicator);
+      chips.push(c);
+    }
 
     const kfSeg = kfSegRangeNow();
 
     AppState.frames.forEach((fr, i) => {
-      const chip = document.createElement('div');
+      const chip = chips[i];
+      /* 复位所有每帧变化的状态（旧实现靠重建节点来复位） */
       chip.className = 'frame-chip';
+      chip.style.transform = '';
+      chip.removeAttribute('title');
+      chip.removeAttribute('aria-label');
+      delete chip.dataset.kfPartial;
+      chip.dataset.index = i;
+      chip.__frameIndex = i;
       if (fr.isTween) chip.classList.add('tween-frame');
       const emptyTrackFrame = isSubTrackMode() && !getFrameTrackObject(fr, i);
       if (emptyTrackFrame) {
@@ -8053,63 +8418,70 @@ function importActionPresets() {
       }
       chip.dataset.index = i;
 
-      /* v7.0.0：关键帧 / 派生帧标记 + 整段高亮 */
+      /* v7.0.0：关键帧 / 派生帧标记 + 整段高亮
+         v7.5.3：三类帧在轨道上分开显示 —— 实心菱形=用户关键帧，
+         虚线框=自动补间帧，左下小圆点=用户手动调节帧（不参与补间）。 */
       const kfKind = kfChipKind(i);
       if (kfKind === 'key') chip.classList.add('kf-key');
       else if (kfKind === 'partial') { chip.classList.add('kf-partial'); chip.dataset.kfPartial = '1'; }
       else if (kfKind === 'derived') { chip.classList.add('tween-frame'); chip.classList.add('kf-nodrag'); }
+      else if (kfKind === 'manual') chip.classList.add('manual-frame');
       if (kfSeg && i >= kfSeg.lo && i <= kfSeg.hi) chip.classList.add('kf-seg');
 
+      /* 悬浮说明：把三类帧的语义直接写在轨道上；部分关键帧后面还会被
+         更详细的「谁有锚点」提示覆盖，这里只提供兜底说明。 */
+      if (!emptyTrackFrame) {
+        const kindTips = {
+          key: tr2('timeline.kindKey', '用户关键帧（锚点）'),
+          partial: tr2('timeline.kindPartial', '部分关键帧'),
+          derived: tr2('timeline.kindTween', '自动补间帧（由关键帧生成）'),
+          manual: tr2('timeline.kindManual', '手动调节帧（不会被关键帧补间覆盖）'),
+          blank: tr2('timeline.kindBlank', '空白帧')
+        };
+        chip.title = `第 ${i + 1} 帧 · ` + (kindTips[kfKind] || '');
+        chip.setAttribute('aria-label', chip.title);
+      }
+
       if (frameThumbMode) {
+        /* perf-v7.5.1: 复用 <img> / 序号节点；缩略图未命中时只入惰性队列 */
+        let im = chip.querySelector(':scope > img.frame-thumb');
+        let idxSpan = chip.querySelector(':scope > .frame-idx');
         if (!emptyTrackFrame) {
-          let url = null;
-          
-          // 新增：判断是否是摄像机轨道。如果是，就显示摄像机画面；如果不是，就忽略摄像机显示自身画面。
           const isCamTrack = isSubTrackMode() && isCameraTrackId(AppState.activeTrackId);
           const ignoreCamera = !isCamTrack;
-
-          if (isSubTrackMode()) {
-            const key = AppState.activeTrackId + '|' + i;
-            const hit = trackThumbCache.get(key);
-            if (hit && hit.v === thumbVersion) {
-              url = hit.url;
-            } else {
-              try {
-                const off = renderFrameToDataURL(fr, 96, 96, { transparent: true, ignoreCamera }, AppState.activeTrackId);
-                url = off.toDataURL('image/png');
-              } catch (_) { url = null; }
-              if (url) trackThumbCache.set(key, { v: thumbVersion, url });
-              else trackThumbCache.delete(key);
-            }
-          } else if (fr._thumb && fr._thumb.v === thumbVersion) {
-            url = fr._thumb.url;
-          } else {
-            try {
-              const off = renderFrameToDataURL(fr, 96, 96, { transparent: true, ignoreCamera });
-              url = off.toDataURL('image/png');
-            } catch (_) { url = null; }
-            fr._thumb = { v: thumbVersion, url };
-          }
-          if (url) {
-            const im = document.createElement('img');
+          if (!im) {
+            im = document.createElement('img');
             im.className = 'frame-thumb';
-            im.src = url;
-            chip.appendChild(im);
+            chip.insertBefore(im, idxSpan || null);
           }
+          applyFrameThumb(fr, i, isSubTrackMode(), AppState.activeTrackId, ignoreCamera, im);
+        } else if (im) {
+          im.remove();
         }
-        const idxSpan = document.createElement('span');
-        idxSpan.className = 'frame-idx';
+        if (!idxSpan) {
+          idxSpan = document.createElement('span');
+          idxSpan.className = 'frame-idx';
+          chip.appendChild(idxSpan);
+        }
         idxSpan.textContent = (i + 1);
-        chip.appendChild(idxSpan);
       } else {
+        const im = chip.querySelector(':scope > img.frame-thumb');
+        if (im) im.remove();
+        const idxSpan = chip.querySelector(':scope > .frame-idx');
+        if (idxSpan) idxSpan.remove();
         chip.textContent = (i + 1);
       }
 
       if (multiSelectMode && multiSelectedFrames.has(i)) chip.classList.add('multi-selected');
 
-      chip.addEventListener('pointerdown', (e) => {
-        if (isPlaying) return;
-        if (e.pointerType === 'mouse' && e.button !== 0) return;
+      /* perf-v7.5.1: 监听器只创建一次并挂在节点上，帧号从 __frameIndex 实时读取，
+         避免 900 帧 × 每次 render 重复创建 900 个闭包监听器。 */
+      if (!onFrameChipPointerDownRef.fn) {
+        onFrameChipPointerDownRef.fn = (e) => {
+          const chip = e.currentTarget;
+          const i = chip.__frameIndex;
+          if (i === undefined || isPlaying) return;
+          if (e.pointerType === 'mouse' && e.button !== 0) return;
 
         if (multiSelectMode) {
           if (multiSelectedFrames.has(i)) {
@@ -8251,9 +8623,12 @@ function importActionPresets() {
         document.addEventListener('pointermove', onPointerMove);
         document.addEventListener('pointerup', onPointerUp);
         document.addEventListener('pointercancel', onPointerUp);
-      });
-
-      bar.insertBefore(chip, dragIndicator);
+        };
+      }
+      if (!chip.__listenerAttached) {
+        chip.addEventListener('pointerdown', onFrameChipPointerDownRef.fn);
+        chip.__listenerAttached = true;
+      }
     });
 
     const newChips = bar.querySelectorAll('.frame-chip');
@@ -10688,7 +11063,8 @@ function importActionPresets() {
     return bboxToCrop(bbox, outW, outH, 1.15);
   }
 
-  function renderFrameToDataURL(frame, outW, outH, options, trackId) {
+  /* perf-v7.5.1: 末参 outCanvas 可选 —— 复用同一张离屏画布，避免每帧分配 canvas */
+  function renderFrameToDataURL(frame, outW, outH, options, trackId, outCanvas) {
     options = options || {};
     const transparent = !!options.transparent;
     const idx = (typeof frame === 'number') ? frame : AppState.frames.indexOf(frame);
@@ -10702,7 +11078,7 @@ function importActionPresets() {
     let objList = fullList;
     if (options.onlyId != null) objList = objList.filter(o => o && String(o.id) === String(options.onlyId));
     if (!options.includeHidden) objList = objList.filter(o => o && !o.hidden);
-    const off = document.createElement('canvas');
+    const off = outCanvas || document.createElement('canvas');
     off.width = outW; off.height = outH;
     const octx = off.getContext('2d');
     let scale, cx, cy, rotation = 0;
@@ -14359,6 +14735,34 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   glowBlur.addEventListener('input', e => { if (AppState.selected && AppState.selected.type === 'figure') { AppState.selected.glow.blur = +e.target.value; glowBlurVal.textContent = AppState.selected.glow.blur; setGlobalProp(AppState.selected, 'glow.blur', AppState.selected.glow.blur); EventBus.emit('need:render'); markCurrentFrameModified(); } });
   [glowColor, glowAlpha, glowBlur].forEach(el => el.addEventListener('change', () => EventBus.emit('history:save', '修改描边阴影')));
 
+  /* v7.5.6：描边阴影四个快捷预设。参数来自用户给的四组截图：
+     阴影=默认黑色软投影 / 描边=硬边外扩 / 发光=柔光 / 侧光=偏移硬边。 */
+  const GLOW_PRESETS = {
+    shadow: { offsetX: -7, offsetY: 6, blur: 11, spread: 4, alpha: 0.67, color: '#000000' },
+    stroke: { offsetX: 0, offsetY: 0, blur: 0, spread: 3, alpha: 1 },
+    glow:   { offsetX: 0, offsetY: 0, blur: 7, spread: 4, alpha: 0.54 },
+    side:   { offsetX: -2, offsetY: 2, blur: 0, spread: 2, alpha: 1 }
+  };
+  document.querySelectorAll('#glowPresetRow [data-glow-preset]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const f = AppState.selected;
+      if (!f || f.type !== 'figure') return;
+      const p = GLOW_PRESETS[btn.dataset.glowPreset];
+      if (!p) return;
+      glowFill(f.glow);
+      f.glow.enabled = true;
+      setGlobalProp(f, 'glow.enabled', true);
+      for (const k in p) {
+        f.glow[k] = p[k];
+        setGlobalProp(f, 'glow.' + k, p[k]);
+      }
+      EventBus.emit('need:syncUI');
+      EventBus.emit('need:render');
+      markCurrentFrameModified();
+      EventBus.emit('history:save', tr2('glow.presetApplied', '应用描边阴影预设'));
+    });
+  });
+
   /* 手部渐变 */
   btnJoint.onclick = () => {
     if (!AppState.selected || AppState.selected.type !== 'figure') return;
@@ -14895,9 +15299,13 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     move(themePanel, uiSheetEls.theme);
 
     /* ---- 拆原「高级设置」弹窗：开关归高级、导出归导出、项目/动作归项目 ---- */
+    let projectArchiveRow = null;   /* 旧弹窗 rows[3]：工程存档 */
+    let projectActionsRow = null;   /* 旧弹窗 rows[4]：动作库 */
     const adv = document.getElementById('timelineAdvancedPanel');
     if (adv) {
       const rows = Array.prototype.slice.call(adv.querySelectorAll(':scope > .adv-row'));
+      projectArchiveRow = rows[3] || null;
+      projectActionsRow = rows[4] || null;
       move(rows[0], uiSheetEls.advanced);                       /* 其他画面可见性 */
       move(rows[1], uiSheetEls.advanced);                       /* 各种开关 + 清空帧 + 置顶 */
       /* v7.1.0：全局属性修改 + 它的说明面板搬到控制面板顶部（全屏旁边），不再进「高级」分区 */
@@ -14925,15 +15333,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         move(rows[2], uiSheetEls.advanced);                     /* 剩下的导入视频 / 显隐 / 播放 */
       }
 
-      if (rows[3]) {                                            /* 工程存档 */
-        uiSheetEls.project.appendChild(sub('tab.sub.archive'));
-        move(rows[3], uiSheetEls.project);
-      }
-      if (rows[4]) {                                            /* 动作库 */
-        uiSheetEls.project.appendChild(sub('tab.sub.actions'));
-        move(rows[4], uiSheetEls.project);
-      }
-      move(document.getElementById('actionList'), uiSheetEls.project);
+      /* 工程存档 / 动作库 / 项目库统一在下方「项目分区」里按顺序搬入，
+         这里只负责从旧弹窗里摘出对应 DOM 引用，避免索引错位。 */
 
       /* 弹窗的标题栏（⚙️ 高级设置 + ✕）在一行行搬空后就成了死 UI：
          触发它的按钮已删，这个壳永远打不开。趁早摘掉，只留那些隐藏 checkbox 当状态存储。 */
@@ -14972,14 +15373,29 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     }
     if (pngRow) pngRow.style.justifyContent = 'flex-start';    /* 靠左 */
 
-    /* ---- 项目：本地预设 + 清空画布 ---- */
+    /* ---- 项目分区内部顺序：本地预设 → 动作库 → 工程存档/项目库 ---- */
+    /* 1) 本地预设 + 清空画布 */
     const presetTitle = document.querySelector('#uiMain .section-title[data-i18n="preset.title"]');
     if (presetTitle) uiSheetEls.project.appendChild(sub('tab.sub.presets'));
     move(rowOf(document.getElementById('presetNameInput')), uiSheetEls.project);
     move(document.getElementById('presetList'), uiSheetEls.project);
     move(rowOf(document.getElementById('btnClearCanvas')), uiSheetEls.project);
-    /* 原「本地预设」标题已被上面的 sub() 取代，把空壳去掉 */
     if (presetTitle && presetTitle.parentElement) presetTitle.remove();
+
+    /* 2) 动作库 */
+    if (projectActionsRow) {
+      uiSheetEls.project.appendChild(sub('tab.sub.actions'));
+      move(projectActionsRow, uiSheetEls.project);
+    }
+    move(document.getElementById('actionList'), uiSheetEls.project);
+
+    /* 3) 工程存档 + 项目库（最后） */
+    if (projectArchiveRow) {
+      uiSheetEls.project.appendChild(sub('tab.sub.archive'));
+      move(projectArchiveRow, uiSheetEls.project);
+    }
+    move(document.getElementById('projectLibraryRow'), uiSheetEls.project);
+    move(document.getElementById('projectList'), uiSheetEls.project);
 
     /* ---- 元件列表：从画布上的浮窗改成「元件」分区里的常驻纵向列表 ----
        加 .lp-inline 后 #layerPop 不再是 fixed 浮层，而是普通块级元素，跟着面板一起滚。
@@ -15572,6 +15988,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     mountUiSheets();
     applyTranslations();
     if (typeof window.SKFE_REFRESH_I18N === 'function') window.SKFE_REFRESH_I18N();
+    updateProjectListUI();
     saveHistory('初始化');
   })();
 
@@ -15738,6 +16155,13 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       applyEase: (k) => applyEaseToCurrentSegments(k),
       applyChannelEase: (objId, part, k) => pushChannelEaseToSegments(objId, part, k),
       exportProjectJSON, importProjectJSON, deserializeProject, applyLoadedProject,
+      projectLibrary: {
+        save: saveProjectToLibrary,
+        list: listProjectsFromLibrary,
+        get: getProjectFromLibrary,
+        remove: deleteProjectFromLibrary,
+        refresh: updateProjectListUI
+      },
       projectVersion: PROJECT_VERSION,
       historySize: () => undoStack.length,
       txBegin: (l) => txBegin(l), txEnd: () => txEnd(), txRun: (l, f) => txRun(l, f), isTxOpen: () => isTxOpen(),

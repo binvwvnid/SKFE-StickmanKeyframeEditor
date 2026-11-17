@@ -395,6 +395,13 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .frame-chip.kf-seg { box-shadow: inset 0 -2px 0 0 var(--color-primary); } /* 整段高亮：底部一条主题色 */
   .frame-chip.kf-seg.active { box-shadow: inset 0 -2px 0 0 var(--color-primary-text); }
   .frame-chip.kf-nodrag { cursor: default; } /* 派生帧不可拖动 */
+  /* v7.5.3：用户手动调节帧 —— 左下角实心小圆点，与关键帧菱形/补间虚线框区分 */
+  .frame-chip.manual-frame::before {
+    content: ''; position: absolute; bottom: 3px; left: 3px;
+    width: 4px; height: 4px; border-radius: 50%;
+    background: #f59e0b; box-sizing: border-box;
+  }
+  .frame-chip.manual-frame.active::before { background: var(--color-primary-text); }
   /* v7.0.0：段曲线可视化。没有段时整块不占位，不影响老工程的布局。 */
   #kfCurveWrap {
     display: none; position: relative; overflow: hidden;
@@ -995,7 +1002,18 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .divider { height: 1px; background: var(--border-color); margin: 10px 0; } /* 分割线：高度 1px，边框色背景，外边距 */
   .section-title { font-size: 12px; font-weight: 600; color: var(--text-main); margin-top: 4px; } /* 小节标题：字号，加粗，文字色，上边距 */
 
-  .layer-list-wrapper { display: flex; align-items: center; gap: 8px; width: 100%; } /* 图层列表包裹器：弹性布局，垂直居中，间距，全宽 */
+  .layer-list-wrapper { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; } /* 图层列表包裹器：弹性布局，垂直居中，间距，占满除锁定按钮外的宽度 */
+
+  /* 属性区元件条右端固定锁定键：快速锁定/解锁当前元件 */
+  .strip-lock-btn {
+    flex: 0 0 auto; display: none; align-items: center; gap: 4px;
+    padding: 4px 8px; min-height: 28px; border-radius: var(--radius-chip);
+    border: 1px solid var(--border-color); background: var(--btn-bg);
+    color: var(--text-main); font-size: 11px; line-height: 1; cursor: pointer;
+  }
+  .strip-lock-btn:hover { background: var(--btn-hover); }
+  .strip-lock-btn.danger { color: #ef4444; border-color: rgba(239, 68, 68, .45); background: rgba(239, 68, 68, .08); }
+  .strip-lock-btn.danger:hover { background: rgba(239, 68, 68, .16); }
   .layer-list { /* 图层列表容器 */
     display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 6px; flex: 1; /* 弹性布局，禁止换行，横向滚动，间距 6px，占满剩余空间 */
     margin-top: 0; padding-bottom: 4px; scrollbar-width: none; /* 外边距，底部内边距，Firefox 隐藏滚动条 */
@@ -1363,6 +1381,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #videoProgress .vp-pct { font-size: 12px; margin-top: 8px; color: var(--text-sub); font-variant-numeric: tabular-nums; } /* 进度百分比：字号，上边距，次要色，等宽数字 */
 
   .sticky-header { /* 吸顶头部（元件横向条）—— v7.1.0 恢复 */
+    display: flex; align-items: center; gap: 6px; /* v7.5.3：右端固定锁定按钮，横条占满剩余宽度 */
     position: sticky; top: 0; /* 粘性定位：贴住滚动区顶部（原来是 -10px，会把元件条切掉一截） */
     background: var(--bg-panel); /* 面板色背景，防止内容穿透 */
     /* 面板底色是半透明的（rgba .62），不模糊的话滚上去的内容会透出字影 */
