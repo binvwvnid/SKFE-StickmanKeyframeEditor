@@ -311,17 +311,30 @@ SKFE.features.export = (function () {
       !!(window.Mp4Muxer && window.Mp4Muxer.Muxer && window.Mp4Muxer.ArrayBufferTarget);
   }
 
-  /* v7.6.1：反复修复 —— 安卓端「没有可用的 H.264 编码器」误报。
-     根因有两层：
-       1) Android WebView 的 isConfigSupported() 出了名的保守/误报 false，
-          拿它当唯一判据会把本来能编码的配置也否掉；
-       2) 1080p / 高码率超过很多中低端机硬编码器的能力上限，直接被拒。
-     对策：isConfigSupported 只作快速通道，false 也用真正 configure() 实测；
+  /* v7.6.1~7.6.3：反复修复 —— 安卓端 H.264 导出。
+     三层问题逐个击破：
+       1) isConfigSupported() 在 Android WebView 上误报 false → 用真正 configure() 实测；
+       2) 探测用临时编码器 close 后硬件资源未异步释放 → 真正导出构造+配置带退避重试；
+       3) codec string 的 AVC level 撑不住目标像素（如 1200×1200 需要 level 4.0，
+          但默认 avc1.42001f 是 3.1，只到 921600）→ 按像素数动态选够高的 level。
      再叠一条分辨率降级阶梯，逐档降到软编码也能吃下的尺寸。
      桌面路径不走这里（走 MediaRecorder），改动只影响移动端 WebCodecs 路。 */
+  /* AVC level → 最大帧像素数（MaxFS × 256）。codec string 末两位是 level 的十六进制：
+     3.1=0x1F(921600)、3.2=0x20(1308160)、4.0=0x28(2097152)、
+     4.1=0x29、4.2=0x2A(2228224)、5.0=0x32(5652480)。
+     安卓 WebView 的 configure() 只校验字符串格式、不校验实际像素数，
+     若 codec 声明的 level 撑不住目标分辨率，要到 encode() 才报
+     "exceeds the maximum coded area ... You must either specify a lower
+     resolution or higher AVC level." —— 所以必须在探测阶段就按像素数选够高的 level。 */
+  function avcLevelForPixels(px) {
+    if (px <= 921600) return '1f';
+    if (px <= 1308160) return '20';
+    if (px <= 2097152) return '28';
+    if (px <= 2228224) return '2a';
+    return '32';
+  }
+
   async function pickAvcConfig(w, h, fps, bitrate) {
-    /* 基线 / 主档 / 高档都试一遍：不同机器的硬编码器支持的不一样。 */
-    const codecs = ['avc1.42001f', 'avc1.42E01E', 'avc1.4d0028', 'avc1.640028', 'avc1.420028'];
     /* 分辨率阶梯：优先用户选的尺寸，再逐级降。保持比例、偶数宽高（H.264 要求）。 */
     const sizes = [[w, h]];
     for (const s of [[1280, 720], [960, 540], [854, 480], [640, 360]]) {
@@ -331,6 +344,15 @@ SKFE.features.export = (function () {
       const ow = Math.max(2, raw[0] - (raw[0] % 2));
       const oh = Math.max(2, raw[1] - (raw[1] % 2));
       const br = Math.max(400000, Math.round(ow * oh * fps * 0.12));
+      /* 按这一档分辨率的像素数算出所需最低 level，把每个 profile 的 level 段替换掉。
+         基线 / 主档 / 高档都试：不同机器硬编码器支持的 profile 不一样。 */
+      const lvl = avcLevelForPixels(ow * oh);
+      /* avc1.<profile><compat><level>：compat 固定 00，level 两位十六进制 */
+      const codecs = [
+        'avc1.4200' + lvl,   // Baseline
+        'avc1.4d00' + lvl,   // Main
+        'avc1.6400' + lvl    // High
+      ];
       for (const codec of codecs) {
         /* 两种变体：带 avc.format（mp4-muxer 需要 avcC），以及不带（部分 WebView 不认这个字段） */
         const variants = [
