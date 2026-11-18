@@ -465,20 +465,43 @@ SKFE.features.export = (function () {
       firstTimestampBehavior: 'offset'
     });
 
-    let encError = null;
-    const encoder = new window.VideoEncoder({
-      output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (_) {} },
-      error: (e) => { encError = e; }
-    });
-
     const btn = document.getElementById('btnExportMP4');
     const oldText = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; }
+
+    /* v7.6.2：修复「Encoder creation error.」——与配置探测误报是两码事。
+       Android WebView 的硬件编码器释放是异步的：pickAvcConfig 探测时 new 的 probe
+       刚 close()，MediaCodec 资源还没归还系统，紧接着这里再 new VideoEncoder
+       就会抛原生错误。构造 + configure 一起重试，失败后退避等待资源释放。 */
+    let encError = null;
+    let encoder = null;
+    let lastCfgErr = null;
+    const backoff = [80, 200, 400, 0];
+    for (let attempt = 0; attempt < backoff.length; attempt++) {
+      let cand = null;
+      try {
+        cand = new window.VideoEncoder({
+          output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (_) {} },
+          error: (e) => { encError = e; }
+        });
+        cand.configure(cfg);
+        encoder = cand;
+        break;
+      } catch (e) {
+        lastCfgErr = e;
+        try { if (cand) cand.close(); } catch (_) {}
+        if (backoff[attempt]) await new Promise(r => setTimeout(r, backoff[attempt]));
+      }
+    }
+    if (!encoder) {
+      if (btn) { btn.textContent = oldText; btn.disabled = false; }
+      throw new Error('编码器暂时不可用，请再试一次；若连续失败请关掉 1080p 或重启 App');
+    }
+
     const savedCtx = D.getCtx();
     D.setCtx(recCtx);
     let tUs = 0;
     try {
-      encoder.configure(cfg);
       for (let i = 0; i < n; i++) {
         if (encError) throw encError;
         if (btn) btn.textContent = `MP4 ${i + 1}/${n}`;
