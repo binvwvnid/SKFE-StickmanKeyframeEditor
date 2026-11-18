@@ -311,13 +311,15 @@ SKFE.features.export = (function () {
       !!(window.Mp4Muxer && window.Mp4Muxer.Muxer && window.Mp4Muxer.ArrayBufferTarget);
   }
 
-  /* v7.6.1~7.6.3：反复修复 —— 安卓端 H.264 导出。
-     三层问题逐个击破：
+  /* v7.6.1~7.6.4：反复修复 —— 安卓端 H.264 导出。
+     四层问题逐个击破：
        1) isConfigSupported() 在 Android WebView 上误报 false → 用真正 configure() 实测；
        2) 探测用临时编码器 close 后硬件资源未异步释放 → 真正导出构造+配置带退避重试；
        3) codec string 的 AVC level 撑不住目标像素（如 1200×1200 需要 level 4.0，
-          但默认 avc1.42001f 是 3.1，只到 921600）→ 按像素数动态选够高的 level。
-     再叠一条分辨率降级阶梯，逐档降到软编码也能吃下的尺寸。
+          但默认 avc1.42001f 是 3.1，只到 921600）→ 按像素数动态选够高的 level；
+       4) 高清档 configure() 过了、真到 new VideoEncoder()/encode() 才报
+          "Encoder creation error." → 探测阶段就真编 1 帧，并把「码率阶梯 +
+          分辨率阶梯」变成可回退的候选列表，整段导出失败就换下一档重来。
      桌面路径不走这里（走 MediaRecorder），改动只影响移动端 WebCodecs 路。 */
   /* AVC level → 最大帧像素数（MaxFS × 256）。codec string 末两位是 level 的十六进制：
      3.1=0x1F(921600)、3.2=0x20(1308160)、4.0=0x28(2097152)、
@@ -334,7 +336,56 @@ SKFE.features.export = (function () {
     return '32';
   }
 
-  async function pickAvcConfig(w, h, fps, bitrate) {
+  /* v7.6.4：探测要「真编一帧」。Android WebView 的 configure() 经常放过
+     硬件根本吃不下或码率过高的配置，直到 new VideoEncoder() / encode() /
+     flush() 才抛 "Encoder creation error."。只做 configure 实测不够，
+     这里构造一个同尺寸黑帧真的编码并 flush，过了才算可用。 */
+  async function probeAvcConfig(cfg) {
+    let probe = null;
+    let probeErr = null;
+    try {
+      probe = new window.VideoEncoder({
+        output() {},
+        error: (e) => { probeErr = e; }
+      });
+      probe.configure(cfg);
+      const cv = document.createElement('canvas');
+      cv.width = cfg.width;
+      cv.height = cfg.height;
+      const cx = cv.getContext('2d', { alpha: false });
+      cx.fillStyle = '#000000';
+      cx.fillRect(0, 0, cv.width, cv.height);
+      let vf = null;
+      try {
+        vf = new window.VideoFrame(cv, { timestamp: 0, duration: 1000 });
+        probe.encode(vf, { keyFrame: true });
+      } finally {
+        if (vf) { try { vf.close(); } catch (_) {} }
+      }
+      let timer = null;
+      try {
+        await Promise.race([
+          probe.flush(),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('probe timeout')), 1500); })
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      if (probeErr) return false;
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      if (probe) { try { probe.close(); } catch (_) {} }
+      /* 安卓硬编码器释放是异步的，探测完给一点缓冲，别连着把真正编码器挤掉 */
+      await new Promise(r => setTimeout(r, 60));
+    }
+  }
+
+  /* v7.6.4：返回「下一个」可用候选。excludeKeys 里是已经试过且整段导出失败的，
+     调用方失败后再次调用，就会沿 码率阶梯 → 分辨率阶梯 继续往下退。 */
+  async function pickAvcConfig(w, h, fps, bitrate, excludeKeys) {
+    const skip = new Set(Array.isArray(excludeKeys) ? excludeKeys : []);
     /* 分辨率阶梯：优先用户选的尺寸，再逐级降。保持比例、偶数宽高（H.264 要求）。 */
     const sizes = [[w, h]];
     for (const s of [[1280, 720], [960, 540], [854, 480], [640, 360]]) {
@@ -343,36 +394,33 @@ SKFE.features.export = (function () {
     for (const raw of sizes) {
       const ow = Math.max(2, raw[0] - (raw[0] % 2));
       const oh = Math.max(2, raw[1] - (raw[1] % 2));
-      const br = Math.max(400000, Math.round(ow * oh * fps * 0.12));
-      /* 按这一档分辨率的像素数算出所需最低 level，把每个 profile 的 level 段替换掉。
-         基线 / 主档 / 高档都试：不同机器硬编码器支持的 profile 不一样。 */
-      const lvl = avcLevelForPixels(ow * oh);
-      /* avc1.<profile><compat><level>：compat 固定 00，level 两位十六进制 */
-      const codecs = [
-        'avc1.4200' + lvl,   // Baseline
-        'avc1.4d00' + lvl,   // Main
-        'avc1.6400' + lvl    // High
-      ];
-      for (const codec of codecs) {
-        /* 两种变体：带 avc.format（mp4-muxer 需要 avcC），以及不带（部分 WebView 不认这个字段） */
-        const variants = [
-          { codec: codec, width: ow, height: oh, bitrate: br, framerate: fps, avc: { format: 'avc' } },
-          { codec: codec, width: ow, height: oh, bitrate: br, framerate: fps }
+      const fullBr = Math.max(400000, Math.round(ow * oh * fps * 0.12));
+      /* 码率阶梯：高清档 1080p/3 倍高清算出来的 5~7 Mbps 远超很多安卓机
+         硬编码上限。先试原码率，再试 4M、2M，尽量保住用户选的分辨率。 */
+      const bitrates = [fullBr, Math.min(fullBr, 4000000), 2000000]
+        .filter((v, i, a) => v <= fullBr && a.indexOf(v) === i);
+      for (const br of bitrates) {
+        /* 按这一档分辨率的像素数算出所需最低 level，把每个 profile 的 level 段替换掉。
+           基线 / 主档 / 高档都试：不同机器硬编码器支持的 profile 不一样。 */
+        const lvl = avcLevelForPixels(ow * oh);
+        /* avc1.<profile><compat><level>：compat 固定 00，level 两位十六进制 */
+        const codecs = [
+          'avc1.4200' + lvl,   // Baseline
+          'avc1.4d00' + lvl,   // Main
+          'avc1.6400' + lvl    // High
         ];
-        for (const cfg of variants) {
-          try {
-            const r = await window.VideoEncoder.isConfigSupported(cfg);
-            if (r && r.supported) return { cfg: cfg, outW: ow, outH: oh };
-          } catch (_) {}
-          /* 实测：configure 对不支持的配置会同步抛错，这是最权威的判据 */
-          let probe = null;
-          try {
-            probe = new window.VideoEncoder({ output() {}, error() {} });
-            probe.configure(cfg);
-            return { cfg: cfg, outW: ow, outH: oh };
-          } catch (_) {
-          } finally {
-            if (probe) { try { probe.close(); } catch (_) {} }
+        for (const codec of codecs) {
+          /* 两种变体：带 avc.format（mp4-muxer 需要 avcC），以及不带（部分 WebView 不认这个字段） */
+          const variants = [
+            { codec: codec, width: ow, height: oh, bitrate: br, framerate: fps, avc: { format: 'avc' } },
+            { codec: codec, width: ow, height: oh, bitrate: br, framerate: fps }
+          ];
+          for (const cfg of variants) {
+            const key = JSON.stringify(cfg);
+            if (skip.has(key)) continue;
+            if (await probeAvcConfig(cfg)) {
+              return { cfg, outW: ow, outH: oh, bitrate: br, key };
+            }
           }
         }
       }
@@ -460,96 +508,135 @@ SKFE.features.export = (function () {
   }
 
   /* ② WebCodecs 编码 → mp4-muxer 封装（移动端主用） */
-  async function exportMP4WithEncoder(plan, tid) {
+  let lastDowngradeNotice = '';
+
+  async function exportMP4WithEncoder(plan, tid, triedKeys) {
     const mux = window.Mp4Muxer;
     const n = contentFrameCount(tid);
     if (!n) throw new Error('没有可导出的帧');
+    const tried = Array.isArray(triedKeys) ? triedKeys : [];
+    /* 每次回退都从用户最初选的尺寸重新算阶梯，避免越退越偏 */
+    const reqW = plan.outW, reqH = plan.outH;
     const fps = Math.max(1, Math.min(60, Math.round(1000 / ((D.AppState.frames[0] && D.AppState.frames[0].duration) || 83))));
-    const bitrate = Math.max(800000, Math.round(plan.outW * plan.outH * fps * 0.12));
-    const picked = await pickAvcConfig(plan.outW, plan.outH, fps, bitrate);
-    if (!picked) throw new Error('这台设备的浏览器没有可用的 H.264 编码器');
-    const cfg = picked.cfg;
-    /* 若被降级，用实测可用的尺寸建画布与封装器；paintFrame 也按这个尺寸铺底，否则上下留黑边 */
-    const outW = picked.outW, outH = picked.outH;
-    if (outW !== plan.outW || outH !== plan.outH) {
-      try { console.warn('[MP4] 编码分辨率从 ' + plan.outW + '×' + plan.outH + ' 降到 ' + outW + '×' + outH + '（设备硬编码上限）'); } catch (_) {}
-      plan.outW = outW; plan.outH = outH;
+    const bitrate = Math.max(800000, Math.round(reqW * reqH * fps * 0.12));
+    const picked = await pickAvcConfig(reqW, reqH, fps, bitrate, tried);
+    if (!picked) {
+      throw new Error('这台设备的浏览器无法编码所选高清视频（已尝试降低码率与分辨率），请关掉 3 倍高清 / 1080p 后重试');
     }
-
-    const recCanvas = document.createElement('canvas');
-    recCanvas.width = outW; recCanvas.height = outH;
-    const recCtx = recCanvas.getContext('2d', { alpha: false });
-
-    const muxer = new mux.Muxer({
-      target: new mux.ArrayBufferTarget(),
-      video: { codec: 'avc', width: outW, height: outH, frameRate: fps },
-      fastStart: 'in-memory',
-      firstTimestampBehavior: 'offset'
-    });
+    tried.push(picked.key);
+    const cfg = picked.cfg;
+    /* 用实测可用的尺寸建画布与封装器；paintFrame 也按这个尺寸铺底，否则上下留黑边 */
+    const outW = picked.outW, outH = picked.outH;
+    plan.outW = outW; plan.outH = outH;
+    if (outW !== reqW || outH !== reqH || picked.bitrate < bitrate * 0.9) {
+      try {
+        console.warn('[MP4] 高清参数不被设备支持，改用 ' + outW + '×' + outH + ' / ' +
+          (picked.bitrate / 1000000).toFixed(1) + 'Mbps 导出');
+      } catch (_) {}
+    }
 
     const btn = document.getElementById('btnExportMP4');
     const oldText = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; }
-
-    /* v7.6.2：修复「Encoder creation error.」——与配置探测误报是两码事。
-       Android WebView 的硬件编码器释放是异步的：pickAvcConfig 探测时 new 的 probe
-       刚 close()，MediaCodec 资源还没归还系统，紧接着这里再 new VideoEncoder
-       就会抛原生错误。构造 + configure 一起重试，失败后退避等待资源释放。 */
-    let encError = null;
     let encoder = null;
-    let lastCfgErr = null;
-    const backoff = [80, 200, 400, 0];
-    for (let attempt = 0; attempt < backoff.length; attempt++) {
-      let cand = null;
-      try {
-        cand = new window.VideoEncoder({
-          output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (_) {} },
-          error: (e) => { encError = e; }
-        });
-        cand.configure(cfg);
-        encoder = cand;
-        break;
-      } catch (e) {
-        lastCfgErr = e;
-        try { if (cand) cand.close(); } catch (_) {}
-        if (backoff[attempt]) await new Promise(r => setTimeout(r, backoff[attempt]));
-      }
-    }
-    if (!encoder) {
-      if (btn) { btn.textContent = oldText; btn.disabled = false; }
-      throw new Error('编码器暂时不可用，请再试一次；若连续失败请关掉 1080p 或重启 App');
-    }
+    let encError = null;
+    let lastErr = null;
+    let savedCtx = null;
+    let muxer = null;
+    let buf = null;
+    let success = false;
 
-    const savedCtx = D.getCtx();
-    D.setCtx(recCtx);
-    let tUs = 0;
     try {
+      const recCanvas = document.createElement('canvas');
+      recCanvas.width = outW; recCanvas.height = outH;
+      const recCtx = recCanvas.getContext('2d', { alpha: false });
+      muxer = new mux.Muxer({
+        target: new mux.ArrayBufferTarget(),
+        video: { codec: 'avc', width: outW, height: outH, frameRate: fps },
+        fastStart: 'in-memory',
+        firstTimestampBehavior: 'offset'
+      });
+
+      /* v7.6.2：构造 + configure 一起重试，等安卓异步释放硬件编码器。
+         v7.6.4：这里再失败不再直接报错，而是交给外层换下一个候选配置。 */
+      const backoff = [120, 300, 600, 1000];
+      for (let attempt = 0; attempt < backoff.length; attempt++) {
+        let cand = null;
+        try {
+          cand = new window.VideoEncoder({
+            output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (_) {} },
+            error: (e) => { encError = e; }
+          });
+          cand.configure(cfg);
+          encoder = cand;
+          break;
+        } catch (e) {
+          lastErr = e;
+          try { if (cand) cand.close(); } catch (_) {}
+          if (backoff[attempt]) await new Promise(r => setTimeout(r, backoff[attempt]));
+        }
+      }
+      if (!encoder) throw (lastErr || new Error('Encoder creation error.'));
+
+      savedCtx = D.getCtx();
+      D.setCtx(recCtx);
+      let tUs = 0;
       for (let i = 0; i < n; i++) {
         if (encError) throw encError;
         if (btn) btn.textContent = `MP4 ${i + 1}/${n}`;
         paintFrame(recCtx, i, plan, tid);
         const frameObj = D.AppState.frames[i] || {};
         const durUs = Math.max(1000, Math.round((frameObj.duration || Math.round(1000 / fps)) * 1000));
-        const vf = new window.VideoFrame(recCanvas, { timestamp: tUs, duration: durUs });
-        encoder.encode(vf, { keyFrame: (i % Math.max(1, fps)) === 0 });
-        vf.close();
+        let vf = null;
+        try {
+          vf = new window.VideoFrame(recCanvas, { timestamp: tUs, duration: durUs });
+          encoder.encode(vf, { keyFrame: (i % Math.max(1, fps)) === 0 });
+        } finally {
+          if (vf) { try { vf.close(); } catch (_) {} }
+        }
         tUs += durUs;
         /* 编码是异步的：队列堆太多就喘一口气，顺便让进度文字刷出来 */
         if (encoder.encodeQueueSize > 8) await new Promise(r => setTimeout(r, 8));
         else if (i % 6 === 0) await new Promise(r => setTimeout(r, 0));
       }
       await encoder.flush();
+      if (encError) throw encError;
       muxer.finalize();
+      buf = muxer.target.buffer;
+      if (!buf || !buf.byteLength) throw new Error('没有生成视频数据');
+      success = true;
+    } catch (e) {
+      lastErr = e;
     } finally {
-      try { encoder.close(); } catch (_) {}
-      D.setCtx(savedCtx);
+      try { if (encoder) encoder.close(); } catch (_) {}
+      if (savedCtx) D.setCtx(savedCtx);
       if (btn) { btn.textContent = oldText; btn.disabled = false; }
       D.EventBus.emit('need:render');
     }
-    if (encError) throw encError;
-    const buf = muxer.target.buffer;
-    if (!buf || !buf.byteLength) throw new Error('没有生成视频数据');
-    SKFE.platform.save(new Blob([buf], { type: 'video/mp4' }), 'stickman_video_' + Date.now() + '.mp4');
+
+    if (success) {
+      SKFE.platform.save(new Blob([buf], { type: 'video/mp4' }), 'stickman_video_' + Date.now() + '.mp4');
+      /* 只有真的降档了才提示，且同一条提示一次会话只弹一次，不打扰正常导出 */
+      if ((outW !== reqW || outH !== reqH || picked.bitrate < bitrate * 0.9)) {
+        const msg = '这台设备无法用所选高清参数编码，已自动降到 ' + outW + '×' + outH + ' / ' +
+          (picked.bitrate / 1000000).toFixed(1) + 'Mbps 导出。若想更快，可在导出面板关掉 3 倍高清 / 1080p。';
+        if (msg !== lastDowngradeNotice) {
+          lastDowngradeNotice = msg;
+          try { alert(msg); } catch (_) {}
+        }
+      }
+      return;
+    }
+
+    /* v7.6.4：整段导出失败（含 Encoder creation error / encode 阶段报错）就换下一档。
+       最多再试 8 次，避免候选列表过长时无限重来。 */
+    if (tried.length < 8) {
+      plan.outW = reqW; plan.outH = reqH;
+      try { console.warn('[MP4] 编码失败，换下一档配置重试：' + ((lastErr && lastErr.message) || lastErr)); } catch (_) {}
+      await new Promise(r => setTimeout(r, 200));
+      return exportMP4WithEncoder(plan, tid, tried);
+    }
+    throw (lastErr || new Error('编码器暂时不可用，请关掉 1080p 或重启 App'));
   }
 
   /* ① 浏览器自带 MP4 录制（桌面） */
