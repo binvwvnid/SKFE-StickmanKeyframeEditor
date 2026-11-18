@@ -311,16 +311,49 @@ SKFE.features.export = (function () {
       !!(window.Mp4Muxer && window.Mp4Muxer.Muxer && window.Mp4Muxer.ArrayBufferTarget);
   }
 
+  /* v7.6.1：反复修复 —— 安卓端「没有可用的 H.264 编码器」误报。
+     根因有两层：
+       1) Android WebView 的 isConfigSupported() 出了名的保守/误报 false，
+          拿它当唯一判据会把本来能编码的配置也否掉；
+       2) 1080p / 高码率超过很多中低端机硬编码器的能力上限，直接被拒。
+     对策：isConfigSupported 只作快速通道，false 也用真正 configure() 实测；
+     再叠一条分辨率降级阶梯，逐档降到软编码也能吃下的尺寸。
+     桌面路径不走这里（走 MediaRecorder），改动只影响移动端 WebCodecs 路。 */
   async function pickAvcConfig(w, h, fps, bitrate) {
-    /* 基线 / 主档 / 高档都试一遍：不同机器的硬编码器支持的不一样。
-       42001f = Baseline 3.1，420028 = Baseline 4.0，4d0028 = Main 4.0，640028 = High 4.0 */
-    const cands = ['avc1.42001f', 'avc1.420028', 'avc1.4d0028', 'avc1.640028', 'avc1.42E01E'];
-    for (const codec of cands) {
-      try {
-        const cfg = { codec: codec, width: w, height: h, bitrate: bitrate, framerate: fps, avc: { format: 'avc' } };
-        const r = await window.VideoEncoder.isConfigSupported(cfg);
-        if (r && r.supported) return cfg;
-      } catch (_) {}
+    /* 基线 / 主档 / 高档都试一遍：不同机器的硬编码器支持的不一样。 */
+    const codecs = ['avc1.42001f', 'avc1.42E01E', 'avc1.4d0028', 'avc1.640028', 'avc1.420028'];
+    /* 分辨率阶梯：优先用户选的尺寸，再逐级降。保持比例、偶数宽高（H.264 要求）。 */
+    const sizes = [[w, h]];
+    for (const s of [[1280, 720], [960, 540], [854, 480], [640, 360]]) {
+      if (s[0] < sizes[0][0] && s[1] < sizes[0][1]) sizes.push(s);
+    }
+    for (const raw of sizes) {
+      const ow = Math.max(2, raw[0] - (raw[0] % 2));
+      const oh = Math.max(2, raw[1] - (raw[1] % 2));
+      const br = Math.max(400000, Math.round(ow * oh * fps * 0.12));
+      for (const codec of codecs) {
+        /* 两种变体：带 avc.format（mp4-muxer 需要 avcC），以及不带（部分 WebView 不认这个字段） */
+        const variants = [
+          { codec: codec, width: ow, height: oh, bitrate: br, framerate: fps, avc: { format: 'avc' } },
+          { codec: codec, width: ow, height: oh, bitrate: br, framerate: fps }
+        ];
+        for (const cfg of variants) {
+          try {
+            const r = await window.VideoEncoder.isConfigSupported(cfg);
+            if (r && r.supported) return { cfg: cfg, outW: ow, outH: oh };
+          } catch (_) {}
+          /* 实测：configure 对不支持的配置会同步抛错，这是最权威的判据 */
+          let probe = null;
+          try {
+            probe = new window.VideoEncoder({ output() {}, error() {} });
+            probe.configure(cfg);
+            return { cfg: cfg, outW: ow, outH: oh };
+          } catch (_) {
+          } finally {
+            if (probe) { try { probe.close(); } catch (_) {} }
+          }
+        }
+      }
     }
     return null;
   }
@@ -411,16 +444,23 @@ SKFE.features.export = (function () {
     if (!n) throw new Error('没有可导出的帧');
     const fps = Math.max(1, Math.min(60, Math.round(1000 / ((D.AppState.frames[0] && D.AppState.frames[0].duration) || 83))));
     const bitrate = Math.max(800000, Math.round(plan.outW * plan.outH * fps * 0.12));
-    const cfg = await pickAvcConfig(plan.outW, plan.outH, fps, bitrate);
-    if (!cfg) throw new Error('这台设备的浏览器没有可用的 H.264 编码器');
+    const picked = await pickAvcConfig(plan.outW, plan.outH, fps, bitrate);
+    if (!picked) throw new Error('这台设备的浏览器没有可用的 H.264 编码器');
+    const cfg = picked.cfg;
+    /* 若被降级，用实测可用的尺寸建画布与封装器；paintFrame 也按这个尺寸铺底，否则上下留黑边 */
+    const outW = picked.outW, outH = picked.outH;
+    if (outW !== plan.outW || outH !== plan.outH) {
+      try { console.warn('[MP4] 编码分辨率从 ' + plan.outW + '×' + plan.outH + ' 降到 ' + outW + '×' + outH + '（设备硬编码上限）'); } catch (_) {}
+      plan.outW = outW; plan.outH = outH;
+    }
 
     const recCanvas = document.createElement('canvas');
-    recCanvas.width = plan.outW; recCanvas.height = plan.outH;
+    recCanvas.width = outW; recCanvas.height = outH;
     const recCtx = recCanvas.getContext('2d', { alpha: false });
 
     const muxer = new mux.Muxer({
       target: new mux.ArrayBufferTarget(),
-      video: { codec: 'avc', width: plan.outW, height: plan.outH, frameRate: fps },
+      video: { codec: 'avc', width: outW, height: outH, frameRate: fps },
       fastStart: 'in-memory',
       firstTimestampBehavior: 'offset'
     });
@@ -430,7 +470,6 @@ SKFE.features.export = (function () {
       output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (_) {} },
       error: (e) => { encError = e; }
     });
-    encoder.configure(cfg);
 
     const btn = document.getElementById('btnExportMP4');
     const oldText = btn ? btn.textContent : '';
@@ -439,6 +478,7 @@ SKFE.features.export = (function () {
     D.setCtx(recCtx);
     let tUs = 0;
     try {
+      encoder.configure(cfg);
       for (let i = 0; i < n; i++) {
         if (encError) throw encError;
         if (btn) btn.textContent = `MP4 ${i + 1}/${n}`;
