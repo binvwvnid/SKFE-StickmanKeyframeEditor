@@ -311,15 +311,17 @@ SKFE.features.export = (function () {
       !!(window.Mp4Muxer && window.Mp4Muxer.Muxer && window.Mp4Muxer.ArrayBufferTarget);
   }
 
-  /* v7.6.1~7.6.4：反复修复 —— 安卓端 H.264 导出。
-     四层问题逐个击破：
+  /* v7.6.1~7.6.5：反复修复 —— 安卓端 H.264 导出。
+     五层问题逐个击破：
        1) isConfigSupported() 在 Android WebView 上误报 false → 用真正 configure() 实测；
        2) 探测用临时编码器 close 后硬件资源未异步释放 → 真正导出构造+配置带退避重试；
        3) codec string 的 AVC level 撑不住目标像素（如 1200×1200 需要 level 4.0，
           但默认 avc1.42001f 是 3.1，只到 921600）→ 按像素数动态选够高的 level；
        4) 高清档 configure() 过了、真到 new VideoEncoder()/encode() 才报
           "Encoder creation error." → 探测阶段就真编 1 帧，并把「码率阶梯 +
-          分辨率阶梯」变成可回退的候选列表，整段导出失败就换下一档重来。
+          分辨率阶梯」变成可回退的候选列表，整段导出失败就换下一档重来；
+       5) 降档到 1280×720 后取景没重算，没画布时不再像 JPG 那样自动框选，
+          画面出框 → 每次换档按新尺寸重算 baseCrop。
      桌面路径不走这里（走 MediaRecorder），改动只影响移动端 WebCodecs 路。 */
   /* AVC level → 最大帧像素数（MaxFS × 256）。codec string 末两位是 level 的十六进制：
      3.1=0x1F(921600)、3.2=0x20(1308160)、4.0=0x28(2097152)、
@@ -445,6 +447,30 @@ SKFE.features.export = (function () {
     return Math.min(total, last + 1);
   }
 
+  /* v7.6.5：取景单独拆出来。v7.6.4 的降级阶梯会把 800×800 降到 1280×720（16:9），
+     但 baseCrop 还是按原尺寸算的，导致「没有画布时自动框选」失效、内容出框。
+     现在每次换档都按新尺寸重算，跟 JPG 的 getExportCrop 走同一套逻辑。 */
+  function mp4BaseCrop(outW, outH, tid, cam) {
+    if (cam && cam.w > 0 && cam.h > 0) return null;
+    if (D.AppState.canvasBoundsEnabled) {
+      const cb = D.AppState.canvasBounds;
+      const rad = cb.rotation || 0;
+      const ac = Math.abs(Math.cos(rad));
+      const as = Math.abs(Math.sin(rad));
+      /* 跟 getExportCrop 一致：旋转后的包围盒也要算进去，否则斜的画布会被裁 */
+      const rw = cb.w * ac + cb.h * as;
+      const rh = cb.w * as + cb.h * ac;
+      return {
+        cx: cb.x + cb.w / 2,
+        cy: cb.y + cb.h / 2,
+        scale: Math.min(outW / rw, outH / rh),
+        rotation: rad
+      };
+    }
+    const ec = D.getExportCrop(outW, outH, tid || null);
+    return { cx: ec.cx, cy: ec.cy, scale: ec.scale, rotation: ec.rotation || 0 };
+  }
+
   /* 画布尺寸 / 取景 / 背景 —— 两条路共用 */
   function mp4Setup(tid) {
     const isHD = document.getElementById('gifHD3x').checked;
@@ -452,7 +478,7 @@ SKFE.features.export = (function () {
     const bgColor = (document.getElementById('mp4BgColor') && document.getElementById('mp4BgColor').value) || D.getPageBgColor();
     const cam = D.shouldSkipCameraForExport() ? null : (D.getCurrentCameraObject() || D.getCameraAtFrame(0));
     const baseSize = is1080 ? 1920 : (isHD ? 1200 : 800);
-    let outW, outH, baseCrop = null;
+    let outW, outH;
     if (cam && cam.w > 0 && cam.h > 0) {
       const a = cam.w / cam.h;
       if (a >= 1) { outW = baseSize; outH = Math.round(baseSize / a); }
@@ -460,20 +486,16 @@ SKFE.features.export = (function () {
     } else if (D.AppState.canvasBoundsEnabled) {
       const sz = D.getExportSize();
       outW = sz.w; outH = sz.h;
-      baseCrop = {
-        cx: D.AppState.canvasBounds.x + D.AppState.canvasBounds.w / 2,
-        cy: D.AppState.canvasBounds.y + D.AppState.canvasBounds.h / 2,
-        scale: Math.min(outW / D.AppState.canvasBounds.w, outH / D.AppState.canvasBounds.h),
-        rotation: D.AppState.canvasBounds.rotation || 0
-      };
     } else {
       outW = baseSize; outH = baseSize;
-      const ec = D.getExportCrop(outW, outH, tid || null);
-      baseCrop = { cx: ec.cx, cy: ec.cy, scale: ec.scale, rotation: ec.rotation || 0 };
     }
     outW = Math.max(2, outW - (outW % 2));
     outH = Math.max(2, outH - (outH % 2));
-    return { outW: outW, outH: outH, baseCrop: baseCrop, cam: cam, bgColor: bgColor };
+    return {
+      outW: outW, outH: outH,
+      baseCrop: mp4BaseCrop(outW, outH, tid, cam),
+      cam: cam, bgColor: bgColor
+    };
   }
 
   /* 把第 i 帧画到导出画布上（两条路共用，免得改一处漏一处） */
@@ -528,6 +550,9 @@ SKFE.features.export = (function () {
     /* 用实测可用的尺寸建画布与封装器；paintFrame 也按这个尺寸铺底，否则上下留黑边 */
     const outW = picked.outW, outH = picked.outH;
     plan.outW = outW; plan.outH = outH;
+    /* v7.6.5：降档后必须重算取景，否则 800×800 的 baseCrop 被套到 1280×720 上，
+       没有画布时就不会像 JPG 那样自动框选，画面会被裁掉。 */
+    plan.baseCrop = mp4BaseCrop(outW, outH, tid, plan.cam);
     if (outW !== reqW || outH !== reqH || picked.bitrate < bitrate * 0.9) {
       try {
         console.warn('[MP4] 高清参数不被设备支持，改用 ' + outW + '×' + outH + ' / ' +
