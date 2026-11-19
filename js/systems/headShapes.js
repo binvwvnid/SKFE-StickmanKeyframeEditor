@@ -34,11 +34,16 @@ SKFE.systems.headShapes = (function () {
   const p2d = new Map();
   const p2dOuter = new Map();
   const p2dInner = new Map();
+  /* v7.7.0：给 Path2D 附上原始 d，供 SVG 序列导出器复用（Canvas 无法反解 Path2D） */
+  function tagSvg(p, dStr) {
+    if (p && dStr) { try { Object.defineProperty(p, '__svgD', { value: dStr, enumerable: false }); } catch (_) {} }
+    return p;
+  }
   function path2d(id) {
     if (p2d.has(id)) return p2d.get(id);
     const s = byId.get(id);
     let p = null;
-    if (s) { try { p = new Path2D(s.d); } catch (_) { p = null; } }
+    if (s) { try { p = tagSvg(new Path2D(s.d), s.d); } catch (_) { p = null; } }
     p2d.set(id, p);
     return p;
   }
@@ -47,7 +52,7 @@ SKFE.systems.headShapes = (function () {
     if (p2dOuter.has(id)) return p2dOuter.get(id);
     const s = byId.get(id);
     let p = null;
-    if (s && s.outerD) { try { p = new Path2D(s.outerD); } catch (_) { p = null; } }
+    if (s && s.outerD) { try { p = tagSvg(new Path2D(s.outerD), s.outerD); } catch (_) { p = null; } }
     p2dOuter.set(id, p);
     return p;
   }
@@ -56,7 +61,7 @@ SKFE.systems.headShapes = (function () {
     if (p2dInner.has(id)) return p2dInner.get(id);
     const s = byId.get(id);
     let p = null;
-    if (s && s.innerD) { try { p = new Path2D(s.innerD); } catch (_) { p = null; } }
+    if (s && s.innerD) { try { p = tagSvg(new Path2D(s.innerD), s.innerD); } catch (_) { p = null; } }
     p2dInner.set(id, p);
     return p;
   }

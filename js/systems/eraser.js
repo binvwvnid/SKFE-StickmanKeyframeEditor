@@ -95,7 +95,7 @@ function objectEraserMatrix(o) {
     m = affMul(m, affTranslate(o.x + ax, o.y + ay));
     if (o.rot) m = affMul(m, affRotateDeg(o.rot));
     m = affMul(m, affScale(s, s));
-  } else if (o.type === 'acc') {
+  } else if (o.type === 'acc' || o.type === 'videoClip') {
     const tr = D.getBindTransform(o);
     const figTr = D.getBoundFigureTransform(o);
     if (figTr) {

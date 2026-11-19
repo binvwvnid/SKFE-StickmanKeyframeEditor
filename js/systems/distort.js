@@ -21,7 +21,7 @@ SKFE.systems.distort = (function () {
   /* ==========================================================================
    * 0. 常量 / 外部钩子
    * ========================================================================== */
-  const SUPPORTED = { figure: 1, image: 1, acc: 1, shape: 1, bubble: 1, ink: 1 };
+  const SUPPORTED = { figure: 1, image: 1, acc: 1, shape: 1, bubble: 1, ink: 1, videoClip: 1 };
   const WARP_GRID = 16;       // 位图切片网格（16 x 16 = 256 格）
   const WARP_GRID_FAST = 8;   // 拖拽过程中的降级网格（8 x 8 = 64 格）
   const EDGE_PAIRS = [[0, 1], [1, 2], [2, 3], [3, 0]]; // 上 右 下 左 对应的两条角点

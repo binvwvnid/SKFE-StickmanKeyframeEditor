@@ -41,7 +41,8 @@ SKFE.features.export = (function () {
         const fr = frameList[i];
         const idx = D.AppState.frames.indexOf(fr);
         const safeIdx = idx >= 0 ? idx : 0;
-        
+        /* v7.7.1：先把视频元件 seek 到该帧，画面才准确 */
+        await D.prepareVideoClipsForFrame(safeIdx);
         const off = D.renderFrameToDataURL(fr, outW, outH, { transparent, crop }, trackId);
         const dataUrl = off.toDataURL('image/png');
         const base64Data = dataUrl.split(',')[1];
@@ -75,6 +76,334 @@ SKFE.features.export = (function () {
       if (btn) { btn.disabled = false; btn.textContent = oldText; }
       D.EventBus.emit('need:render');
     }
+  }
+
+  /* ==================== v7.7.0 SVG 序列帧导出 ====================
+     录制式矢量导出器：把现有 Canvas 2D 绘制调用录成 SVG 元素，
+     直接复用 renderScene 的关节几何与图层排序，不重复实现一套渲染器。
+     范围（用户确认）：只导矢量元件 figure / shape / ink；
+     文字（bubble）、位图（image/acc/video）、发光、扭曲一律不导出。 */
+  function svgXml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  }
+  function svgNum(v) {
+    if (!isFinite(v)) return '0';
+    const r = Math.round(v * 1000) / 1000;
+    return (r === 0) ? '0' : String(r);
+  }
+
+  function createSvgRecorder() {
+    const defs = [];
+    const body = [];
+    let seq = 0;
+    let M = [1, 0, 0, 1, 0, 0];
+    let pathD = [];
+    let pathM = M.slice();
+    let pathOpen = false;
+    let S = { fill: '#000000', stroke: 'none', lw: 1, cap: 'butt', join: 'miter', alpha: 1, dash: null, rule: 'nonzero' };
+    const mStack = [], sStack = [];
+
+    function mul(a, b) {
+      return [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5]
+      ];
+    }
+    function mstr(mm) { return 'matrix(' + mm.map(svgNum).join(',') + ')'; }
+    function color(v) {
+      if (v == null || v === 'transparent' || v === 'none') return 'none';
+      if (typeof v === 'string') return svgXml(v);
+      if (v && v.__svgGrad) return 'url(#' + v.__svgGrad + ')';
+      return 'none';
+    }
+    function notePath() { if (!pathOpen) { pathM = M.slice(); pathOpen = true; } }
+    function pushSeg(s) { notePath(); pathD.push(s); }
+    function makeGrad(kind, coords) {
+      const id = 'skfe-g' + (++seq);
+      const g = { __svgGrad: id, stops: [], addColorStop(p, c) { this.stops.push([p, c]); } };
+      defs.push({ id, kind, coords, stops: g.stops });
+      return g;
+    }
+    function emit(kind, ds, mm, rule) {
+      const fill = (kind === 'stroke') ? 'none' : color(S.fill);
+      const stroke = (kind === 'fill') ? 'none' : color(S.stroke);
+      if (fill === 'none' && stroke === 'none') return;
+      let at = 'd="' + svgXml(ds) + '" transform="' + mstr(mm) + '"';
+      at += ' fill="' + fill + '" fill-rule="' + (rule || S.rule) + '" stroke="' + stroke + '"';
+      if (stroke !== 'none') {
+        at += ' stroke-width="' + svgNum(S.lw) + '"';
+        if (S.cap && S.cap !== 'butt') at += ' stroke-linecap="' + svgXml(S.cap) + '"';
+        if (S.join && S.join !== 'miter') at += ' stroke-linejoin="' + svgXml(S.join) + '"';
+        if (S.dash && S.dash.length) at += ' stroke-dasharray="' + S.dash.map(svgNum).join(',') + '"';
+      }
+      if (S.alpha < 1) at += ' opacity="' + svgNum(S.alpha) + '"';
+      body.push('<path ' + at + '/>');
+    }
+    function flush(kind, rule, dOverride, mOverride) {
+      const ds = dOverride || pathD.join(' ');
+      /* v7.7.4：Path2D（手绘头型）没有走 moveTo/lineTo，pathM 还是上一条路径的矩阵，
+         必须改用 fill/stroke 当下的 M，否则头型会被上一个路径的变换放大到画布外。 */
+      if (ds && ds.trim()) emit(kind, ds, mOverride || pathM, rule || S.rule);
+      pathD = []; pathOpen = false;
+    }
+    function rectPath(x, y, w, h) {
+      return 'M' + svgNum(x) + ',' + svgNum(y) + 'h' + svgNum(w) + 'v' + svgNum(h) + 'h' + svgNum(-w) + 'Z';
+    }
+
+    const c = {
+      __isSvgRecorder: true, /* v7.7.3：像素级蒙版在 SVG 序列里跳过，保持原矢量导出路径 */
+      canvas: { width: 0, height: 0 },
+      save() { mStack.push(M.slice()); sStack.push(Object.assign({}, S)); },
+      restore() { if (mStack.length) M = mStack.pop(); if (sStack.length) S = sStack.pop(); },
+      translate(x, y) { M = mul(M, [1, 0, 0, 1, x, y]); },
+      scale(x, y) { M = mul(M, [x, 0, 0, (y == null ? x : y), 0, 0]); },
+      rotate(r) { const co = Math.cos(r), si = Math.sin(r); M = mul(M, [co, si, -si, co, 0, 0]); },
+      transform(a, b, c2, d, e, f) { M = mul(M, [a, b, c2, d, e, f]); },
+      setTransform(a, b, c2, d, e, f) { M = [a, b, c2, d, e, f]; },
+      resetTransform() { M = [1, 0, 0, 1, 0, 0]; },
+      getTransform() {
+        const q = M;
+        return { a: q[0], b: q[1], c: q[2], d: q[3], e: q[4], f: q[5], m22: q[0], m12: q[2], m21: q[1], toString() { return mstr(q); } };
+      },
+      beginPath() { pathD = []; pathOpen = false; },
+      closePath() { pushSeg('Z'); },
+      moveTo(x, y) { pushSeg('M' + svgNum(x) + ',' + svgNum(y)); },
+      lineTo(x, y) { pushSeg('L' + svgNum(x) + ',' + svgNum(y)); },
+      quadraticCurveTo(cx, cy, x, y) { pushSeg('Q' + svgNum(cx) + ',' + svgNum(cy) + ' ' + svgNum(x) + ',' + svgNum(y)); },
+      bezierCurveTo(x1, y1, x2, y2, x, y) {
+        pushSeg('C' + svgNum(x1) + ',' + svgNum(y1) + ' ' + svgNum(x2) + ',' + svgNum(y2) + ' ' + svgNum(x) + ',' + svgNum(y));
+      },
+      arcTo() {},
+      ellipse(x, y, rx, ry, ro, s, e, ccw) {
+        const sx = x + rx * Math.cos(s) * Math.cos(ro) - ry * Math.sin(s) * Math.sin(ro);
+        const sy = y + rx * Math.cos(s) * Math.sin(ro) + ry * Math.sin(s) * Math.cos(ro);
+        pushSeg('M' + svgNum(sx) + ',' + svgNum(sy));
+        let delta = e - s;
+        if (!ccw && delta <= 0) delta += 2 * Math.PI;
+        if (ccw && delta >= 0) delta -= 2 * Math.PI;
+        const large = Math.abs(delta) > Math.PI ? 1 : 0;
+        const sweep = delta > 0 ? 1 : 0;
+        const ex = x + rx * Math.cos(e) * Math.cos(ro) - ry * Math.sin(e) * Math.sin(ro);
+        const ey = y + rx * Math.cos(e) * Math.sin(ro) + ry * Math.sin(e) * Math.cos(ro);
+        pushSeg('A' + svgNum(rx) + ',' + svgNum(ry) + ' ' + svgNum(ro * 180 / Math.PI) + ' ' + large + ',' + sweep + ' ' + svgNum(ex) + ',' + svgNum(ey));
+      },
+      arc(x, y, r, s, e, ccw) {
+        r = Math.abs(r);
+        const sx = x + r * Math.cos(s), sy = y + r * Math.sin(s);
+        pushSeg('M' + svgNum(sx) + ',' + svgNum(sy));
+        let delta = e - s;
+        if (!ccw && delta <= 0) delta += 2 * Math.PI;
+        if (ccw && delta >= 0) delta -= 2 * Math.PI;
+        const large = Math.abs(delta) > Math.PI ? 1 : 0;
+        const sweep = delta > 0 ? 1 : 0;
+        if (Math.abs(delta) >= 2 * Math.PI - 1e-6) {
+          const mx = x - r * Math.cos(s), my = y - r * Math.sin(s);
+          pushSeg('A' + svgNum(r) + ',' + svgNum(r) + ' 0 1,' + sweep + ' ' + svgNum(mx) + ',' + svgNum(my));
+          pushSeg('A' + svgNum(r) + ',' + svgNum(r) + ' 0 1,' + sweep + ' ' + svgNum(sx) + ',' + svgNum(sy));
+        } else {
+          pushSeg('A' + svgNum(r) + ',' + svgNum(r) + ' 0 ' + large + ',' + sweep + ' ' + svgNum(x + r * Math.cos(e)) + ',' + svgNum(y + r * Math.sin(e)));
+        }
+      },
+      rect(x, y, w, h) { pushSeg(rectPath(x, y, w, h)); },
+      roundRect() {},
+      fill(arg, rule) {
+        if (arg && arg.__svgD !== undefined) { flush('fill', rule === 'evenodd' ? 'evenodd' : undefined, arg.__svgD, M.slice()); return; }
+        flush('fill', rule === 'evenodd' ? 'evenodd' : undefined);
+      },
+      stroke(arg) {
+        if (arg && arg.__svgD !== undefined) { flush('stroke', undefined, arg.__svgD, M.slice()); return; }
+        flush('stroke');
+      },
+      fillRect(x, y, w, h) {
+        const saved = pathD, savedM = pathM, savedOpen = pathOpen;
+        pathD = [rectPath(x, y, w, h)]; pathOpen = true;
+        flush('fill');
+        pathD = saved; pathM = savedM; pathOpen = savedOpen;
+      },
+      strokeRect(x, y, w, h) {
+        const saved = pathD, savedM = pathM, savedOpen = pathOpen;
+        pathD = [rectPath(x, y, w, h)]; pathOpen = true;
+        flush('stroke');
+        pathD = saved; pathM = savedM; pathOpen = savedOpen;
+      },
+      clearRect() {},
+      clip() {},
+      isPointInPath() { return false; },
+      createLinearGradient(x0, y0, x1, y1) { return makeGrad('linear', [x0, y0, x1, y1]); },
+      createRadialGradient(x0, y0, r0, x1, y1, r1) { return makeGrad('radial', [x0, y0, r0, x1, y1, r1]); },
+      createConicGradient() { return makeGrad('linear', [0, 0, 0, 0]); },
+      createPattern() { return null; },
+      fillText() {}, strokeText() {},
+      measureText(t) { return { width: String(t == null ? '' : t).length * 6 }; },
+      drawImage() {},
+      createImageData() { return null; },
+      getImageData() { return { data: new Uint8ClampedArray(0) }; },
+      putImageData() {}
+    };
+    const props = {
+      fillStyle: 'fill', strokeStyle: 'stroke', lineWidth: 'lw', lineCap: 'cap', lineJoin: 'join',
+      globalAlpha: 'alpha', miterLimit: 'miter', font: 'font', textAlign: 'align', textBaseline: 'baseline',
+      filter: 'filter', globalCompositeOperation: 'gco', shadowBlur: 'shadowBlur', shadowColor: 'shadowColor',
+      shadowOffsetX: 'shadowOffX', shadowOffsetY: 'shadowOffY', imageSmoothingEnabled: 'smooth'
+    };
+    Object.keys(props).forEach(k => {
+      Object.defineProperty(c, k, {
+        get() { return S[props[k]] == null ? (k === 'fillStyle' || k === 'strokeStyle' ? '#000000' : S[props[k]]) : S[props[k]]; },
+        set(v) { S[props[k]] = v; },
+        enumerable: true, configurable: true
+      });
+    });
+    c.setLineDash = function (a) { S.dash = Array.isArray(a) ? a.slice() : null; };
+    c.getLineDash = function () { return S.dash ? S.dash.slice() : []; };
+
+    c.toSVG = function (w, h) {
+      const defStr = defs.map(g => {
+        const stops = g.stops.map(p => '<stop offset="' + svgNum(p[0]) + '" stop-color="' + color(p[1]) + '"/>').join('');
+        if (g.kind === 'radial') {
+          const q = g.coords;
+          return '<radialGradient id="' + g.id + '" gradientUnits="userSpaceOnUse" cx="' + svgNum(q[3]) + '" cy="' + svgNum(q[4]) + '" r="' + svgNum(q[5]) + '" fx="' + svgNum(q[0]) + '" fy="' + svgNum(q[1]) + '">' + stops + '</radialGradient>';
+        }
+        const q = g.coords;
+        return '<linearGradient id="' + g.id + '" gradientUnits="userSpaceOnUse" x1="' + svgNum(q[0]) + '" y1="' + svgNum(q[1]) + '" x2="' + svgNum(q[2]) + '" y2="' + svgNum(q[3]) + '">' + stops + '</linearGradient>';
+      }).join('');
+      return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<svg xmlns="http://www.w3.org/2000/svg" width="' + svgNum(w) + '" height="' + svgNum(h) + '" viewBox="0 0 ' + svgNum(w) + ' ' + svgNum(h) + '">\n' +
+        '<title>SKFE vector frame</title>\n' +
+        (defStr ? '<defs>' + defStr + '</defs>\n' : '') +
+        body.join('\n') + '\n</svg>\n';
+    };
+    return c;
+  }
+
+  /* 只保留矢量元件；统计被跳过的类型用于文字提示 */
+  function svgFilterList(list) {
+    const keep = [];
+    const skipped = { bitmap: 0, text: 0, glow: 0, distort: 0 };
+    (list || []).forEach(o => {
+      if (!o || o.hidden) return;
+      if (o.type === 'shape' || o.type === 'ink') { keep.push(o); return; }
+      if (o.type === 'figure') {
+        let dm = null;
+        try { dm = SKFE.systems.distort && SKFE.systems.distort.getMapping(o); } catch (_) {}
+        if (dm) { skipped.distort++; return; }
+        if (o.glow && o.glow.enabled) { skipped.glow++; return; }
+        keep.push(o);
+        return;
+      }
+      if (o.type === 'bubble') { skipped.text++; return; }
+      skipped.bitmap++;
+    });
+    return { keep, skipped };
+  }
+
+  /* 与 renderFrameToDataURL 相同的取景计算，但画进录制器 */
+  function renderFrameToSVG(frame, outW, outH, options, trackId) {
+    options = options || {};
+    const idx = (typeof frame === 'number') ? frame : D.AppState.frames.indexOf(frame);
+    const safeIdx = idx >= 0 ? idx : D.AppState.currentFrameIndex;
+    const tid = (trackId != null && trackId !== D.TRACK_ALL_ID)
+      ? String(trackId)
+      : ((options.trackId != null && options.trackId !== D.TRACK_ALL_ID) ? String(options.trackId) : null);
+    const safeTid = (tid && D.isCameraTrackId && D.isCameraTrackId(tid)) ? null : tid;
+    const fullList = D.getObjectsForFrameAt(safeIdx, safeTid);
+    const filt = svgFilterList(fullList);
+    let scale = 1, cx = 0, cy = 0, rotation = 0;
+    const camAt = (options.crop || options.ignoreCamera || D.shouldSkipCameraForExport()) ? null : D.getCameraAtFrame(safeIdx);
+    if (options.crop) {
+      scale = options.crop.scale; cx = options.crop.cx; cy = options.crop.cy; rotation = options.crop.rotation || 0;
+    } else if (camAt) {
+      const cc = D.cameraToCrop(camAt, outW, outH);
+      scale = cc.scale; cx = cc.cx; cy = cc.cy; rotation = cc.rotation;
+    } else {
+      const crop = D.getExportCrop(outW, outH, safeTid);
+      scale = crop.scale; cx = crop.cx; cy = crop.cy; rotation = crop.rotation || 0;
+    }
+    const rec = createSvgRecorder();
+    rec.canvas.width = outW; rec.canvas.height = outH;
+    if (!options.transparent) rec.fillStyle = D.getPageBgColor(), rec.fillRect(0, 0, outW, outH);
+    rec.translate(outW / 2, outH / 2);
+    rec.rotate(-rotation);
+    rec.scale(scale, scale);
+    rec.translate(-cx, -cy);
+    const savedCtx = D.getCtx();
+    D.setCtx(rec);
+    try {
+      D.renderScene(filt.keep, { isExporting: true, includeHidden: false, refList: fullList, frameIndex: safeIdx });
+    } finally {
+      D.setCtx(savedCtx);
+    }
+    return { svg: rec.toSVG(outW, outH), skipped: filt.skipped };
+  }
+
+  async function exportSVGsAsZip(frameList, trackId, options) {
+    if (!frameList || !frameList.length) return;
+    const btn = document.getElementById('btnExportSVGSeq');
+    const oldText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '准备打包...'; }
+    const skippedTotal = { bitmap: 0, text: 0, glow: 0, distort: 0 };
+    try {
+      const JSZip = await getJSZip();
+      const zip = new JSZip();
+      for (let i = 0; i < frameList.length; i++) {
+        if (btn) btn.textContent = '打包中 ' + (i + 1) + '/' + frameList.length;
+        const fr = frameList[i];
+        const idx = D.AppState.frames.indexOf(fr);
+        const safeIdx = idx >= 0 ? idx : 0;
+        const res = renderFrameToSVG(fr, options.outW, options.outH, options, trackId);
+        Object.keys(skippedTotal).forEach(k => { skippedTotal[k] += res.skipped[k]; });
+        zip.file('frame_' + String(safeIdx + 1).padStart(3, '0') + '.svg', res.svg);
+        if (i % 5 === 4) await new Promise(r => setTimeout(r, 0));
+      }
+      if (btn) btn.textContent = '生成 ZIP...';
+      const blob = await zip.generateAsync({ type: 'blob' });
+      SKFE.platform.save(blob, 'stickman_svg_' + Date.now() + '.zip');
+      const parts = [];
+      if (skippedTotal.distort) parts.push('扭曲元件 ' + skippedTotal.distort + ' 个');
+      if (skippedTotal.glow) parts.push('发光元件 ' + skippedTotal.glow + ' 个');
+      if (skippedTotal.text) parts.push('文字元件 ' + skippedTotal.text + ' 个');
+      if (skippedTotal.bitmap) parts.push('位图元件 ' + skippedTotal.bitmap + ' 个');
+      if (parts.length) {
+        alert('SVG 序列已导出（仅矢量元件）。\n未导出：' + parts.join('、') + '。\n这些效果/元件不受 SVG 支持，如需保留请使用 PNG 序列。');
+      } else {
+        alert('SVG 序列已导出。');
+      }
+    } catch (err) {
+      console.warn('SVG ZIP 打包失败，降级为逐个下载', err);
+      alert('ZIP 库加载失败，将自动降级为逐个下载（若浏览器拦截请在地址栏允许）。');
+      frameList.forEach((fr, i) => {
+        const idx = D.AppState.frames.indexOf(fr);
+        const safeIdx = idx >= 0 ? idx : 0;
+        const res = renderFrameToSVG(fr, options.outW, options.outH, options, trackId);
+        SKFE.platform.save(res.svg, 'frame_' + String(safeIdx + 1).padStart(3, '0') + '.svg');
+      });
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
+      D.EventBus.emit('need:render');
+    }
+  }
+
+  function exportSVGSeq() {
+    if (D.getIsPlaying()) D.pause();
+    D.syncFrameRef();
+    const _sz = D.getExportSize();
+    const outW = _sz.w, outH = _sz.h;
+    const transparent = document.getElementById('gifTransparent').checked;
+    /* v7.7.2：SVG 序列必须扫全部轨道。
+       之前沿用了 PNG 的「当前子轨道」tid：插入视频后会自动切到视频自己的子轨道，
+       导出时 getObjectsForFrameAt 只拿到 videoClip → svgFilterList 把它当位图跳过 →
+       每一帧都是 279 字节的空 SVG（Windows 显示 1KB）。这就是「SVG 全 1KB」的真因。
+       矢量导出本就该导出画布上所有 figure/shape/ink，不受当前选中的子轨道影响。 */
+    const tid = null;
+    const cam = D.shouldSkipCameraForExport() ? null : (D.getCurrentCameraObject() || D.getCameraAtFrame(0));
+    const list = D.AppState.frames.slice(0, contentFrameCount(null));
+    const crop = cam ? null : D.getCropForFrames(list, outW, outH, null);
+    exportSVGsAsZip(list, null, { outW, outH, crop, transparent });
   }
 
   let gifencLib = null;
@@ -115,6 +444,8 @@ SKFE.features.export = (function () {
       const renderedFrames = [];
       for (let i = 0; i < list.length; i++) {
         btn.textContent = `GIF ${i + 1}/${list.length}`;
+        const gidx = D.AppState.frames.indexOf(list[i]);
+        await D.prepareVideoClipsForFrame(gidx >= 0 ? gidx : i);
         const off = D.renderFrameToDataURL(list[i], outW, outH, { transparent, crop }, tid);
         const imgData = off.getContext('2d').getImageData(0, 0, outW, outH);
         if (transparent) {
@@ -255,6 +586,7 @@ SKFE.features.export = (function () {
     const vN = contentFrameCount(tid);
     try {
       for (let i = 0; i < vN; i++) {
+        await D.prepareVideoClipsForFrame(i); /* v7.7.1：视频元件定格到该帧 */
         recCtx.save();
         recCtx.setTransform(1, 0, 0, 1, 0, 0);
         recCtx.clearRect(0, 0, outW, outH);
@@ -273,7 +605,7 @@ SKFE.features.export = (function () {
           recCtx.clip();
           recCtx.restore();
         }
-        D.renderScene(D.getObjectsForFrameAt(i, tid), { isExporting: true });
+        D.renderScene(D.getObjectsForFrameAt(i, tid), { isExporting: true, frameIndex: i });
         recCtx.restore();
         if (track.requestFrame) track.requestFrame();
         await new Promise(r => setTimeout(r, D.AppState.frames[i].duration));
@@ -525,7 +857,7 @@ SKFE.features.export = (function () {
       recCtx.clip();
       recCtx.restore();
     }
-    D.renderScene(D.getObjectsForFrameAt(i, tid), { isExporting: true });
+    D.renderScene(D.getObjectsForFrameAt(i, tid), { isExporting: true, frameIndex: i });
     recCtx.restore();
   }
 
@@ -609,6 +941,7 @@ SKFE.features.export = (function () {
       for (let i = 0; i < n; i++) {
         if (encError) throw encError;
         if (btn) btn.textContent = `MP4 ${i + 1}/${n}`;
+        await D.prepareVideoClipsForFrame(i); /* v7.7.1：视频元件定格到该帧 */
         paintFrame(recCtx, i, plan, tid);
         const frameObj = D.AppState.frames[i] || {};
         const durUs = Math.max(1000, Math.round((frameObj.duration || Math.round(1000 / fps)) * 1000));
@@ -687,6 +1020,7 @@ SKFE.features.export = (function () {
     try {
       for (let i = 0; i < n; i++) {
         if (btn) btn.textContent = `MP4 ${i + 1}/${n}`;
+        await D.prepareVideoClipsForFrame(i); /* v7.7.1：视频元件定格到该帧 */
         paintFrame(recCtx, i, plan, tid);
         if (track.requestFrame) track.requestFrame();
         await new Promise(r => setTimeout(r, (D.AppState.frames[i] && D.AppState.frames[i].duration) || 83));
@@ -781,6 +1115,8 @@ SKFE.features.export = (function () {
     getMP4MimeType,
     exportMP4,
     exportVideo,
-    exportPNGSeq
+    exportPNGSeq,
+    exportSVGsAsZip,
+    exportSVGSeq
   };
 })();

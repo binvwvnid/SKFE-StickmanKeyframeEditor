@@ -296,6 +296,46 @@
        derived 对象是一次性的，getFrozenFrame 补拍也不会污染关键帧。 */
   }
 
+  /* v7.7.5：基础蒙版 / 色度抠图各自独立开关，段内都按离散量 hold 起点。
+     位置、尺寸、羽化、色度参数按段曲线插值；键控颜色走 srgb 插值。 */
+  function defaultMask() {
+    return {
+      enabled: false, mode: 'basic', basicEnabled: false, chromaEnabled: false, shape: 'rect',
+      x: 0, y: 0, w: 1, h: 1, feather: 6, invert: false,
+      chromaColor: '#00ff00', similarity: 0.28, smoothness: 0.12,
+      hueTolerance: 0.18, saturationTolerance: 0.25, valueTolerance: 0.35,
+      spillReduction: 0.35, edgeFeather: 2, chromaInvert: false
+    };
+  }
+
+  function interpMask(obj, o1, o2, prog, col) {
+    const m1 = o1 && o1.mask, m2 = o2 && o2.mask;
+    if (!m1 && !m2) return;
+    const out = Object.assign(defaultMask(), m1 || {});
+    const numKeys = ['x', 'y', 'w', 'h', 'feather', 'similarity', 'smoothness',
+      'hueTolerance', 'saturationTolerance', 'valueTolerance', 'spillReduction', 'edgeFeather'];
+    numKeys.forEach(k => {
+      const a = (m1 && m1[k] !== undefined) ? m1[k] : defaultMask()[k];
+      const b = (m2 && m2[k] !== undefined) ? m2[k] : a;
+      out[k] = lerp(a, b, prog(k));
+    });
+    /* 老工程只有 enabled/mode，没有两个新开关 */
+    if (m1 && m1.enabled && m1.basicEnabled === undefined && m1.chromaEnabled === undefined) {
+      if (m1.mode === 'chroma') out.chromaEnabled = true;
+      else out.basicEnabled = true;
+    }
+    ['enabled', 'mode', 'basicEnabled', 'chromaEnabled', 'shape', 'invert', 'chromaInvert'].forEach(k => {
+      const a = (m1 && m1[k] !== undefined) ? m1[k] : defaultMask()[k];
+      out[k] = a;
+    });
+    out.enabled = !!(out.basicEnabled || out.chromaEnabled);
+    out.mode = out.chromaEnabled ? 'chroma' : 'basic';
+    if (m1 && m1.chromaColor || m2 && m2.chromaColor) {
+      out.chromaColor = col((m1 && m1.chromaColor) || '#00ff00', (m2 && m2.chromaColor) || ((m1 && m1.chromaColor) || '#00ff00'), prog('chromaColor'));
+    }
+    obj.mask = out;
+  }
+
   function interpolateObject(o1, o2, u, ctx) {
     if (!isReal(o1) || !isReal(o2)) return null;
     ctx = ctx || {};
@@ -308,6 +348,7 @@
     const obj = cloneForEval(o1);
     if (obj.ax === undefined) obj.ax = 0;
     if (obj.ay === undefined) obj.ay = 0;
+    interpMask(obj, o1, o2, prog, col);
 
     if (obj.type === 'figure') {
       obj.x = lerp(o1.x, o2.x, prog('x'));
@@ -450,7 +491,7 @@
       return obj;
     }
 
-    if (obj.type === 'acc') {
+    if (obj.type === 'acc' || obj.type === 'videoClip') {
       obj.x = lerp(o1.x, o2.x, prog('x'));
       obj.y = lerp(o1.y, o2.y, prog('y'));
       obj.scale = lerpScale(o1.scale, o2.scale, prog('scale'));

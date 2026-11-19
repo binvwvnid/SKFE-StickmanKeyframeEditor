@@ -127,7 +127,7 @@
       · <b>头部空心/实心、自定义填充色、头型</b><br> <!-- 列表项 -->
       · <b>身体比例</b>（头、臂、腿、躯干、小臂占比、小腿占比）<br> <!-- 列表项 -->
       · <b>四肢独立</b>各参数（左右分别的臂长/腿长/小臂/小腿）<br> <!-- 列表项 -->
-      · <b>描边阴影</b>（开关、颜色、X/Y 偏移、羽化、扩展、不透明度、快捷预设、连同绑定配饰）<br> <!-- 列表项 -->
+      · <b>描边阴影</b>（开关、颜色、X/Y 偏移、羽化、扩展、不透明度、快捷预设、连同绑定图片）<br> <!-- 列表项 -->
       · <b>侧面高光</b>（开关、颜色、粗细、方向）<br> <!-- 列表项 -->
       · <b>手部渐变</b>（开关、颜色、起始位置）<br> <!-- 列表项 -->
       · <b>后方四肢深色处理</b>（开关、自定义色）<br> <!-- 列表项 -->
@@ -143,8 +143,8 @@
     <div> <!-- 折叠面板内容 -->
       <div class="row"> <!-- 第一排：主要物体 -->
         <button id="btnNew"><i data-icon="add-one"></i><span data-i18n="add.figure">火柴人</span></button> <!-- 添加火柴人 -->
-        <button id="btnImg"><i data-icon="add-picture"></i><span data-i18n="add.image">插入图片</span></button> <!-- 插入本地图片 -->
-        <button id="btnAcc"><i data-icon="crown"></i><span data-i18n="add.acc">上传配饰</span></button> <!-- 上传配饰图片 -->
+        <button id="btnAcc"><i data-icon="add-picture"></i><span data-i18n="add.acc">插入图片</span></button> <!-- 插入图片（配饰类型，可挂载火柴人） -->
+        <button id="btnInsertVideo"><i data-icon="videocamera"></i><span data-i18n="add.videoClip">插入视频</span></button> <!-- 插入视频元件（可编辑，与参考视频不同） -->
         <button id="btnBubble"><i data-icon="comment-one"></i><span data-i18n="add.bubble">对话框</span></button> <!-- 添加文字气泡 -->
         <button id="btnCamera"><i data-icon="videocamera"></i><span data-i18n="add.camera">摄像机</span></button> <!-- 添加摄像机 -->
       </div> <!-- 第一排结束 -->
@@ -327,6 +327,7 @@
       <button class="tool-chip" data-tool="proportion" data-i18n="tools.proportion">比例</button> <!-- 展开身体比例面板 -->
       <button class="tool-chip" data-tool="joints" data-i18n="tools.joints">关节</button> <!-- 展开关节面板 -->
       <button class="tool-chip" data-tool="glow" data-i18n="tools.glow">发光</button> <!-- 展开发光与特效面板 -->
+      <button class="tool-chip" data-tool="mask" data-i18n="tools.mask">蒙版</button> <!-- 展开非火柴人元件的蒙版面板 -->
       <button class="tool-chip" data-tool="eraser" data-i18n="tools.eraser">画笔</button> <!-- 展开橡皮擦面板 -->
       <button class="tool-chip" data-tool="canvas" data-i18n="tools.canvas">画布</button> <!-- 展开画布设置面板 -->
       <button class="tool-chip" data-tool="theme" data-i18n="tools.theme">主题</button> <!-- 展开主题设置面板 -->
@@ -567,7 +568,7 @@
       <div class="row slider"><label data-i18n="glow.blur" title="羽化（模糊）半径" data-i18n-title="glow.blurTip">羽化</label><input type="range" id="glowBlur" min="0" max="80" step="1" value="14"><span class="val" id="glowBlurVal">14</span></div> <!-- 羽化半径 -->
       <div class="row slider"><label data-i18n="glow.spread">扩展</label><input type="range" id="glowSpread" min="0" max="40" step="1" value="0"><span class="val" id="glowSpreadVal">0</span></div> <!-- 扩散（描边外扩） -->
       <div class="row slider"><label data-i18n="common.opacity">不透明度</label><input type="range" id="glowAlpha" min="0" max="1" step="0.01" value="0.45"><span class="val" id="glowAlphaVal">0.45</span></div> <!-- 阴影不透明度 -->
-      <div class="row"><label class="checkbox-label" style="font-size:12px;"><input type="checkbox" id="glowIncludeAcc"> <span data-i18n="glow.includeAcc">连同绑定配饰</span></label></div> <!-- 把挂在这个火柴人身上的配饰一起并进剪影 -->
+      <div class="row"><label class="checkbox-label" style="font-size:12px;"><input type="checkbox" id="glowIncludeAcc"> <span data-i18n="glow.includeAcc">连同绑定图片</span></label></div> <!-- 把挂在这个火柴人身上的配饰一起并进剪影 -->
       <div class="row" id="glowPresetRow" style="gap:6px; flex-wrap:wrap; margin-top:6px;"> <!-- 描边阴影四个快捷预设 -->
         <button type="button" class="btn-soft btn-xs glow-preset" data-glow-preset="shadow" data-i18n="glow.presetShadow">阴影</button>
         <button type="button" class="btn-soft btn-xs glow-preset" data-glow-preset="stroke" data-i18n="glow.presetStroke">描边</button>
@@ -618,6 +619,45 @@
         <div class="hint" style="margin-top:4px; font-size:11px;" data-i18n="depth.hint">提示：开启后，左胳膊和左腿将被视为“后方”并自动置于躯干底层，颜色变暗，体现空间感。</div> <!-- 提示 -->
       </div> <!-- 深色处理设置结束 -->
   </div> <!-- 描边阴影面板结束 -->
+
+  <div class="tool-panel" data-tool="mask"> <!-- ==================== 非火柴人元件蒙版面板 ==================== -->
+    <div class="section-title" data-i18n="mask.title">蒙版</div> <!-- 蒙版标题 -->
+
+    <div id="maskBasicOpts"> <!-- 基础蒙版参数（独立开关） -->
+      <div class="divider" style="margin:8px 0;"></div> <!-- 分割线 -->
+      <div class="row"><button id="btnBasicMask" data-i18n="mask.basicOn">开启基础蒙版</button></div>
+      <div class="section-title" data-i18n="mask.basicTitle">基础蒙版</div> <!-- 基础蒙版标题 -->
+      <div class="row" id="maskShapeRow" style="gap:6px; flex-wrap:wrap;"> <!-- 蒙版形状 -->
+        <button type="button" class="btn-soft btn-xs" id="maskShapeRect" data-i18n="mask.shapeRect">矩形</button>
+        <button type="button" class="btn-soft btn-xs" id="maskShapeEllipse" data-i18n="mask.shapeEllipse">椭圆</button>
+      </div> <!-- 形状行结束 -->
+      <div class="row slider"><label data-i18n="mask.offsetX">水平位置</label><input type="range" id="maskX" min="-1" max="1" step="0.01" value="0"><span class="val" id="maskXVal">0.00</span></div>
+      <div class="row slider"><label data-i18n="mask.offsetY">垂直位置</label><input type="range" id="maskY" min="-1" max="1" step="0.01" value="0"><span class="val" id="maskYVal">0.00</span></div>
+      <div class="row slider"><label data-i18n="common.width">宽度</label><input type="range" id="maskW" min="0.05" max="2" step="0.01" value="1"><span class="val" id="maskWVal">1.00</span></div>
+      <div class="row slider"><label data-i18n="common.height">高度</label><input type="range" id="maskH" min="0.05" max="2" step="0.01" value="1"><span class="val" id="maskHVal">1.00</span></div>
+      <div class="row slider"><label data-i18n="mask.feather">羽化</label><input type="range" id="maskFeather" min="0" max="80" step="1" value="6"><span class="val" id="maskFeatherVal">6</span></div>
+      <div class="row"><label class="checkbox-label" style="font-size:12px;"><input type="checkbox" id="maskInvert"> <span data-i18n="mask.invert">反转蒙版</span></label></div>
+    </div> <!-- 基础蒙版参数结束 -->
+
+    <div id="maskChromaOpts"> <!-- 色度抠图参数（独立开关，与基础蒙版上下并列） -->
+      <div class="divider" style="margin:8px 0;"></div> <!-- 分割线 -->
+      <div class="row"><button id="btnChromaMask" data-i18n="mask.chromaOn">开启色度抠图</button></div>
+      <div class="section-title" data-i18n="mask.chromaTitle">色度抠图</div> <!-- 色度抠图标题 -->
+      <div class="row"> <!-- 键控颜色 -->
+        <label><span data-i18n="mask.keyColor">键控颜色</span> <input type="color" id="maskChromaColor" value="#00ff00"></label>
+      </div> <!-- 键控颜色行结束 -->
+      <div class="row slider"><label data-i18n="mask.similarity">相似度</label><input type="range" id="maskSimilarity" min="0.02" max="1" step="0.01" value="0.28"><span class="val" id="maskSimilarityVal">0.28</span></div>
+      <div class="row slider"><label data-i18n="mask.smoothness">平滑度</label><input type="range" id="maskSmoothness" min="0" max="1" step="0.01" value="0.12"><span class="val" id="maskSmoothnessVal">0.12</span></div>
+      <div class="row slider"><label data-i18n="mask.hueTolerance">色相容差</label><input type="range" id="maskHueTolerance" min="0" max="1" step="0.01" value="0.18"><span class="val" id="maskHueToleranceVal">0.18</span></div>
+      <div class="row slider"><label data-i18n="mask.saturationTolerance">饱和容差</label><input type="range" id="maskSaturationTolerance" min="0" max="1" step="0.01" value="0.25"><span class="val" id="maskSaturationToleranceVal">0.25</span></div>
+      <div class="row slider"><label data-i18n="mask.valueTolerance">明度容差</label><input type="range" id="maskValueTolerance" min="0" max="1" step="0.01" value="0.35"><span class="val" id="maskValueToleranceVal">0.35</span></div>
+      <div class="row slider"><label data-i18n="mask.spill">溢出抑制</label><input type="range" id="maskSpill" min="0" max="1" step="0.01" value="0.35"><span class="val" id="maskSpillVal">0.35</span></div>
+      <div class="row slider"><label data-i18n="mask.edgeFeather">边缘羽化</label><input type="range" id="maskEdgeFeather" min="0" max="40" step="1" value="2"><span class="val" id="maskEdgeFeatherVal">2</span></div>
+      <div class="row"><label class="checkbox-label" style="font-size:12px;"><input type="checkbox" id="maskChromaInvert"> <span data-i18n="mask.chromaInvert">只保留键控颜色</span></label></div>
+    </div> <!-- 色度抠图参数结束 -->
+
+    <div class="hint" style="margin-top:6px;" data-i18n="mask.hint">提示：蒙版作用于当前选中的图片、图形、对话框、画笔和视频元件；基础蒙版按元件包围盒裁剪，色度抠图按颜色逐像素键控。</div>
+  </div> <!-- 蒙版面板结束 -->
 
   <div class="tool-panel" data-tool="eraser"> <!-- ==================== 画笔 / 橡皮面板 v5.1.0 ==================== -->
 
@@ -847,12 +887,12 @@
     <div class="help-content" data-i18n-html="help.content"> <!-- 帮助内容（包含较多 HTML 标签） -->
       <b>1. 控制面板从上到下：</b><br> <!-- 标题 1 -->
       • 最上方是<b>导出PNG / 导出JPG / 全屏</b>，可勾选高清（4 倍分辨率）。<br> <!-- 列表项 -->
-      • <b>「添加物体」</b>可折叠展开：火柴人、插入图片、上传配饰、对话框、内置形状都在里面。<br> <!-- 列表项 -->
+      • <b>「添加物体」</b>可折叠展开：火柴人、插入图片、对话框、内置形状都在里面。<br> <!-- 列表项 -->
       • 下方是复制、删除、重置，再往下是<b>「更多设置」</b>与<b>本地预设</b>。<br><br> <!-- 列表项 -->
       <b>2. 基础操作：</b><br> <!-- 标题 2 -->
       • 选中：点击画布中的物体，或在元件列表点击。<br> <!-- 列表项 -->
       • 移动：<b>拖动画面上方的 <i data-icon="direction-adjustment-three"></i> 手柄</b>，或直接输入 X / Y 坐标；拖火柴人骨盆/躯干可整体移动。<br> <!-- 列表项 -->
-      • 旋转：<b>基础属性栏旋转数值可输入任意角度（不受 ±180 限制）</b>，也可点击 <i data-icon="rotate"></i> 打开旋转手柄在画面上拖动旋转；图片/配饰/图形可点击 <i data-icon="anchor"></i> 设置自定义锚点，旋转围绕锚点进行。<br> <!-- 列表项 -->
+      • 旋转：<b>基础属性栏旋转数值可输入任意角度（不受 ±180 限制）</b>，也可点击 <i data-icon="rotate"></i> 打开旋转手柄在画面上拖动旋转；图片/图形可点击 <i data-icon="anchor"></i> 设置自定义锚点，旋转围绕锚点进行。<br> <!-- 列表项 -->
       • 关节：拖蓝色关节点调整姿势，红色点为已固定的关节。<br> <!-- 列表项 -->
       • 视角：PC 端拖空白处平移、滚轮缩放；移动端双指拖动平移、捏合缩放。<br><br> <!-- 列表项 -->
       <b>3. 更多设置（小按钮）：</b><br> <!-- 标题 3 -->
@@ -1018,9 +1058,10 @@
     <div class="adv-row"> <!-- 视频导出操作行 -->
       <button id="btnExportGIF" class="btn-primary" data-i18n="export.gif">导出 GIF</button> <!-- 导出 GIF 动画 -->
       <button id="btnExportPNGSeq" data-i18n="export.pngSeq">导出 PNG序列</button> <!-- 导出 PNG 图片序列 -->
+      <button id="btnExportSVGSeq" data-i18n="export.svgSeq" title="仅导出矢量元件（火柴人/形状/画笔）；文字、位图、发光、扭曲不包含">导出 SVG序列</button> <!-- 导出 SVG 矢量序列 -->
       <button id="btnExportMP4" class="btn-soft" data-i18n="adv.mp4">导出 MP4</button> <!-- 导出 MP4 视频 -->
       <label class="adv-color-label"><span data-i18n="adv.mp4Bg">背景</span> <input type="color" id="mp4BgColor" value="#f4f6f9" title="MP4背景色" data-i18n-title="adv.mp4BgTitle"></label> <!-- MP4 视频背景色设置 -->
-      <button id="btnImportVideo"><i data-icon="videocamera"></i><span data-i18n="adv.importVideo">导入参考视频</span></button> <!-- 导入本地参考视频 -->
+      <button id="btnImportVideo"><i data-icon="videocamera"></i><span data-i18n="adv.importVideo">导入参考视频（仅参照，不可编辑）</span></button> <!-- 导入本地参考视频，与「插入视频」元件区分 -->
       <span id="videoCtrls" style="display:none; gap:4px;"> <!-- 视频控制按钮（导入后显示） -->
         <button id="btnToggleVideo" title="显示/隐藏参考视频" data-i18n-title="adv.showHideTitle"><i data-icon="preview-open"></i><span data-i18n="adv.showHide">显隐</span></button> <!-- 切换视频可见性 -->
         <button id="btnPlayVideo" title="播放/暂停参考视频" data-i18n-title="adv.playVideoTitle"><i data-icon="play"></i><span data-i18n="adv.playVideo">播放</span></button> <!-- 播放/暂停参考视频 -->

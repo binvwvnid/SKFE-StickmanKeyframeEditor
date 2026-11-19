@@ -225,8 +225,11 @@
   }
 
 /* 判断对象是否处于"已绑定"状态（配饰/图形/对话框/画笔） */
+function isMediaObj(o) {
+  return !!(o && (o.type === 'acc' || o.type === 'videoClip'));
+}
 function isBoundObj(o) {
-  return !!(o && (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink')
+  return !!(o && (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip')
     && o.bindTo !== 'none' && o.targetId);
 }
 
@@ -387,6 +390,33 @@ function syncDistortToAllFrames(obj) {
     syncMainLengthFromTracks();
     AppState.objects.length = 0;
     for (const o of getCombinedObjectsForRender()) AppState.objects.push(o);
+  }
+
+  /* v7.7.6：视频元件导入后默认铺满自身原长（按工程帧时长换算）。
+     后续播放/导出只认这段连续帧区间，不在段落外继续放完整视频。 */
+  function fillVideoClipToLength(obj, frameCount, frameMs) {
+    if (!obj || obj.type !== 'videoClip') return;
+    const count = Math.max(1, Math.round(frameCount || 1));
+    const ms = Math.max(1, Math.round(frameMs || 83));
+    const id = String(obj.id);
+    const t = AppState.tracks[id];
+    if (!t || !t.frames) return;
+    const start = AppState.currentFrameIndex;
+    const need = start + count;
+    while (AppState.frames.length < need) {
+      AppState.frames.push({ id: ++uid, duration: ms, isTween: false });
+    }
+    while (t.frames.length < need) t.frames.push(null);
+    for (let i = start; i < need; i++) {
+      if (i === start) { t.frames[i] = obj; continue; }
+      const c = cloneObjectKeepImg(obj);
+      if (!c) continue;
+      c.id = obj.id;
+      t.frames[i] = c;
+    }
+    syncMainLengthFromTracks();
+    AppState.objects = getCombinedObjectsForRender();
+    updateFrameBar();
   }
 
   /* ==================== 全屏 ==================== */
@@ -774,9 +804,29 @@ function syncDistortToAllFrames(obj) {
   const PROJECT_VERSION = 3;
   const PROJECT_MIN_VERSION = 3;
 
-  function cloneObjectForSave(o) {
+  function cloneObjectForSave(o, seenVideoIds) {
     const copy = JSON.parse(JSON.stringify(o, (k, v) => (k === 'img' ? undefined : v)));
     if (o.img && o.img.src) copy.imgSrc = o.img.src;
+    /* v7.7.1：视频元件是「一个完整视频」，直接把原始视频文件存成 dataURL，
+       不再保存 300 张抽帧 JPEG（既小得多，又能保留音轨）。运行时 videoClipSources
+       不进工程，打开时由 videoSrc 重建 <video>。
+       v7.7.6：视频现在会铺满很多帧，dataURL 只写一次，避免工程体积按帧数翻倍。 */
+    if (o.type === 'videoClip') {
+      const src = videoClipSources.get(o.id);
+      if (src && src.dataUrl) {
+        copy.videoW = src.w;
+        copy.videoH = src.h;
+        copy.videoDurMs = src.durMs;
+        copy.videoFps = src.fps;
+        if (!seenVideoIds || !seenVideoIds.has(String(o.id))) {
+          copy.videoSrc = src.dataUrl;
+          if (seenVideoIds) seenVideoIds.add(String(o.id));
+        }
+      }
+      delete copy.videoFrame;
+      delete copy.videoLoop;
+      delete copy.videoFrames;   /* 兼容清理：老版本的抽帧字段不再写回 */
+    }
     return copy;
   }
 
@@ -790,12 +840,13 @@ function syncDistortToAllFrames(obj) {
 
   function serializeTracks() {
     const out = {};
+    const seenVideoIds = new Set(); /* v7.7.6：同一视频的 dataURL 整轨只写一次 */
     for (const id in AppState.tracks) {
       const t = AppState.tracks[id];
       if (!t) continue;
       out[id] = {
         name: t.name || id,
-        frames: (t.frames || []).map(d => d ? cloneObjectForSave(d) : null)
+        frames: (t.frames || []).map(d => d ? cloneObjectForSave(d, seenVideoIds) : null)
       };
     }
     return out;
@@ -854,9 +905,66 @@ function syncDistortToAllFrames(obj) {
         }));
         delete o.imgSrc;
       }
+      /* v7.7.1：重建整体视频元件。新工程存 videoSrc（完整视频 dataURL，带音轨）；
+         老工程若只有 videoFrames（抽帧 JPEG 序列），再走旧的降级重建分支，保证旧档可读。 */
+      if (o.type === 'videoClip' && !videoClipSources.has(o.id)) {
+        if (o.videoSrc) {
+          const v = document.createElement('video');
+          v.src = o.videoSrc; v.muted = true; v.playsInline = true; v.preload = 'auto'; v.loop = false;
+          const src = {
+            id: o.id, video: v, dataUrl: o.videoSrc, w: o.videoW || 640, h: o.videoH || 360,
+            durMs: o.videoDurMs || 0, fps: o.videoFps || 12, frameCache: new Map()
+          };
+          videoClipSources.set(o.id, src);
+          promises.push(new Promise((resolve) => {
+            let settled = false;
+            const done = () => {
+              if (settled) return; settled = true;
+              if (!o.img) o.img = v;
+              resolve();
+            };
+            v.addEventListener('loadedmetadata', () => {
+              if (v.videoWidth) { src.w = v.videoWidth; src.h = v.videoHeight; }
+              if (v.duration && isFinite(v.duration)) src.durMs = Math.round(v.duration * 1000);
+              done();
+            }, { once: true });
+            v.addEventListener('error', done, { once: true });
+            setTimeout(done, 3000);
+            v.load();
+          }));
+          delete o.videoSrc;
+        } else if (Array.isArray(o.videoFrames) && o.videoFrames.length) {
+          /* 旧档降级：只有抽帧、没有音轨，按老方式拼回静态帧序列 */
+          const frames = [];
+          let pending = o.videoFrames.length;
+          o.videoFrames.forEach((url, i) => {
+            const img = new Image();
+            img.onload = () => {
+              const cv = document.createElement('canvas');
+              cv.width = img.naturalWidth || img.width;
+              cv.height = img.naturalHeight || img.height;
+              cv.getContext('2d').drawImage(img, 0, 0);
+              frames[i] = cv;
+              if (--pending === 0) {
+                videoClipSources.set(o.id, { frames, fps: o.videoFps || 12, durMs: o.videoDurMs || 83 });
+                const first = frames.find(Boolean);
+                if (first && !o.img) o.img = first;
+                EventBus.emit('need:render');
+              }
+            };
+            img.onerror = () => { if (--pending === 0 && frames.length) {
+              videoClipSources.set(o.id, { frames: frames.filter(Boolean), fps: o.videoFps || 12, durMs: o.videoDurMs || 83 });
+            } };
+            img.src = url;
+          });
+        }
+        delete o.videoFrames;
+      }
       if (typeof o.id === 'number') uid = Math.max(uid, o.id);
       if (o.ax === undefined) o.ax = 0;
       if (o.ay === undefined) o.ay = 0;
+      /* v7.7.3：老工程补蒙版默认字段，不改动原有点位/关键帧数据。 */
+      if (isMaskableObject(o)) maskFill(o);
     });
   }
 
@@ -1341,7 +1449,18 @@ function syncDistortToAllFrames(obj) {
     videoCache[idx] = offCanvas;
   }
 
+  let videoClipSeekTimer = null;
+  function seekVideoClipsToFrame(idx) {
+    if (isPlaying) return;                 /* 播放中由 playVideoClips 自然推进 */
+    if (!videoClipSources.size) return;
+    if (videoClipSeekTimer) clearTimeout(videoClipSeekTimer);
+    videoClipSeekTimer = setTimeout(() => {
+      videoClipSources.forEach(src => ensureVideoClipFrame(src, idx).then(() => EventBus.emit('need:render')));
+    }, 24);
+  }
+
   function seekVideoToFrame(idx) {
+    seekVideoClipsToFrame(idx); /* v7.7.1：视频元件定格到对应帧 */
     if (!refVideo || refVideo.readyState < 1) return;
     if (videoCache[idx]) return;
     if (seekDebounceTimer) clearTimeout(seekDebounceTimer);
@@ -2804,13 +2923,66 @@ function importActionPresets() {
     };
   }
 
+  /* ==================== v7.7.3 非火柴人元件蒙版 ====================
+     蒙版是元件自己的属性，不新建系统、不改 sub-track 结构：
+       · basic  ：按元件 OBB 做矩形/椭圆裁剪，可羽化、反转；
+       · chroma ：在离屏画布上按颜色逐像素键控，带色相/饱和/明度容差、
+                   平滑度、溢出抑制、边缘羽化等参数。
+     这里只放数据默认值与判定；真正的绘制包装在 renderScene 外层完成，
+     这样 acc / image / shape / bubble / ink / videoClip 全部自动生效。 */
+  function isMaskableObject(o) {
+    return !!(o && (o.type === 'image' || o.type === 'acc' || o.type === 'shape' ||
+      o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip'));
+  }
+
+  function makeMaskField() {
+    return {
+      /* v7.7.5：基础蒙版与色度抠图并列，各自独立开关，不再互斥切换。
+         enabled/mode 保留为兼容字段，由两个新开关推导，供老工程与关键帧读取。 */
+      enabled: false,
+      mode: 'basic',              /* 兼容字段：chroma 开时为 chroma，否则 basic */
+      basicEnabled: false,
+      chromaEnabled: false,
+      shape: 'rect',              /* rect | ellipse */
+      x: 0, y: 0, w: 1, h: 1,     /* 相对元件 OBB 的偏移与尺寸倍率 */
+      feather: 6,
+      invert: false,
+      chromaColor: '#00ff00',
+      similarity: 0.28,
+      smoothness: 0.12,
+      hueTolerance: 0.18,
+      saturationTolerance: 0.25,
+      valueTolerance: 0.35,
+      spillReduction: 0.35,
+      edgeFeather: 2,
+      chromaInvert: false
+    };
+  }
+
+  /* 老工程没有 mask 字段时补默认值；返回同一对象引用，方便直接写回。 */
+  function maskFill(o) {
+    if (!isMaskableObject(o)) return makeMaskField();
+    const migrating = !!(o.mask && o.mask.enabled !== undefined &&
+      o.mask.basicEnabled === undefined && o.mask.chromaEnabled === undefined);
+    if (!o.mask || typeof o.mask !== 'object' || Array.isArray(o.mask)) o.mask = makeMaskField();
+    const d = makeMaskField();
+    for (const k in d) if (o.mask[k] === undefined) o.mask[k] = d[k];
+    if (migrating && o.mask.enabled) {
+      if (o.mask.mode === 'chroma') o.mask.chromaEnabled = true;
+      else o.mask.basicEnabled = true;
+    }
+    o.mask.enabled = !!(o.mask.basicEnabled || o.mask.chromaEnabled);
+    o.mask.mode = o.mask.chromaEnabled ? 'chroma' : 'basic';
+    return o.mask;
+  }
+
   function makeImage(img, x, y) {
     const maxW = 360;
     let w = img.naturalWidth || img.width;
     let h = img.naturalHeight || img.height;
     const r = Math.min(1, maxW / w);
     w *= r; h *= r;
-    return { id: ++uid, type: 'image', name: 'Image', img, x, y, w, h, alpha: 1, scale: 1, layer: 1, locked: false, rot: 0, mirror: false, ax: 0, ay: 0, distort: makeDistortField() };
+    return { id: ++uid, type: 'image', name: 'Image', img, x, y, w, h, alpha: 1, scale: 1, layer: 1, locked: false, rot: 0, mirror: false, ax: 0, ay: 0, distort: makeDistortField(), mask: makeMaskField() };
   }
 
   function makeShape(shapeType, x, y) {
@@ -2819,7 +2991,7 @@ function importActionPresets() {
       x, y, w: 60, h: 60, alpha: 1, scale: 1, layer: 1, locked: false,
       fillColor: '#ff6b6b', strokeColor: '#333333', strokeWidth: 0,
       bindTo: 'none', targetId: null, offX: 0, offY: 0, rot: 0, ax: 0, ay: 0, mirror: false,
-      distort: makeDistortField()
+      distort: makeDistortField(), mask: makeMaskField()
     };
   }
 
@@ -2833,8 +3005,212 @@ function importActionPresets() {
       id: ++uid, type: 'acc', name: 'Accessory',
       img, x, y, w, h, alpha: 1, scale: 1, layer: 1, locked: false,
       bindTo: 'none', targetId: null, offX: 0, offY: 0, rot: 0, ax: 0, ay: 0, mirror: false,
-      distort: makeDistortField()
+      distort: makeDistortField(), mask: makeMaskField()
     };
+  }
+
+  /* ==================== v7.7.1 独立视频元件（整体视频，带声音） ====================
+     与「参考视频」（type:'video'，伪元件、不进轨道、不导出）彻底分开。
+     视频元件 type:'videoClip'：保留一个完整的 <video> 元素（音轨也在），
+     运行时直接 drawImage(video)；按工程帧时间 seek，保证定格与导出帧准确。
+     完全复用 acc 的渲染/绑定/扭曲/关键帧/橡皮擦/导出机制。
+     不再抽帧 —— 导入瞬间完成、无 300 张 canvas、无逐帧 400ms 等待，也不再卡顿。 */
+  const videoClipSources = new Map(); // id -> { video, dataUrl, w, h, durMs, fps, frameCache }
+  let videoClipRaf = null;
+
+  function makeVideoClip(videoEl, dataUrl, w, h, x, y, durMs, fps) {
+    const id = ++uid;
+    /* v7.7.6：不循环。视频只在其轨道段落覆盖的帧区间播放画面与声音。 */
+    videoEl.loop = false;
+    videoClipSources.set(id, {
+      id, video: videoEl, dataUrl: dataUrl || '', w, h,
+      durMs: durMs || 0, fps: fps || 12, frameCache: new Map()
+    });
+    const r = Math.min(1, 360 / w);
+    return {
+      id, type: 'videoClip', name: 'Video' + id,
+      img: videoEl, videoFrame: 0, videoLoop: false,
+      x, y, w: w * r, h: h * r,
+      alpha: 1, scale: 1, layer: 1, locked: false,
+      bindTo: 'none', targetId: null, offX: 0, offY: 0,
+      rot: 0, ax: 0, ay: 0, mirror: false,
+      distort: makeDistortField(), mask: makeMaskField()
+    };
+  }
+
+  /* v7.7.6：视频只认自己轨道里「当前连续出场段」的帧数。
+     段内第 k 帧 → 视频第 k 帧时长之和；段外下一帧就停画面与声音，不再整段循环。 */
+  function videoClipObjectAt(id, idx) {
+    const tid = String(id);
+    const t = AppState.tracks[tid];
+    if (!t || !t.frames || idx < 0 || idx >= t.frames.length) return null;
+    const d = getTrackFrame(tid, idx);
+    return (d && d.type === 'videoClip' && String(d.id) === tid) ? d : null;
+  }
+
+  function videoClipSegmentAt(id, idx) {
+    const has = (i) => !!videoClipObjectAt(id, i);
+    if (!has(idx)) return null;
+    let s = idx, e = idx;
+    while (has(s - 1)) s--;
+    while (has(e + 1)) e++;
+    return { start: s, end: e, count: e - s + 1 };
+  }
+
+  function videoClipTimeAt(src, frameIdx, obj) {
+    const id = (src && src.id != null) ? src.id : (obj && obj.id);
+    const o = obj || (id != null ? videoClipObjectAt(id, frameIdx) : null);
+    const seg = (id != null && o) ? videoClipSegmentAt(id, frameIdx) : null;
+    const start = seg ? seg.start : 0;
+    let t = 0;
+    for (let i = start; i < frameIdx; i++) t += (AppState.frames[i] && AppState.frames[i].duration) || Math.round(1000 / ((src && src.fps) || 12));
+    t /= 1000;
+    const dur = (src && src.video && isFinite(src.video.duration) && src.video.duration > 0)
+      ? src.video.duration
+      : (src && src.durMs ? src.durMs / 1000 : 0);
+    return dur > 0 ? Math.min(t, Math.max(0, dur - 0.02)) : t;
+  }
+
+  /* 把视频 seek 到指定工程帧并缓存一张画布快照，供渲染/导出同步取用。 */
+  function ensureVideoClipFrame(src, frameIdx) {
+    if (!src || !src.video) return Promise.resolve();
+    if (src.frameCache.has(frameIdx)) return Promise.resolve();
+    const v = src.video;
+    if (v.readyState < 1) return Promise.resolve();
+    const target = videoClipTimeAt(src, frameIdx);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return; settled = true;
+        v.removeEventListener('seeked', finish);
+        try {
+          if (v.readyState >= 2) {
+            const cv = document.createElement('canvas');
+            cv.width = src.w; cv.height = src.h;
+            cv.getContext('2d', { alpha: false }).drawImage(v, 0, 0, src.w, src.h);
+            src.frameCache.set(frameIdx, cv);
+            /* 只留最近 16 帧：导出是逐帧顺序渲染，旧帧用完即可丢弃，避免长片占用数百 MB */
+            if (src.frameCache.size > 16) {
+              const firstKey = src.frameCache.keys().next().value;
+              src.frameCache.delete(firstKey);
+            }
+          }
+        } catch (_) {}
+        resolve();
+      };
+      v.addEventListener('seeked', finish, { once: true });
+      if (Math.abs(v.currentTime - target) < 0.012) { finish(); return; }
+      try { v.currentTime = target; } catch (_) { finish(); return; }
+      setTimeout(finish, 600); // seek 卡住时的兜底
+    });
+  }
+
+  function videoClipFrameAt(o, frameIdx, isExporting) {
+    const src = videoClipSources.get(o.id);
+    if (!src) return o.img || null;
+    const idx = (frameIdx != null) ? frameIdx : AppState.currentFrameIndex;
+    const cached = src.frameCache.get(idx);
+    /* 导出/定格：优先用 seek 后缓存的精确帧；实时画布：优先用活的 video 保持流畅 */
+    if (isExporting || !isPlaying) {
+      if (cached) return cached;
+      if (src.video && src.video.readyState >= 2) return src.video;
+      return o.img || src.video || null;
+    }
+    if (src.video && src.video.readyState >= 2) return src.video;
+    return cached || o.img || null;
+  }
+
+  /* v7.7.6：每个视频只在自己轨道段落覆盖的帧区间播放；段落外立刻停画面与声音。 */
+  function pauseSingleVideoClip(src) {
+    const v = src && src.video;
+    if (!v) return;
+    try { v.pause(); } catch (_) {}
+    v.muted = true;
+  }
+
+  function playVideoClips(idx) {
+    videoClipSources.forEach((src, id) => {
+      const v = src.video;
+      if (!v || v.readyState < 1) return;
+      const o = videoClipObjectAt(id, idx);
+      if (!o) { pauseSingleVideoClip(src); return; }
+      const target = videoClipTimeAt(src, idx, o);
+      const frameMs = (AppState.frames[idx] && AppState.frames[idx].duration) || Math.round(1000 / (src.fps || 12));
+      const frameSec = frameMs / 1000;
+      v.loop = false;
+      /* 只在明显跑偏时 seek，避免每帧 currentTime 反复跳导致卡顿。 */
+      if (Math.abs(v.currentTime - target) > Math.max(0.05, frameSec * 0.6)) {
+        try { v.currentTime = target; } catch (_) {}
+      }
+      if (v.muted || v.paused) {
+        v.muted = false;
+        const p = v.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+    });
+    startVideoClipRaf();
+  }
+
+  function pauseVideoClips() {
+    let any = false;
+    videoClipSources.forEach((src) => {
+      const v = src.video;
+      if (!v) return;
+      try { v.pause(); } catch (_) {}
+      v.muted = true;
+      if (!v.paused) any = true;
+    });
+    if (videoClipRaf) { cancelAnimationFrame(videoClipRaf); videoClipRaf = null; }
+    return any;
+  }
+
+  function startVideoClipRaf() {
+    if (videoClipRaf) return;
+    const tick = () => {
+      if (!isPlaying) { videoClipRaf = null; return; }
+      renderCanvas(false);
+      videoClipRaf = requestAnimationFrame(tick);
+    };
+    videoClipRaf = requestAnimationFrame(tick);
+  }
+
+  /* 导出用：异步把所有视频元件 seek 到指定帧，随后同步渲染即可拿到正确画面。 */
+  async function prepareVideoClipsForFrame(idx) {
+    const jobs = [];
+    videoClipSources.forEach((src) => {
+      const v = src.video;
+      if (v) { try { v.pause(); } catch (_) {} v.muted = true; }
+      jobs.push(ensureVideoClipFrame(src, idx));
+    });
+    await Promise.all(jobs);
+  }
+
+  /* v7.7.4：删除视频元件（或它所在的帧/轨道/工程）时，必须把对应的 <video>
+     彻底停掉并从运行时表里移除。只清 track 的话，已 play() 的音轨会继续响。 */
+  function disposeVideoClipSource(id) {
+    const src = videoClipSources.get(id);
+    if (!src) return;
+    const v = src.video;
+    if (v) {
+      try { v.pause(); } catch (_) {}
+      try { v.muted = true; } catch (_) {}
+      try { v.removeAttribute('src'); v.load(); } catch (_) {}
+    }
+    if (src.frameCache) src.frameCache.clear();
+    videoClipSources.delete(id);
+  }
+
+  function cleanupOrphanVideoClipSources() {
+    if (!videoClipSources.size) return;
+    const alive = new Set();
+    for (const tid in AppState.tracks) {
+      const t = AppState.tracks[tid];
+      if (!t || !t.frames) continue;
+      for (const d of t.frames) if (d && d.type === 'videoClip') alive.add(String(d.id));
+    }
+    Array.from(videoClipSources.keys()).forEach(id => {
+      if (!alive.has(String(id))) disposeVideoClipSource(id);
+    });
   }
 
   function makeBubble(x, y) {
@@ -2846,7 +3222,7 @@ function importActionPresets() {
       fontSize: 20, fillColor: '#ffffff', strokeColor: '#000000', strokeWidth: 2,
       isMirrored: false, customSize: false, customW: 180, customH: 90,
       bindTo: 'none', targetId: null, offX: 0, offY: 0, rot: 0, ax: 0, ay: 0,
-      distort: makeDistortField()
+      distort: makeDistortField(), mask: makeMaskField()
     };
   }
 
@@ -2859,6 +3235,7 @@ function importActionPresets() {
     if (obj.type === 'figure') { counts.figure++; obj.name = 'Stickman' + counts.figure; }
     else if (obj.type === 'image') { counts.image++; obj.name = 'Image' + counts.image; }
     else if (obj.type === 'acc') { counts.acc++; obj.name = 'Acc' + counts.acc; }
+    else if (obj.type === 'videoClip') { counts.videoClip = (counts.videoClip || 0) + 1; obj.name = 'Video' + counts.videoClip; }
     else if (obj.type === 'shape') {
       counts.shape++;
       const map = { circle: 'Circle', rect: 'Square', tri: 'Triangle' };
@@ -4437,6 +4814,52 @@ function importActionPresets() {
     }});
   }
 
+  /* v7.7.0：视频元件渲染 —— 与 queueAcc 同构，只是图像源按工程帧索引取视频抽帧 */
+  function queueVideoClip(vc, isSel, isExporting, opts) {
+    opts = opts || {};
+    const alphaMul = resolveAlphaMul(opts, vc);
+    const trans = getBindTransform(vc);
+    const figTr = getBoundFigureTransform(vc);
+    const finalScale = vc.scale * trans.syncScale;
+    const w = vc.w * finalScale, h = vc.h * finalScale;
+    const { ax, ay } = getAnchorOffset(vc, finalScale);
+    const src = videoClipFrameAt(vc, opts.frameIndex != null ? opts.frameIndex : AppState.currentFrameIndex, isExporting);
+    const distMap = SKFE.systems.distort.getMapping(vc);
+    if (distMap) {
+      renderQueue.push({ level: vc.layer, draw: () => {
+        ctx.save();
+        ctx.globalAlpha = vc.alpha * alphaMul;
+        if (src) SKFE.systems.distort.drawWarpedBitmap(ctx, src, distMap);
+        ctx.restore();
+        if (isSel && !isExporting && !transformBoxOn) {
+          strokeWarpQuad(distMap, vc.locked ? 'rgba(239, 68, 68, 0.95)' : 'rgba(255,165,0,.95)');
+        }
+      }});
+      return;
+    }
+    renderQueue.push({ level: vc.layer, draw: () => {
+      ctx.save();
+      applyFigTransformCtx(figTr);
+      ctx.globalAlpha = vc.alpha * alphaMul;
+      ctx.translate(trans.x + ax, trans.y + ay);
+      ctx.rotate(trans.angle);
+      if (vc.mirror) ctx.scale(-1, 1);
+      if (src) ctx.drawImage(src, -w / 2 - ax, -h / 2 - ay, w, h);
+      ctx.restore();
+      if (isSel && !isExporting && !transformBoxOn) {
+        ctx.save();
+        applyFigTransformCtx(figTr);
+        ctx.strokeStyle = vc.locked ? 'rgba(239, 68, 68, 0.95)' : 'rgba(255,165,0,.95)';
+        ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+        ctx.translate(trans.x + ax, trans.y + ay);
+        ctx.rotate(trans.angle);
+        if (vc.mirror) ctx.scale(-1, 1);
+        ctx.strokeRect(-w / 2 - ax, -h / 2 - ay, w, h);
+        ctx.restore();
+      }
+    }});
+  }
+
   function queueShape(shape, isSel, isExporting, opts) {
     opts = opts || {};
     const alphaMul = resolveAlphaMul(opts, shape);
@@ -5008,6 +5431,286 @@ function importActionPresets() {
     return { x: im.x - w / 2, y: im.y - h / 2, w, h };
   }
 
+  /* ==================== v7.7.3 蒙版绘制包装 ====================
+     不逐个改 queueXxx：先把单个对象生成的绘制项收集起来，整体画到离屏画布，
+     再做基础裁剪 / 色度键控，最后按原矩阵贴回。这样图片、图形、对话框、
+     画笔、视频元件一次接入，选中框（level>=90000）不会被蒙版裁掉。 */
+  let maskScratchContent = null;
+  let maskScratchShape = null;
+
+  function ensureMaskCanvas(which, w, h, readFrequently) {
+    let cv = (which === 'content') ? maskScratchContent : maskScratchShape;
+    if (!cv) {
+      cv = document.createElement('canvas');
+      if (which === 'content') maskScratchContent = cv; else maskScratchShape = cv;
+    }
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    if (readFrequently && !cv.__skfeRead) {
+      try { cv.getContext('2d', { willReadFrequently: true }); } catch (_) {}
+      cv.__skfeRead = true;
+    }
+    return cv;
+  }
+
+  function maskPoint(m, p) {
+    if (!m) return { x: p.x, y: p.y };
+    return { x: m.a * p.x + m.c * p.y + m.e, y: m.b * p.x + m.d * p.y + m.f };
+  }
+
+  function maskMatrixScale(m) {
+    if (!m) return 1;
+    const det = Math.abs(m.a * m.d - m.b * m.c);
+    return det > 1e-6 ? Math.sqrt(det) : 1;
+  }
+
+  function hexRgbLocal(hex) {
+    const h = String(hex || '#000000').replace('#', '');
+    const s = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+    const n = parseInt(s, 16);
+    if (isNaN(n)) return [0, 0, 0];
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function rgbHsvLocal(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    let h = 0;
+    if (d > 1e-6) {
+      if (max === r) h = ((g - b) / d) % 6;
+      else if (max === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60;
+      if (h < 0) h += 360;
+    }
+    return { h, s: max > 0 ? d / max : 0, v: max };
+  }
+
+  function hueDiffLocal(a, b) {
+    let d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+
+  function traceMaskPath(c, obb, cfg, M) {
+    const angle = obb.angle || 0;
+    const ux = { x: Math.cos(angle), y: Math.sin(angle) };
+    const vy = { x: -Math.sin(angle), y: Math.cos(angle) };
+    const ow = Math.max(1, obb.w || 0), oh = Math.max(1, obb.h || 0);
+    const ox = Number(cfg.x) || 0, oy = Number(cfg.y) || 0;
+    const cx = (obb.cx || 0) + ux.x * ox * ow + vy.x * oy * oh;
+    const cy = (obb.cy || 0) + ux.y * ox * ow + vy.y * oy * oh;
+    const mw = Math.max(1, ow * (Number(cfg.w) || 1));
+    const mh = Math.max(1, oh * (Number(cfg.h) || 1));
+
+    if (cfg.shape === 'ellipse') {
+      const cd = maskPoint(M, { x: cx, y: cy });
+      const ud = maskPoint(M, { x: cx + ux.x, y: cy + ux.y });
+      const vd = maskPoint(M, { x: cx + vy.x, y: cy + vy.y });
+      c.setTransform(ud.x - cd.x, ud.y - cd.y, vd.x - cd.x, vd.y - cd.y, cd.x, cd.y);
+      c.beginPath();
+      c.ellipse(0, 0, mw / 2, mh / 2, 0, 0, TAU);
+      c.fill();
+    } else {
+      const pts = [
+        { x: cx - ux.x * mw / 2 - vy.x * mh / 2, y: cy - ux.y * mw / 2 - vy.y * mh / 2 },
+        { x: cx + ux.x * mw / 2 - vy.x * mh / 2, y: cy + ux.y * mw / 2 - vy.y * mh / 2 },
+        { x: cx + ux.x * mw / 2 + vy.x * mh / 2, y: cy + ux.y * mw / 2 + vy.y * mh / 2 },
+        { x: cx - ux.x * mw / 2 + vy.x * mh / 2, y: cy - ux.y * mw / 2 + vy.y * mh / 2 }
+      ].map(p => maskPoint(M, p));
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.beginPath();
+      pts.forEach((p, i) => { if (i === 0) c.moveTo(p.x, p.y); else c.lineTo(p.x, p.y); });
+      c.closePath();
+      c.fill();
+    }
+  }
+
+  function applyBasicMaskToCanvas(c, W, H, M, obb, cfg) {
+    const maskCv = ensureMaskCanvas('shape', W, H, false);
+    const mc = maskCv.getContext('2d');
+    mc.setTransform(1, 0, 0, 1, 0, 0);
+    mc.clearRect(0, 0, W, H);
+    mc.save();
+    if (cfg.invert) {
+      mc.fillStyle = '#fff';
+      mc.fillRect(0, 0, W, H);
+      mc.globalCompositeOperation = 'destination-out';
+    }
+    mc.fillStyle = '#fff';
+    const feather = Math.max(0, Number(cfg.feather) || 0) * maskMatrixScale(M);
+    try { mc.filter = feather > 0 ? 'blur(' + feather.toFixed(2) + 'px)' : 'none'; } catch (_) {}
+    traceMaskPath(mc, obb, cfg, M);
+    mc.restore();
+
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = 'destination-in';
+    c.drawImage(maskCv, 0, 0);
+    c.restore();
+  }
+
+  function boxBlurAlpha(data, w, h, radius) {
+    if (!(radius >= 1)) return;
+    const n = w * h;
+    const src = new Uint8ClampedArray(n);
+    const tmp = new Uint8ClampedArray(n);
+    for (let i = 0; i < n; i++) src[i] = data[i * 4 + 3];
+    const r = Math.min(12, Math.max(1, Math.round(radius)));
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[row + Math.min(w - 1, Math.max(0, k))];
+      for (let x = 0; x < w; x++) {
+        tmp[row + x] = sum / (r * 2 + 1);
+        const out = Math.min(w - 1, Math.max(0, x - r));
+        const inc = Math.min(w - 1, Math.max(0, x + r + 1));
+        sum += src[row + inc] - src[row + out];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += tmp[Math.min(h - 1, Math.max(0, k)) * w + x];
+      for (let y = 0; y < h; y++) {
+        src[y * w + x] = sum / (r * 2 + 1);
+        const out = Math.min(h - 1, Math.max(0, y - r));
+        const inc = Math.min(h - 1, Math.max(0, y + r + 1));
+        sum += tmp[inc * w + x] - tmp[out * w + x];
+      }
+    }
+    for (let i = 0; i < n; i++) data[i * 4 + 3] = src[i];
+  }
+
+  function applyChromaMaskToCanvas(c, W, H, M, obb, cfg) {
+    const pts = (obb.corners || []).map(p => maskPoint(M, p));
+    if (!pts.length) return;
+    const scale = maskMatrixScale(M);
+    const pad = Math.ceil((Number(cfg.edgeFeather) || 0) * scale + 10);
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    pts.forEach(p => { l = Math.min(l, p.x); t = Math.min(t, p.y); r = Math.max(r, p.x); b = Math.max(b, p.y); });
+    l = Math.max(0, Math.floor(l - pad)); t = Math.max(0, Math.floor(t - pad));
+    r = Math.min(W, Math.ceil(r + pad)); b = Math.min(H, Math.ceil(b + pad));
+    const pw = r - l, ph = b - t;
+    if (pw <= 0 || ph <= 0) return;
+
+    const img = c.getImageData(l, t, pw, ph);
+    const data = img.data;
+    const key = hexRgbLocal(cfg.chromaColor);
+    const kHsv = rgbHsvLocal(key[0], key[1], key[2]);
+    const threshold = Math.max(0.01, Math.min(1, Number(cfg.similarity) || 0.28));
+    const smooth = Math.max(0, Math.min(1, Number(cfg.smoothness) || 0));
+    const hueTol = Math.max(0, Math.min(1, Number(cfg.hueTolerance) || 0));
+    const satTol = Math.max(0, Math.min(1, Number(cfg.saturationTolerance) || 0));
+    const valTol = Math.max(0, Math.min(1, Number(cfg.valueTolerance) || 0));
+    const spill = Math.max(0, Math.min(1, Number(cfg.spillReduction) || 0));
+    const inv = !!cfg.chromaInvert;
+
+    for (let y = 0; y < ph; y++) {
+      for (let x = 0; x < pw; x++) {
+        const i = (y * pw + x) * 4;
+        const a0 = data[i + 3];
+        if (!a0) continue;
+        let rr = data[i], gg = data[i + 1], bb = data[i + 2];
+        const nr = (rr - key[0]) / 255, ng = (gg - key[1]) / 255, nb = (bb - key[2]) / 255;
+        let score = Math.sqrt(nr * nr + ng * ng + nb * nb) / Math.sqrt(3);
+        if (kHsv.s > 0.08) {
+          const hsv = rgbHsvLocal(rr, gg, bb);
+          const hp = Math.max(0, hueDiffLocal(hsv.h, kHsv.h) / 180 - hueTol) * 0.9;
+          const sp = Math.max(0, Math.abs(hsv.s - kHsv.s) - satTol) * 0.5;
+          const vp = Math.max(0, Math.abs(hsv.v - kHsv.v) - valTol) * 0.5;
+          score = Math.max(score, hp, sp, vp);
+        }
+        let keep;
+        if (smooth < 0.001) keep = score >= threshold ? 1 : 0;
+        else {
+          const u = Math.max(0, Math.min(1, (score - threshold) / smooth));
+          keep = u * u * (3 - 2 * u);
+        }
+        if (inv) keep = 1 - keep;
+        let alpha = a0 * keep;
+
+        if (spill > 0 && alpha > 0 && alpha < 255) {
+          const edge = 1 - Math.abs(alpha / 255 * 2 - 1);
+          const f = spill * edge;
+          if (key[0] >= key[1] && key[0] >= key[2]) rr = rr * (1 - f) + Math.min(gg, bb) * f;
+          else if (key[1] >= key[0] && key[1] >= key[2]) gg = gg * (1 - f) + Math.min(rr, bb) * f;
+          else bb = bb * (1 - f) + Math.min(rr, gg) * f;
+          data[i] = rr; data[i + 1] = gg; data[i + 2] = bb;
+        }
+        data[i + 3] = alpha;
+      }
+    }
+
+    const featherPx = Math.max(0, Number(cfg.edgeFeather) || 0) * scale;
+    if (featherPx >= 1) boxBlurAlpha(data, pw, ph, featherPx);
+    c.putImageData(img, l, t);
+  }
+
+  function wrapObjectItemsWithMask(o, produced) {
+    if (!isMaskableObject(o)) return produced;
+    const cfg = maskFill(o);
+    const useBasic = !!cfg.basicEnabled;
+    const useChroma = !!cfg.chromaEnabled;
+    if (!useBasic && !useChroma) return produced;
+    const overlays = produced.filter(it => (it.level || 0) >= 90000);
+    const content = produced.filter(it => (it.level || 0) < 90000);
+    if (!content.length) return produced;
+    const level = Math.min.apply(null, content.map(it => it.level || 0));
+
+    const wrapper = { level: level, draw: () => {
+      const mainCtx = ctx;
+      /* SVG 录制器只收矢量指令；蒙版是像素级后处理，SVG 序列继续走原矢量路径。 */
+      if (!mainCtx || mainCtx.__isSvgRecorder) {
+        content.forEach(it => it.draw());
+        return;
+      }
+      const obb = getObjectOBB(o);
+      if (!obb || !obb.corners || !mainCtx.canvas) {
+        content.forEach(it => it.draw());
+        return;
+      }
+      const W = mainCtx.canvas.width, H = mainCtx.canvas.height;
+      if (!(W > 0) || !(H > 0)) {
+        content.forEach(it => it.draw());
+        return;
+      }
+      let M = null;
+      try { M = mainCtx.getTransform(); } catch (_) {}
+      const contentCv = ensureMaskCanvas('content', W, H, useChroma);
+      const cctx = contentCv.getContext('2d', useChroma ? { willReadFrequently: true } : undefined);
+      cctx.setTransform(1, 0, 0, 1, 0, 0);
+      cctx.clearRect(0, 0, W, H);
+      if (M) cctx.setTransform(M.a, M.b, M.c, M.d, M.e, M.f);
+      const savedCtx = ctx;
+      ctx = cctx;
+      try {
+        content.forEach(it => it.draw());
+      } finally {
+        ctx = savedCtx;
+      }
+      cctx.setTransform(1, 0, 0, 1, 0, 0);
+      /* 两个开关互不排斥：先按包围盒裁剪，再做色度键控。 */
+      if (useBasic) applyBasicMaskToCanvas(cctx, W, H, M, obb, cfg);
+      if (useChroma) applyChromaMaskToCanvas(cctx, W, H, M, obb, cfg);
+      mainCtx.save();
+      try {
+        mainCtx.setTransform(1, 0, 0, 1, 0, 0);
+        mainCtx.drawImage(contentCv, 0, 0);
+      } finally {
+        mainCtx.restore();
+      }
+    }};
+    return [wrapper].concat(overlays);
+  }
+
+  function queueObjectWithMask(o, isSel, isExporting, opts) {
+    const before = renderQueue.length;
+    queueObjectByType(o, isSel, isExporting, opts);
+    const produced = renderQueue.splice(before);
+    const wrapped = wrapObjectItemsWithMask(o, produced);
+    wrapped.forEach(it => renderQueue.push(it));
+    return wrapped;
+  }
+
   function renderScene(list, opts) {
     opts = opts || {};
     const isExporting = !!opts.isExporting;
@@ -5027,19 +5730,17 @@ function importActionPresets() {
       // figure 的橡皮擦走 queueFigure 内部的肢体局部遮罩（drawMaskedLimb 等），
       // 只有图片/图形/对话框这类整体对象才走 drawErasedObjectGroup。
       if (o.type !== 'figure' && SKFE.systems.eraser.hasStrokes(o)) {
-        const before = renderQueue.length;
-        queueObjectByType(o, isSel, isExporting, opts);
-        const produced = renderQueue.splice(before);
+        const produced = queueObjectWithMask(o, isSel, isExporting, opts);
         const content = produced.filter(it => (it.level || 0) < 90000);
         const overlays = produced.filter(it => (it.level || 0) >= 90000);
         if (content.length) {
-          const minLevel = Math.min.apply(null, content.map(it => it.level));
+          const minLevel = Math.min.apply(null, content.map(it => it.level || 0));
           renderQueue.push({ level: minLevel, draw: () => drawErasedObjectGroup(o, content) });
         }
         overlays.forEach(it => renderQueue.push(it));
         continue;
       }
-      queueObjectByType(o, isSel, isExporting, opts);
+      queueObjectWithMask(o, isSel, isExporting, opts);
     }
 
     const q = renderQueue;
@@ -5183,7 +5884,7 @@ function importActionPresets() {
       if (o.mirror) m = tboxMatMul(m, tboxMatS(-1, 1));
       return tboxObbFromCorners(tboxQuadFromMatrix(m, -b.w / 2 - ax, -b.h / 2 - ay, b.w / 2 - ax, b.h / 2 - ay));
     }
-    if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble') {
+    if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'videoClip') {
       const trans = getBindTransform(o);
       const figTr = getBoundFigureTransform(o);
       const finalScale = o.scale * trans.syncScale;
@@ -5983,7 +6684,7 @@ function importActionPresets() {
     if (o.type === 'image') {
       return { x: o.x + (o.ax || 0) * o.scale, y: o.y + (o.ay || 0) * o.scale };
     }
-    if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') {
+    if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') {
       if (o.bindTo === 'none' || !o.targetId) {
         return { x: o.x + (o.ax || 0) * o.scale, y: o.y + (o.ay || 0) * o.scale };
       }
@@ -6038,7 +6739,7 @@ function importActionPresets() {
       } else {
         const tr = getBindTransform(AppState.selected);
         x = tr.x; y = tr.y;
-        typeIcon = AppState.selected.type === 'acc' ? 'crown' : AppState.selected.type === 'shape' ? 'square' : 'comment-one';
+        typeIcon = AppState.selected.type === 'acc' ? 'add-picture' : AppState.selected.type === 'videoClip' ? 'videocamera' : AppState.selected.type === 'shape' ? 'square' : 'comment-one';
         typeName = AppState.selected.name;
       }
       document.getElementById('coordType').innerHTML = ic(typeIcon) + ' ' + typeName;
@@ -6066,7 +6767,7 @@ function importActionPresets() {
 
   function getObjectWorldPos(o) {
     if (!o) return { x: 0, y: 0 };
-    if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') { // brush-v5.1.0: ink 走绑定坐标
+    if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') { // brush-v5.1.0: ink 走绑定坐标
       const tr = getBindTransform(o);
       return { x: tr.x, y: tr.y };
     }
@@ -6404,7 +7105,7 @@ function importActionPresets() {
       anchorHandleEl.style.display = 'none'; 
       return; 
     }
-    if (!(AppState.selected.type === 'image' || AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble')) {
+    if (!(AppState.selected.type === 'image' || AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip')) {
       anchorHandleEl.style.display = 'none';
       return;
     }
@@ -6495,6 +7196,44 @@ function importActionPresets() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (color == null) ctx.clearRect(0, 0, canvas.width, canvas.height);
     else { ctx.fillStyle = color; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+    ctx.restore();
+  }
+
+  /* v7.7.3：蒙版工具激活时，在画布上画出当前元件的裁剪框，方便对照参数调整 */
+  function drawMaskOutline(o) {
+    if (!o || !isMaskableObject(o) || !maskEditMode) return;
+    const cfg = maskFill(o);
+    if (!cfg.basicEnabled) return; /* v7.7.5：只有基础蒙版有自己的裁剪框可画 */
+    const obb = getObjectOBB(o);
+    if (!obb || !(obb.w > 0) || !(obb.h > 0)) return;
+    const angle = obb.angle || 0;
+    const ux = { x: Math.cos(angle), y: Math.sin(angle) };
+    const vy = { x: -Math.sin(angle), y: Math.cos(angle) };
+    const ox = Number(cfg.x) || 0, oy = Number(cfg.y) || 0;
+    const cx = (obb.cx || 0) + ux.x * ox * obb.w + vy.x * oy * obb.h;
+    const cy = (obb.cy || 0) + ux.y * ox * obb.w + vy.y * oy * obb.h;
+    const mw = Math.max(1, obb.w * (Number(cfg.w) || 1));
+    const mh = Math.max(1, obb.h * (Number(cfg.h) || 1));
+    const k = 1 / Math.max(0.1, AppState.viewScale || 1);
+    ctx.save();
+    ctx.strokeStyle = '#22d3ee';
+    ctx.lineWidth = 2 * k;
+    ctx.setLineDash([6 * k, 4 * k]);
+    if (cfg.shape === 'ellipse') {
+      ctx.translate(cx, cy); ctx.rotate(angle);
+      ctx.beginPath(); ctx.ellipse(0, 0, mw / 2, mh / 2, 0, 0, TAU);
+    } else {
+      const pts = [
+        { x: cx - ux.x * mw / 2 - vy.x * mh / 2, y: cy - ux.y * mw / 2 - vy.y * mh / 2 },
+        { x: cx + ux.x * mw / 2 - vy.x * mh / 2, y: cy + ux.y * mw / 2 - vy.y * mh / 2 },
+        { x: cx + ux.x * mw / 2 + vy.x * mh / 2, y: cy + ux.y * mw / 2 + vy.y * mh / 2 },
+        { x: cx - ux.x * mw / 2 + vy.x * mh / 2, y: cy - ux.y * mw / 2 + vy.y * mh / 2 }
+      ];
+      ctx.beginPath();
+      pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+      ctx.closePath();
+    }
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -6601,9 +7340,10 @@ function importActionPresets() {
       ctx.scale(AppState.viewScale, AppState.viewScale);
       drawCanvasBounds();
       if (anchorModeOn && AppState.selected && !AppState.selected.locked &&
-          (AppState.selected.type === 'image' || AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble')) {
+          (AppState.selected.type === 'image' || AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip')) {
         drawAnchorMarker();
       }
+      drawMaskOutline(AppState.selected);
       ctx.restore();
 
       /* 绘制吸附紫色辅助线 */
@@ -6903,7 +7643,8 @@ function importActionPresets() {
   function layerItemIconId(o) {
     if (o.type === 'figure') return 'stickman';
     if (o.type === 'image') return 'add-picture';
-    if (o.type === 'acc') return 'crown';
+    if (o.type === 'acc') return 'add-picture';
+    if (o.type === 'videoClip') return 'videocamera';
     if (o.type === 'shape') return 'square';
     if (o.type === 'bubble') return 'comment-one';
     if (o.type === 'ink') return 'pencil';
@@ -7348,7 +8089,8 @@ function importActionPresets() {
       let icon = 'help';
       if (o.type === 'figure') icon = 'stickman';
       else if (o.type === 'image') icon = 'add-picture';
-      else if (o.type === 'acc') icon = 'crown';
+      else if (o.type === 'acc') icon = 'add-picture';
+      else if (o.type === 'videoClip') icon = 'videocamera';
       else if (o.type === 'shape') icon = 'square';
       else if (o.type === 'bubble') icon = 'comment-one';
       else if (o.type === 'ink') icon = 'pencil'; // brush-v5.1.0: §6.3.9
@@ -7666,7 +8408,7 @@ function importActionPresets() {
     if (!isSubTrackMode() || !o || o.type === 'video') return 1;
     if (String(o.id) === AppState.activeTrackId) return 1;
     // 【新增】：如果它是绑定在当前元件上的配件/形状/气泡，也视为自身的一部分
-    if ((o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') && String(o.targetId) === AppState.activeTrackId) {
+    if ((o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') && String(o.targetId) === AppState.activeTrackId) {
       return 1;
     }
     if (otherTracksVisibility === 'hide') return 0;
@@ -8864,6 +9606,8 @@ function importActionPresets() {
       refVideoPlaying = true;
       startVideoRaf();
     }
+    /* v7.7.1：视频元件带声音 —— 复刻参考视频机制，随播放取消静音并同步 currentTime */
+    playVideoClips(idx);
 
     EventBus.emit('need:render');
     playTimer = requestAnimationFrame(playTick);
@@ -8882,6 +9626,8 @@ function importActionPresets() {
       if (refVideoRaf) { cancelAnimationFrame(refVideoRaf); refVideoRaf = null; }
       updateVideoUI();
     }
+    pauseVideoClips(); /* v7.7.1：视频元件暂停并静音 */
+    seekVideoClipsToFrame(AppState.currentFrameIndex); /* 回到当前帧对应的画面 */
     EventBus.emit('need:render');
   }
 
@@ -8903,6 +9649,8 @@ function importActionPresets() {
       AppState.objects = getCombinedObjectsForRenderAt(st.idx);
       AppState.currentFrameIndex = st.idx;
       if (!refVideoPlaying) seekVideoToFrame(AppState.currentFrameIndex);
+      /* v7.7.6：帧推进时同步视频元件——段落外停音，段落内按段内时间继续。 */
+      if (videoClipSources.size) playVideoClips(st.idx);
       renderCanvas(false);
       updateFrameBarHighlight();
       SKFE.systems.camera.updateCameraPreview(); // ⬅️ 新增这一行！让预览窗口跟着刷新
@@ -9864,6 +10612,8 @@ function importActionPresets() {
     if (gifBtn) gifBtn.textContent = isMulti ? tr2('export.multiGif', '导出多选帧GIF') : tr2('export.gif', '导出 GIF');
     const seqBtn = document.getElementById('btnExportPNGSeq');
     if (seqBtn) seqBtn.textContent = isMulti ? tr2('export.multiPngSeq', '导出多选帧PNG序列') : tr2('export.pngSeq', '导出 PNG序列');
+    const svgSeqBtn = document.getElementById('btnExportSVGSeq');
+    if (svgSeqBtn) svgSeqBtn.textContent = isMulti ? tr2('export.multiSvgSeq', '导出多选帧SVG序列') : tr2('export.svgSeq', '导出 SVG序列');
 
     // 4. 全局属性修改标签
     const geBtn = document.querySelector('.adv-toggle[data-toggle="globalEdit"]');
@@ -10127,6 +10877,7 @@ function importActionPresets() {
       multiSelectedFrames.clear();
       reconcileAllTracks();
       trimTrailingEmptyFrames();
+      cleanupOrphanVideoClipSources(); /* v7.7.4：删帧后不再出场的视频要停音 */
       if (AppState.currentFrameIndex >= AppState.frames.length) AppState.currentFrameIndex = AppState.frames.length - 1;
       if (AppState.currentFrameIndex < 0) AppState.currentFrameIndex = 0;
       invalidateAllFrameThumbs();
@@ -10152,6 +10903,7 @@ function importActionPresets() {
     multiSelectedFrames.clear();
     reconcileAllTracks();
     trimTrailingEmptyFrames();
+    cleanupOrphanVideoClipSources(); /* v7.7.4：删帧后不再出场的视频要停音 */
     if (AppState.currentFrameIndex >= AppState.frames.length) AppState.currentFrameIndex = AppState.frames.length - 1;
     if (AppState.currentFrameIndex < 0) AppState.currentFrameIndex = 0;
     invalidateAllFrameThumbs();
@@ -10245,6 +10997,7 @@ function importActionPresets() {
     setCtx: (c) => { ctx = c; },
     renderScene,
     getObjectsForFrameAt,
+    prepareVideoClipsForFrame,
     invalidateAllFrameThumbs,
     updateFrameBar,
     // 播放状态（导出前需暂停）
@@ -10271,6 +11024,24 @@ function importActionPresets() {
       outH: _sz.h,
       crop,
       transparent
+    });
+  }
+
+  function exportSelectedSVGs() {
+    if (!multiSelectMode || multiSelectedFrames.size === 0) return;
+    if (isPlaying) pause();
+    syncFrameRef();
+    const _sz = getExportSize();
+    const transparent = document.getElementById('gifTransparent').checked;
+    /* v7.7.2：SVG 扫全部轨道，不受当前子轨道影响（否则选到视频轨会全导出空 SVG） */
+    const trackId = null;
+    const indices = Array.from(multiSelectedFrames).sort((a, b) => a - b);
+    const list = indices.map(i => AppState.frames[i]).filter(Boolean);
+    if (!list.length) return;
+    const cam = shouldSkipCameraForExport() ? null : (getCurrentCameraObject() || getCameraAtFrame(0));
+    const crop = cam ? null : getCropForFrames(list, _sz.w, _sz.h, null);
+    SKFE.features.export.exportSVGsAsZip(list, null, {
+      outW: _sz.w, outH: _sz.h, crop, transparent
     });
   }
 
@@ -10457,6 +11228,8 @@ function importActionPresets() {
         if (String(AppState.activeTrackId) === String(tid)) AppState.activeTrackId = TRACK_ALL_ID;
       }
     }
+    /* v7.7.4：轨道没了，视频元件也就不再出场——把它的 <video> 停掉，防止音频残留。 */
+    cleanupOrphanVideoClipSources();
     /* 轨道少了一行，面板要重画（事件只是排进 rAF，不会打断当前的加载/删除流程） */
     if (removed && typeof EventBus !== 'undefined') EventBus.emit('need:render');
     return removed;
@@ -11124,7 +11897,7 @@ function importActionPresets() {
         octx.clip();
         octx.restore();
       }
-      renderScene(objList, { isExporting: true, includeHidden: !!options.includeHidden, refList: fullList });
+      renderScene(objList, { isExporting: true, includeHidden: !!options.includeHidden, refList: fullList, frameIndex: safeIdx });
       octx.restore();
     } finally { ctx = savedCtx; window.__isExporting = false; }
     return off;
@@ -11139,10 +11912,13 @@ function importActionPresets() {
   const toolChips = Array.from(document.querySelectorAll('#toolChips .tool-chip'));
   const toolPanels = Array.from(document.querySelectorAll('.tool-panel'));
   const FIGURE_ONLY_TOOLS = ['layer', 'proportion', 'joints', 'glow'];
+  /* v7.7.3：蒙版只对非火柴人元件开放，按钮顺序跟发光一致 */
+  const NON_FIGURE_TOOLS = ['mask'];
   /* brush-v5.1.0: 「画笔」面板在未选中任何元件时也必须可用（无选中 → 自动绑最近的关节点） */
   const NON_CAMERA_TOOLS = [];
   const ALWAYS_TOOLS = ['eraser'];
   let activeTool = null;
+  let maskEditMode = false;
 
   function updateStickyHeaderHeight() {
     const sh = document.querySelector('.sticky-header');
@@ -11170,6 +11946,7 @@ function importActionPresets() {
     toolPanels.forEach(p => p.classList.toggle('active', !!name && p.dataset.tool === name));
     uiPanel.classList.toggle('has-active-tool', !!name);
     shadowEditMode = name === 'glow';
+    maskEditMode = name === 'mask';
     groundLineEditMode = name === 'canvas';
     canvasBoundsEditMode = name === 'canvas';
     updateStickyHeaderHeight();
@@ -11177,15 +11954,18 @@ function importActionPresets() {
   }
 
   function updateToolVisibility(isFig, hasSel, isCamera) {
+    const maskTarget = isMaskableObject(AppState.selected);
     toolChips.forEach(ch => {
       const tool = ch.dataset.tool;
       const figOnly = FIGURE_ONLY_TOOLS.indexOf(tool) !== -1;
+      const nonFigOnly = NON_FIGURE_TOOLS.indexOf(tool) !== -1;
       const nonCamOnly = NON_CAMERA_TOOLS.indexOf(tool) !== -1;
       const always = ALWAYS_TOOLS.indexOf(tool) !== -1;
       let hidden = false;
       if (always) hidden = !!isCamera;              /* 画笔面板仅摄像机不可用 */
       else {
         if (figOnly && !isFig) hidden = true;
+        if (nonFigOnly && !maskTarget) hidden = true;
         if (nonCamOnly && (!hasSel || isCamera)) hidden = true;
       }
       ch.classList.toggle('hidden', hidden);
@@ -11193,7 +11973,10 @@ function importActionPresets() {
     if (activeTool) {
       const isFigActive = FIGURE_ONLY_TOOLS.indexOf(activeTool) !== -1;
       const isNonCamActive = NON_CAMERA_TOOLS.indexOf(activeTool) !== -1;
-      if ((isFigActive && !isFig) || (isNonCamActive && (!hasSel || isCamera))) setActiveTool(null);
+      const activeInvalid = (isFigActive && !isFig) ||
+        (isNonCamActive && (!hasSel || isCamera)) ||
+        (activeTool === 'mask' && !maskTarget);
+      if (activeInvalid) setActiveTool(null);
     }
   }
 
@@ -12140,6 +12923,7 @@ function togglePin(part) {
   function syncUI() {
     const isFig = AppState.selected && AppState.selected.type === 'figure';
     const isAcc = AppState.selected && AppState.selected.type === 'acc';
+    const isVideoClip = AppState.selected && AppState.selected.type === 'videoClip';
     const isShape = AppState.selected && AppState.selected.type === 'shape';
     const isBubble = AppState.selected && AppState.selected.type === 'bubble';
     const isInk = AppState.selected && AppState.selected.type === 'ink'; // brush-v5.1.0
@@ -12292,7 +13076,7 @@ function togglePin(part) {
     }
     /* eraser 面板已打包为 tool-panel[data-tool="eraser"]，显示由 updateToolVisibility 统一控制 */
 
-    const showBindPanel = (isAcc || isShape || isInk) && !isCamera; // brush-v5.1.0: §6.3.5
+    const showBindPanel = (isAcc || isShape || isInk || isVideoClip) && !isCamera; // brush-v5.1.0: §6.3.5 + v7.7.0 videoClip
     bindPanel.style.display = showBindPanel ? 'block' : 'none';
     if (showBindPanel) {
       updateTargetFigureOptions();
@@ -12300,6 +13084,55 @@ function togglePin(part) {
     }
 
     updateToolVisibility(isFig, hasSel, isCamera);
+
+    /* v7.7.3：蒙版面板（非火柴人元件） */
+    const maskCfg = maskFill(AppState.selected);
+    const maskEls = ['btnBasicMask', 'btnChromaMask', 'maskShapeRect', 'maskShapeEllipse',
+      'maskX', 'maskY', 'maskW', 'maskH', 'maskFeather', 'maskInvert', 'maskChromaColor',
+      'maskSimilarity', 'maskSmoothness', 'maskHueTolerance', 'maskSaturationTolerance',
+      'maskValueTolerance', 'maskSpill', 'maskEdgeFeather', 'maskChromaInvert']
+      .map(id => document.getElementById(id)).filter(Boolean);
+    maskEls.forEach(el => { el.disabled = !isMaskableObject(AppState.selected); });
+    const btnBasicMaskEl = document.getElementById('btnBasicMask');
+    if (btnBasicMaskEl) {
+      btnBasicMaskEl.textContent = maskCfg.basicEnabled ? tr2('mask.basicOff', '关闭基础蒙版') : tr2('mask.basicOn', '开启基础蒙版');
+      btnBasicMaskEl.classList.toggle('on', !!maskCfg.basicEnabled);
+    }
+    const btnChromaMaskEl = document.getElementById('btnChromaMask');
+    if (btnChromaMaskEl) {
+      btnChromaMaskEl.textContent = maskCfg.chromaEnabled ? tr2('mask.chromaOff', '关闭色度抠图') : tr2('mask.chromaOn', '开启色度抠图');
+      btnChromaMaskEl.classList.toggle('on', !!maskCfg.chromaEnabled);
+    }
+    ['maskShapeRect', 'maskShapeEllipse'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.toggle('on', (id === 'maskShapeEllipse') === (maskCfg.shape === 'ellipse'));
+    });
+    /* v7.7.5：基础蒙版与色度抠图上下并列，始终同时可见，各自看自己的开关。 */
+    const setMaskVal = (id, v, digits) => {
+      const el = document.getElementById(id);
+      if (el && document.activeElement !== el) el.value = v;
+      const val = document.getElementById(id + 'Val');
+      if (val) val.textContent = digits === 0 ? Math.round(v) : Number(v).toFixed(digits == null ? 2 : digits);
+    };
+    setMaskVal('maskX', maskCfg.x, 2);
+    setMaskVal('maskY', maskCfg.y, 2);
+    setMaskVal('maskW', maskCfg.w, 2);
+    setMaskVal('maskH', maskCfg.h, 2);
+    setMaskVal('maskFeather', maskCfg.feather, 0);
+    setMaskVal('maskSimilarity', maskCfg.similarity, 2);
+    setMaskVal('maskSmoothness', maskCfg.smoothness, 2);
+    setMaskVal('maskHueTolerance', maskCfg.hueTolerance, 2);
+    setMaskVal('maskSaturationTolerance', maskCfg.saturationTolerance, 2);
+    setMaskVal('maskValueTolerance', maskCfg.valueTolerance, 2);
+    setMaskVal('maskSpill', maskCfg.spillReduction, 2);
+    setMaskVal('maskEdgeFeather', maskCfg.edgeFeather, 0);
+    const maskColor = document.getElementById('maskChromaColor');
+    if (maskColor) maskColor.value = maskCfg.chromaColor;
+    const maskInvert = document.getElementById('maskInvert');
+    if (maskInvert) maskInvert.checked = !!maskCfg.invert;
+    const maskChromaInvert = document.getElementById('maskChromaInvert');
+    if (maskChromaInvert) maskChromaInvert.checked = !!maskCfg.chromaInvert;
+
     if (isFig) {
       if (!AppState.selected.light) AppState.selected.light = { enabled: false, color: '#ffbb66', size: 1.0, angle: 315 };
       if (AppState.selected.light.size === undefined) AppState.selected.light.size = 1.0;
@@ -13047,7 +13880,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
             select(o); EventBus.emit('need:render'); return;
           }
         }
-      } else if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') { // brush-v5.1.0: ink 复用绑定拖动
+      } else if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') { // brush-v5.1.0: ink 复用绑定拖动
         if (hitObj(o, p)) {
           if (o === AppState.selected) {
             clickedObj = true;
@@ -13366,7 +14199,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       drag.lastAngle = curAngle;
       drag.accumRot += deltaAngle * 180 / Math.PI;
       o.rot = drag.accumRot;
-      if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble') {
+      if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'videoClip') {
         setGlobalPropForBound(o, 'rot', o.rot);
       } else {
         setGlobalProp(o, 'rot', o.rot);
@@ -13482,7 +14315,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         snapLines.x = snap.lineX;
         snapLines.y = snap.lineY;
       }
-    } else if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') { // brush-v5.1.0: ink 走同一套绑定拖动
+    } else if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') { // brush-v5.1.0: ink 走同一套绑定拖动
       if (drag.part === 'move') {
         if (o.bindTo === 'none' || !o.targetId) {
           let tx = p.x + drag.dx;
@@ -13655,7 +14488,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         AppState.canvasBounds.y = cy - AppState.canvasBounds.h / 2;
       } else if (AppState.selected) {
         AppState.selected.scale = newScale;
-        if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+        if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
           setGlobalPropForBound(AppState.selected, 'scale', AppState.selected.scale);
         } else {
           setGlobalProp(AppState.selected, 'scale', AppState.selected.scale);
@@ -13669,7 +14502,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         AppState.canvasBounds.rotation = newRot * Math.PI / 180;
       } else if (AppState.selected) {
         AppState.selected.rot = newRot;
-        if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+        if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
           setGlobalPropForBound(AppState.selected, 'rot', AppState.selected.rot);
         } else {
           setGlobalProp(AppState.selected, 'rot', AppState.selected.rot);
@@ -13812,7 +14645,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       } else if (AppState.selected) {
         const pre = getSnapshot();
         AppState.selected.scale = Math.max(0.01, Math.min(100, val));
-        if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+        if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
           setGlobalPropForBound(AppState.selected, 'scale', AppState.selected.scale);
         } else {
           setGlobalProp(AppState.selected, 'scale', AppState.selected.scale);
@@ -13871,7 +14704,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       if (!isFinite(vx) || !isFinite(vy)) return;
       AppState.selected.ax = vx;
       AppState.selected.ay = vy;
-      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
         setGlobalPropForBound(AppState.selected, 'ax', vx);
         setGlobalPropForBound(AppState.selected, 'ay', vy);
       } else {
@@ -13891,7 +14724,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       e.preventDefault(); e.stopPropagation();
       if (!AppState.selected) return;
       AppState.selected.ax = 0; AppState.selected.ay = 0;
-      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
         setGlobalPropForBound(AppState.selected, 'ax', 0);
         setGlobalPropForBound(AppState.selected, 'ay', 0);
       } else {
@@ -13940,7 +14773,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       if (sc !== 0) {
         o.ax = anchorHandleDrag.ax + dxLoc / sc;
         o.ay = anchorHandleDrag.ay + dyLoc / sc;
-        if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') {
+        if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') {
           setGlobalPropForBound(o, 'ax', o.ax);
           setGlobalPropForBound(o, 'ay', o.ay);
         } else {
@@ -13984,7 +14817,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       }
       if (!AppState.selected) return;
       AppState.selected.rot = deg;
-      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
         setGlobalPropForBound(AppState.selected, 'rot', deg);
       } else {
         setGlobalProp(AppState.selected, 'rot', deg);
@@ -14061,7 +14894,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     const shouldRemove = (o) => {
       if (!o) return false;
       if (o.id === id) return true;
-      if (isFigure && (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') && o.targetId === id) return true; // brush-v5.1.0: 删除火柴人时一并删除挂载的画笔
+      if (isFigure && (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') && o.targetId === id) return true; // brush-v5.1.0: 删除火柴人时一并删除挂载的画笔
       return false;
     };
     if (isSubTrackMode()) {
@@ -14163,7 +14996,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       AppState.selected.layer = { body: 1, head: 2, armL: 1, armR: 1, legL: 1, legR: 1 };
       AppState.selected.depth = { enabled: false, useCustom: false, customColor: '#555555' };
       AppState.selected.ikEnabled = false;
-    } else if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'ink') {
+    } else if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip' || AppState.selected.type === 'ink' || AppState.selected.type === 'videoClip') {
       AppState.selected.scale = 1; AppState.selected.rot = 0; AppState.selected.offX = 0; AppState.selected.offY = 0;
       AppState.selected.ax = 0; AppState.selected.ay = 0;
       AppState.selected.mirror = false; // brush-v5.1.0: ink 复位时一并清除镜像
@@ -14358,8 +15191,62 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   fileInputEl.style.display = 'none';
   document.body.appendChild(fileInputEl);
 
-  document.getElementById('btnImg').onclick = () => { fileInputEl.accept = 'image/*'; fileInputEl.dataset.mode = 'img'; fileInputEl.click(); };
+  /* v7.7.0：删除「插入图片」按钮，入口统一到 btnAcc（makeAccessory）。
+     image 类型与 makeImage 全部保留，仅用于兼容旧工程里已有的 image 元件。 */
   document.getElementById('btnAcc').onclick = () => { fileInputEl.accept = 'image/*'; fileInputEl.dataset.mode = 'acc'; fileInputEl.click(); };
+
+  /* v7.7.1：视频元件导入 —— 与「导入参考视频」完全独立。
+     不再抽帧：保留完整 <video>（含音轨），导入瞬间完成；播放时有声音、不卡顿。
+     视频元件以 videoClip 类型进轨道，具备图片元件的全部能力。 */
+  const videoClipInput = document.createElement('input');
+  videoClipInput.type = 'file';
+  videoClipInput.accept = 'video/*';
+  videoClipInput.style.display = 'none';
+  document.body.appendChild(videoClipInput);
+  const btnInsertVideo = document.getElementById('btnInsertVideo');
+  if (btnInsertVideo) {
+    btnInsertVideo.onclick = () => videoClipInput.click();
+    videoClipInput.addEventListener('change', async e => {
+      const file = e.target.files && e.target.files[0];
+      videoClipInput.value = '';
+      if (!file) return;
+      try {
+        /* 读成 dataURL 随工程保存：这样导出的项目文件自带视频与音轨 */
+        const dataUrl = await new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = () => reject(new Error('视频读取失败'));
+          fr.readAsDataURL(file);
+        });
+        const vid = document.createElement('video');
+        vid.src = dataUrl; vid.muted = true; vid.playsInline = true; vid.preload = 'auto';
+        await new Promise((resolve, reject) => {
+          vid.addEventListener('loadedmetadata', resolve, { once: true });
+          vid.addEventListener('error', () => reject(new Error('视频解码失败')), { once: true });
+          setTimeout(() => reject(new Error('视频读取超时')), 15000);
+        });
+        const frameMs0 = (AppState.frames[0] && AppState.frames[0].duration) || 83;
+        const fps = Math.max(1, Math.min(30, Math.round(1000 / frameMs0)));
+        const frameMs = Math.round(1000 / fps);
+        const vw = vid.videoWidth || 640, vh = vid.videoHeight || 360;
+        const durMs = Math.round((vid.duration || 0) * 1000);
+        const frameCount = Math.max(1, Math.round(durMs / frameMs));
+        const sp = getSpawnPoint();
+        const obj = makeVideoClip(vid, dataUrl, vw, vh, sp.x, sp.y, durMs, fps);
+        obj.layer = 1;
+        generateName(obj); addObjectToFrames(obj);
+        /* v7.7.6：默认铺满视频原长；播放/声音只在这一段帧区间生效。 */
+        fillVideoClipToLength(obj, frameCount, frameMs);
+        select(obj);
+        seekVideoClipsToFrame(AppState.currentFrameIndex);
+        EventBus.emit('need:render'); EventBus.emit('need:syncUI');
+        EventBus.emit('history:save', '插入视频元件');
+        alert('已插入视频元件：默认铺满视频原长（约 ' + frameCount + ' 帧）。\n播放时只在这段帧区间显示画面并出声；它仍可像图片一样调整大小、扭曲、关键帧、位移，也可挂载到火柴人。');
+      } catch (err) {
+        alert('插入视频失败：' + (err && err.message ? err.message : err));
+      }
+    });
+  }
 
   fileInputEl.addEventListener('change', e => {
     const file = e.target.files && e.target.files[0];
@@ -14408,11 +15295,11 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
           // ==================== 添加新图片/配饰 ====================
           let obj;
           const sp = getSpawnPoint();
-          if (mode === 'acc') obj = makeAccessory(img, sp.x, sp.y);
-          else obj = makeImage(img, sp.x, sp.y);
+          /* v7.7.0：所有新导入位图统一建为 acc（可挂载火柴人）；image 仅兼容旧工程 */
+          obj = makeAccessory(img, sp.x, sp.y);
           obj.layer = 1;
           generateName(obj); addObjectToFrames(obj); select(obj); EventBus.emit('need:render');
-          EventBus.emit('history:save', mode === 'acc' ? '添加配饰' : '添加图片');
+          EventBus.emit('history:save', '添加图片');
         }
       };
       img.src = ev.target.result;
@@ -14435,7 +15322,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   }
 
   targetFigureSelect.addEventListener('change', e => {
-    if (AppState.selected && (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'ink')) {
+    if (AppState.selected && (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'ink' || AppState.selected.type === 'videoClip')) {
       const val = e.target.value;
       const o = AppState.selected;
       /* bind-keep-v5.1.2: 换绑定目标也不改元件的大小/位置/旋转 —— 只反算相对量 */
@@ -14453,7 +15340,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   });
 
   accBind.addEventListener('change', e => {
-    if (AppState.selected && (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'ink')) {
+    if (AppState.selected && (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'ink' || AppState.selected.type === 'videoClip')) {
       const o = AppState.selected;
       /* bind-keep-v5.1.2: 切换挂载点只重算 offX/offY/rot，让元件"原地不动、原角度不歪"，
          不再把 offX/offY/rot 归零（归零会让元件跳到关节上，且丢掉用户调好的旋转） */
@@ -14763,6 +15650,91 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     });
   });
 
+  /* ==================== v7.7.5 蒙版事件：两个独立开关，不再模式切换 ==================== */
+  const MASK_BASIC_KEYS = { shape: 1, x: 1, y: 1, w: 1, h: 1, feather: 1, invert: 1 };
+  const MASK_CHROMA_KEYS = {
+    chromaColor: 1, similarity: 1, smoothness: 1, hueTolerance: 1,
+    saturationTolerance: 1, valueTolerance: 1, spillReduction: 1,
+    edgeFeather: 1, chromaInvert: 1
+  };
+  const setMaskProp = (key, value, label, sync) => {
+    const o = AppState.selected;
+    if (!isMaskableObject(o)) return;
+    const cfg = maskFill(o);
+    /* 动哪一组参数就自动打开哪一组的开关；两组可以同时开着叠加生效。 */
+    let autoOn = false;
+    if (MASK_BASIC_KEYS[key] && !cfg.basicEnabled) {
+      cfg.basicEnabled = true;
+      setGlobalProp(o, 'mask.basicEnabled', true);
+      autoOn = true;
+    }
+    if (MASK_CHROMA_KEYS[key] && !cfg.chromaEnabled) {
+      cfg.chromaEnabled = true;
+      setGlobalProp(o, 'mask.chromaEnabled', true);
+      autoOn = true;
+    }
+    cfg[key] = value;
+    setGlobalProp(o, 'mask.' + key, value);
+    cfg.enabled = !!(cfg.basicEnabled || cfg.chromaEnabled);
+    cfg.mode = cfg.chromaEnabled ? 'chroma' : 'basic';
+    setGlobalProp(o, 'mask.enabled', cfg.enabled);
+    setGlobalProp(o, 'mask.mode', cfg.mode);
+    EventBus.emit('need:render');
+    markCurrentFrameModified();
+    if (sync || autoOn) EventBus.emit('need:syncUI');
+    if (label) EventBus.emit('history:save', label);
+  };
+
+  [['btnBasicMask', 'basicEnabled', 'mask.basicHistoryOn', 'mask.basicHistoryOff'],
+   ['btnChromaMask', 'chromaEnabled', 'mask.chromaToggleOn', 'mask.chromaToggleOff']].forEach(([id, key, onKey, offKey]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.onclick = () => {
+      const o = AppState.selected;
+      if (!isMaskableObject(o)) return;
+      const on = !maskFill(o)[key];
+      setMaskProp(key, on, tr2(on ? onKey : offKey, on ? '开启' : '关闭'), true);
+    };
+  });
+  [['maskShapeRect', 'rect'], ['maskShapeEllipse', 'ellipse']].forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.onclick = () => setMaskProp('shape', value, tr2('mask.historyShape', '切换蒙版形状'), true);
+  });
+
+  const bindMaskNum = (id, valId, key, digits, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', e => {
+      const o = AppState.selected;
+      if (!isMaskableObject(o)) return;
+      const v = +e.target.value;
+      const val = valId ? document.getElementById(valId) : null;
+      if (val) val.textContent = digits === 0 ? Math.round(v) : v.toFixed(digits == null ? 2 : digits);
+      setMaskProp(key, v, null, false);
+    });
+    el.addEventListener('change', () => EventBus.emit('history:save', label));
+  };
+  bindMaskNum('maskX', 'maskXVal', 'x', 2, tr2('mask.historyParam', '修改蒙版'));
+  bindMaskNum('maskY', 'maskYVal', 'y', 2, tr2('mask.historyParam', '修改蒙版'));
+  bindMaskNum('maskW', 'maskWVal', 'w', 2, tr2('mask.historyParam', '修改蒙版'));
+  bindMaskNum('maskH', 'maskHVal', 'h', 2, tr2('mask.historyParam', '修改蒙版'));
+  bindMaskNum('maskFeather', 'maskFeatherVal', 'feather', 0, tr2('mask.historyParam', '修改蒙版'));
+  bindMaskNum('maskSimilarity', 'maskSimilarityVal', 'similarity', 2, tr2('mask.historyChroma', '修改色度抠图'));
+  bindMaskNum('maskSmoothness', 'maskSmoothnessVal', 'smoothness', 2, tr2('mask.historyChroma', '修改色度抠图'));
+  bindMaskNum('maskHueTolerance', 'maskHueToleranceVal', 'hueTolerance', 2, tr2('mask.historyChroma', '修改色度抠图'));
+  bindMaskNum('maskSaturationTolerance', 'maskSaturationToleranceVal', 'saturationTolerance', 2, tr2('mask.historyChroma', '修改色度抠图'));
+  bindMaskNum('maskValueTolerance', 'maskValueToleranceVal', 'valueTolerance', 2, tr2('mask.historyChroma', '修改色度抠图'));
+  bindMaskNum('maskSpill', 'maskSpillVal', 'spillReduction', 2, tr2('mask.historyChroma', '修改色度抠图'));
+  bindMaskNum('maskEdgeFeather', 'maskEdgeFeatherVal', 'edgeFeather', 0, tr2('mask.historyChroma', '修改色度抠图'));
+
+  const maskChromaColorEl = document.getElementById('maskChromaColor');
+  if (maskChromaColorEl) maskChromaColorEl.addEventListener('input', e => setMaskProp('chromaColor', e.target.value, null, false));
+  if (maskChromaColorEl) maskChromaColorEl.addEventListener('change', () => EventBus.emit('history:save', tr2('mask.historyChroma', '修改色度抠图')));
+  const maskInvertEl = document.getElementById('maskInvert');
+  if (maskInvertEl) maskInvertEl.addEventListener('change', e => setMaskProp('invert', !!e.target.checked, tr2('mask.historyParam', '修改蒙版'), false));
+  const maskChromaInvertEl = document.getElementById('maskChromaInvert');
+  if (maskChromaInvertEl) maskChromaInvertEl.addEventListener('change', e => setMaskProp('chromaInvert', !!e.target.checked, tr2('mask.historyChroma', '修改色度抠图'), false));
+
   /* 手部渐变 */
   btnJoint.onclick = () => {
     if (!AppState.selected || AppState.selected.type !== 'figure') return;
@@ -14900,7 +15872,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (AppState.selected) {
       AppState.selected.scale = +e.target.value;
       objScaleVal.textContent = AppState.selected.scale.toFixed(2);
-      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
         setGlobalPropForBound(AppState.selected, 'scale', AppState.selected.scale);
       } else {
         setGlobalProp(AppState.selected, 'scale', AppState.selected.scale);
@@ -14913,7 +15885,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (AppState.selected) {
       AppState.selected.alpha = +e.target.value;
       objAlphaVal.textContent = AppState.selected.alpha.toFixed(2);
-      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble') {
+      if (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip') {
         setGlobalPropForBound(AppState.selected, 'alpha', AppState.selected.alpha);
       } else {
         setGlobalProp(AppState.selected, 'alpha', AppState.selected.alpha);
@@ -15119,6 +16091,14 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     };
   }
   
+  const btnExportSVGSeq = document.getElementById('btnExportSVGSeq');
+  if (btnExportSVGSeq) {
+    btnExportSVGSeq.onclick = () => {
+      if (multiSelectMode) exportSelectedSVGs();
+      else SKFE.features.export.exportSVGSeq();
+    };
+  }
+
   const btnExportMP4 = document.getElementById('btnExportMP4');
   if (btnExportMP4) {
     btnExportMP4.onclick = () => SKFE.features.export.exportMP4();
@@ -15325,7 +16305,9 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         const exportRow = document.createElement('div');
         exportRow.className = 'row';
         exportRow.style.flexWrap = 'wrap';
-        ['btnExportGIF', 'btnExportPNGSeq', 'btnExportMP4'].forEach(id => {
+        /* v7.7.1：补上 btnExportSVGSeq —— 之前漏搬导致「导出SVG序列」按钮留在空壳高级弹窗里，
+           面板重排后永远看不见。现在与 GIF/PNG序列/MP4 一起进入「导出」分区。 */
+        ['btnExportGIF', 'btnExportPNGSeq', 'btnExportSVGSeq', 'btnExportMP4'].forEach(id => {
           move(document.getElementById(id), exportRow);
         });
         move(rows[2].querySelector('.adv-color-label'), exportRow);
@@ -15862,6 +16844,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (o.type === 'figure') queueFigure(o, isSel, isExporting, opts);
     else if (o.type === 'image') queueImageObj(o, isSel, isExporting, opts);
     else if (o.type === 'acc') queueAcc(o, isSel, isExporting, opts);
+    else if (o.type === 'videoClip') queueVideoClip(o, isSel, isExporting, opts);
     else if (o.type === 'shape') queueShape(o, isSel, isExporting, opts);
     else if (o.type === 'bubble') queueBubble(o, isSel, isExporting, opts);
     else if (o.type === 'video') queueVideo(o, isSel, isExporting, opts);
