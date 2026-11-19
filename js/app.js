@@ -6265,9 +6265,13 @@ function importActionPresets() {
     return true;
   }
 
+  /* v7.7.8：视图固定（图钉）后，画布边界的世界坐标 x/y 视为锁定，防误触拖跑。 */
+  function canvasPosLocked() { return !!(viewPinned && AppState.canvasBoundsEnabled); }
+
   function applyTBoxMove(d, world) {
     const target = d.target;
     if (target === CANVAS_BOUNDS_TARGET) {
+      if (canvasPosLocked()) return; /* 固定后禁止改画布 xy（位置） */
       const dx = world.x - d.worldStart.x, dy = world.y - d.worldStart.y;
       const cx = d.centerWorld.x + dx, cy = d.centerWorld.y + dy;
       AppState.canvasBounds.x = cx - AppState.canvasBounds.w / 2;
@@ -14052,6 +14056,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     }
 
     if (draggingCanvasBounds) {
+      if (canvasPosLocked()) return; /* v7.7.8：固定后禁止改画布 xy */
       const p = getPos(e);
       AppState.canvasBounds.x = canvasDragStart.cx + (p.x - canvasDragStart.x);
       AppState.canvasBounds.y = canvasDragStart.cy + (p.y - canvasDragStart.y);
@@ -14174,6 +14179,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
           AppState.viewOffset.x += mid.x - lastMid.x;
           AppState.viewOffset.y += mid.y - lastMid.y;
         }
+        clampViewOffset();
       }
       lastDist = dist; lastMid = mid;
       EventBus.emit('need:render'); return;
@@ -14186,6 +14192,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         AppState.viewOffset.x = e.clientX - panStart.x;
         AppState.viewOffset.y = e.clientY - panStart.y;
       }
+      clampViewOffset();
       EventBus.emit('need:render'); return;
     }
     if (!drag) return;
@@ -14510,10 +14517,11 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       }
     } else {
       const val = axis === 'x' ? parseFloat(posXSlider.value) : parseFloat(posYSlider.value);
-      const delta = val * 4; 
+      const delta = val * 4;
       if (AppState.canvasSelected && AppState.canvasBoundsEnabled) {
+        if (canvasPosLocked()) { updatePosInputs(); return; } /* v7.7.8：固定后禁止改画布 xy */
         const nx = sliderDragStartPos.x + (axis === 'x' ? delta : 0);
-        const ny = sliderDragStartPos.y - (axis === 'y' ? delta : 0); 
+        const ny = sliderDragStartPos.y - (axis === 'y' ? delta : 0);
         AppState.canvasBounds.x = nx - AppState.canvasBounds.w / 2;
         AppState.canvasBounds.y = ny - AppState.canvasBounds.h / 2;
         syncCanvasUI();
@@ -14582,6 +14590,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   /* ==================== 坐标输入 / 锚点 ==================== */
   function commitCoordInput() {
     if (AppState.canvasSelected && AppState.canvasBoundsEnabled) {
+      if (canvasPosLocked()) { updatePosInputs(); return; } /* v7.7.8：固定后禁止改画布 xy */
       const nx = parseFloat(objXInput.value);
       const nyDisp = parseFloat(objYInput.value);
       if (!isFinite(nx) || !isFinite(nyDisp)) { updatePosInputs(); return; }
@@ -15150,8 +15159,43 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       AppState.viewOffset.y = my - (my - AppState.viewOffset.y) * actualZoom;
       AppState.viewScale = newScale;
     }
+    clampViewOffset();
     EventBus.emit('need:render');
     return true;
+  }
+
+  /* v7.7.8：画布至少 5% 留在屏幕内。
+     把 canvasBounds（画布边界，世界坐标）按当前 viewScale/viewOffset 投影到屏幕，
+     限制平移量，使投影矩形与屏幕视口在宽、高上至少各重叠 CANVAS_KEEP_VISIBLE 比例。
+     这样无论怎么拖/缩放，画布都不会整个跑出屏幕找不回来。
+     原地修改 AppState.viewOffset，返回是否发生了变化。 */
+  const CANVAS_KEEP_VISIBLE = 0.05;
+  function clampViewOffset() {
+    if (!AppState.canvasBoundsEnabled) return false;
+    const cw = canvas.clientWidth || window.innerWidth || 1;
+    const ch = canvas.clientHeight || window.innerHeight || 1;
+    const sc = AppState.viewScale;
+    const cb = AppState.canvasBounds;
+    const bw = cb.w * sc, bh = cb.h * sc;
+    if (!(bw > 0) || !(bh > 0)) return false;
+    /* 画布投影矩形左上角（屏幕像素） */
+    const left = cb.x * sc + AppState.viewOffset.x;
+    const top = cb.y * sc + AppState.viewOffset.y;
+    const right = left + bw, bottom = top + bh;
+    /* 至少保留画布自身尺寸的 5% 可见（相对画布，符合「画布至少 5% 留屏」）。 */
+    const keepX = bw * CANVAS_KEEP_VISIBLE;
+    const keepY = bh * CANVAS_KEEP_VISIBLE;
+    let ox = AppState.viewOffset.x, oy = AppState.viewOffset.y;
+    /* 水平：右边缘不能退到屏幕 keepX 以左；左边缘不能推到屏幕 cw-keepX 以右 */
+    if (right < keepX) ox += keepX - right;
+    else if (left > cw - keepX) ox -= left - (cw - keepX);
+    /* 垂直：同理 */
+    if (bottom < keepY) oy += keepY - bottom;
+    else if (top > ch - keepY) oy -= top - (ch - keepY);
+    const changed = (ox !== AppState.viewOffset.x || oy !== AppState.viewOffset.y);
+    AppState.viewOffset.x = ox;
+    AppState.viewOffset.y = oy;
+    return changed;
   }
 
   /* v7.0.2：按屏幕像素平移视图。
@@ -15169,6 +15213,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     }
     AppState.viewOffset.x += dx;
     AppState.viewOffset.y += dy;
+    clampViewOffset();
     EventBus.emit('need:render');
     return true;
   }

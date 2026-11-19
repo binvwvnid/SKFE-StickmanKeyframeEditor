@@ -276,7 +276,7 @@ window.SKFE_LOCALES['zh-CN'] = {
   "bounds.ratios": "常用比例：",
   "bounds.center": "复位",
   "bounds.centerTitle": "将画布边界移到屏幕中心并适配可用区域",
-  "bounds.pinTitle": "固定当前视图为最小缩放基准（固定后不能缩小/平移，放大后可平移）",
+  "bounds.pinTitle": "固定当前视图为最小缩放基准（固定后不能缩小、不能改画布位置坐标，放大后仍可平移查看；画布始终至少留 5% 在屏幕内）",
   "bounds.mask": "画布外遮罩（暗角）",
   "bounds.maskAlpha": "遮罩透明度",
   "bounds.maskColor": "遮罩颜色",

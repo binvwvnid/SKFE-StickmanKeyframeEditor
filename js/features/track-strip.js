@@ -29,7 +29,8 @@
   const GUTTER = 108;      /* 左列宽（眼睛 + 元件名），sticky 不随横向滚动 */
   const ROW_H = 32;        /* 每条轨道高度 */
   const RULER_H = 22;      /* 顶部刻度尺高度 */
-  const HANDLE_W = 10;     /* 两端手柄的命中宽度 */
+  const HANDLE_W = 10;     /* 两端手柄的命中宽度（鼠标） */
+  const HANDLE_W_TOUCH = 22; /* v7.7.0：触屏手指粗，手柄命中区放大，否则拉长段落几乎点不中 */
   const KEY_HIT = 13;      /* 关键帧菱形的命中直径 */
   const MIN_H = 160;       /* 面板最小高度 */
   const MAX_FRAMES = 600;  /* 拖拽时允许撑长的上限，防止误拖出几万帧 */
@@ -1073,20 +1074,16 @@
     if (!cv || cv.dataset.bound === '1') return;
     cv.dataset.bound = '1';
 
-    /* begin = 真正开始拖（建 drag + 加 .dragging）；tap = 短按做什么 */
+    /* begin = 真正开始拖（建 drag + 加 .dragging）；tap = 短按做什么
+       v7.7.0：触屏改成「按下即拖」，和桌面一致。
+       旧逻辑要求触屏静止长按 1 秒才进入拖动，期间手指滑出 8px 就被判成「想滚动」
+       并 clearPress；但长条铺满整行、滚动本就无意义，于是既没拖也没滚 ——
+       用户看到的就是「长按拖动 / 拉长段落完全没反应」。
+       现在按下立即 begin()：短按（没移动）仍由 finish() 里 !st.moved 分支走点选，
+       触屏靠 touch-action:none 保证原生滚动不抢手势；要滚动请用刻度尺横滑刷时间线。 */
     const armOrBegin = (e, begin, tap) => {
-      if (e.pointerType === 'mouse') { begin(); return; }
       clearPress();
-      try { cv.setPointerCapture(e.pointerId); } catch (_) {}
-      press = {
-        sx: e.clientX, sy: e.clientY, tap: tap || null,
-        timer: setTimeout(() => {
-          if (!press) return;
-          press = null;
-          begin();
-          if (navigator.vibrate) navigator.vibrate(28);
-        }, LONG_PRESS_MS)
-      };
+      begin();
     };
 
     /* 空白处短按：跳帧 + 选中这一行的长条 + 选中这一行的元件。
@@ -1176,6 +1173,8 @@
             items,
             els,
             startX: e.clientX,
+            startY: e.clientY,
+            isTouch: e.pointerType !== 'mouse',
             d: 0,
             alt: !!e.altKey,
             moved: false
@@ -1192,7 +1191,10 @@
       if (clip) {
         const rect = clip.getBoundingClientRect();
         const dx = e.clientX - rect.left;
-        const mode = dx <= HANDLE_W ? 'l' : (rect.width - dx <= HANDLE_W ? 'r' : 'm');
+        /* v7.7.0：触屏手指粗，两端手柄命中区放大到 HANDLE_W_TOUCH（鼠标仍用 10px）。
+           但长条本身很窄时（1~2 帧）不能让两端把手把整条吃光，取 1/3 宽兜底。 */
+        const hw = Math.min(e.pointerType === 'mouse' ? HANDLE_W : HANDLE_W_TOUCH, rect.width / 3);
+        const mode = dx <= hw ? 'l' : (rect.width - dx <= hw ? 'r' : 'm');
         const cid = clip.dataset.id;
         const ca = +clip.dataset.a, cb = +clip.dataset.b;
         const additive = !!(e.ctrlKey || e.metaKey || e.shiftKey);
@@ -1230,6 +1232,8 @@
             b: cb,
             mode,
             startX: e.clientX,
+            startY: e.clientY,
+            isTouch: e.pointerType !== 'mouse',
             d: 0,
             el: clip,
             group: group,
@@ -1315,6 +1319,22 @@
           clip.style.cursor = (dx <= HANDLE_W || rect.width - dx <= HANDLE_W) ? 'ew-resize' : 'grab';
         }
         return;
+      }
+
+      /* v7.7.0：触屏按下即拖后，长条区域不再靠 press 判定滚动。
+         这里补回「竖向滑动 = 滚动轨道」：手指主要竖着划（|dy| 明显大于 |dx|）
+         且还没产生水平位移时，撤销刚建的拖动、转成滚动，让多轨道面板仍能上下翻。
+         水平划走则保留拖动（拖长条 / 平移段）。 */
+      if (drag.isTouch && !drag.moved && (drag.kind === 'clip' || drag.kind === 'keys')) {
+        const vx = Math.abs(e.clientX - drag.startX), vy = Math.abs(e.clientY - drag.startY);
+        if (vy > PAN_SLOP && vy > vx * 1.4) {
+          if (drag.els) drag.els.forEach(x => x.el.classList.remove('dragging'));
+          if (drag.el) drag.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m');
+          drag = null;
+          const sc = $('tsScroll');
+          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop };
+          return;
+        }
       }
 
       /* 刷时间线：手指划到哪一帧就跳哪一帧 */

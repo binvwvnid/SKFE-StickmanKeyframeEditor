@@ -276,7 +276,7 @@ window.SKFE_LOCALES['en'] = {
   "bounds.ratios": "Common ratios:",
   "bounds.center": "Center",
   "bounds.centerTitle": "Move the canvas bounds to the screen center and fit the available area",
-  "bounds.pinTitle": "Lock the current view as the minimum zoom (after locking, zoom-out and pan are disabled; zoom in first to pan)",
+  "bounds.pinTitle": "Lock the current view as the minimum zoom (after locking, zoom-out and changing the canvas X/Y position are disabled; zoom in to pan; the canvas always keeps at least 5% on screen)",
   "bounds.mask": "Mask outside canvas (vignette)",
   "bounds.maskAlpha": "Mask opacity",
   "bounds.maskColor": "Mask color",

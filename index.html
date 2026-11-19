@@ -767,7 +767,7 @@
     </div> <!-- 行结束 -->
     <div class="row" style="margin-top:6px;"> <!-- 复位与固定视图行 -->
       <button id="btnCenterCanvas" class="btn-soft" style="flex:1;" title="将画布边界移到屏幕中心并适配可用区域" data-i18n-title="bounds.centerTitle"><i data-icon="refresh"></i><span data-i18n="bounds.center">复位</span></button> <!-- 居中并适配视图 -->
-      <button id="btnPinView" class="btn-soft" style="flex:1;" title="固定当前视图为最小缩放基准（固定后不能缩小/平移，放大后可平移）" data-i18n-title="bounds.pinTitle"><i data-icon="pushpin"></i>固定</button> <!-- 锁定视图缩放和位置 -->
+      <button id="btnPinView" class="btn-soft" style="flex:1;" title="固定当前视图为最小缩放基准（固定后不能缩小、不能改画布位置坐标，放大后仍可平移查看；画布始终至少留 5% 在屏幕内）" data-i18n-title="bounds.pinTitle"><i data-icon="pushpin"></i>固定</button> <!-- 锁定视图缩放和画布位置坐标 -->
     </div> <!-- 行结束 -->
     <!-- 这里删除了重复的 X/Y/宽/高/缩放/旋转 滑块 -->
     <div id="canvasSliders" style="display:none; margin-top:6px;"> <!-- 画布遮罩设置区（默认隐藏） -->
