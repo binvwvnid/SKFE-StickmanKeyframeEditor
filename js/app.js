@@ -16254,11 +16254,11 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   let activeUiSheet = null;     /* 当前分区 key；null = 全关（只剩底部栏） */
 
   function uiSheetTitle(key) {
-    return ({ props: '属性', objects: '元件', brush: '画笔', canvas: '画布', advanced: '高级', project: '项目', export: '导出', theme: '主题' })[key] || '';
+    return ({ props: '属性', objects: '元件', brush: '画笔', canvas: '画布', advanced: '高级', project: '项目', export: '导出', theme: '主题', plugins: '插件' })[key] || '';
   }
 
   function mountUiSheets() {
-    const keys = ['objects', 'brush', 'canvas', 'advanced', 'project', 'export', 'theme'];
+    const keys = ['objects', 'brush', 'canvas', 'advanced', 'project', 'export', 'theme', 'plugins'];
     keys.forEach(k => {
       uiSheetEls[k] = document.getElementById('sheet' + k.charAt(0).toUpperCase() + k.slice(1));
     });
@@ -17167,9 +17167,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     });
   })();
 
-  /* v7.0.0：调试入口（只在 ?debug=1 时挂到 window，方便无头测试与排障）。
-     不参与任何功能逻辑，正式使用时不会存在。 */
-  if (/[?&]debug=1/.test(location.search)) {
+  /* v7.8.0：插件接口（原 v7.0.0 调试入口，现常驻暴露给本地插件宿主）。
+     内部逻辑不变；window.__SKFE_DBG 兼容别名保留给无头回归脚本。 */
     window.__skfe = {
       AppState, KF, EventBus, TRACK_ALL_ID,
       getTrackFrame, getTrackSlot, getObjectsForFrameAt, getCombinedObjectsForRender,
@@ -17218,9 +17217,29 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         reconcileAllTracks();
         bumpKfEval();
         return true;
-      }
+      },
+
+      /* ===== v7.8.0 插件接口扩充：以下均为源码已存在的真实函数 ===== */
+      /* 历史 */
+      undo, redo, saveHistory,
+      /* 工具与选区 */
+      setActiveTool, cloneSelected,
+      /* 画布视图 */
+      zoomViewAt, clampViewOffset, canvasPosLocked, drawCanvasBounds,
+      /* 图层与几何 */
+      applyLayerOrder, getLayerUIObjects, getObjectBounds, getCombinedObjectsForRenderAt,
+      /* 帧与补间 */
+      buildTweenFrames, fillLooseFrames, getFrameStartTime, getTrackLength,
+      /* 导出 */
+      exportImage, exportSelectedPNGs, exportSelectedSVGs, exportSelectedGIF,
+      exportSelectedJPGs, exportActionPresets,
+      /* 特效与媒体 */
+      toggleDistortMode, applyBasicMaskToCanvas, applyChromaMaskToCanvas,
+      makeVideoClip, playVideoClips, seekVideoClipsToFrame
     };
     /* 兼容早前的调试钩子名（无头回归脚本仍在用） */
     window.__SKFE_DBG = window.__skfe;
-  }
+    /* v7.8.0：挂到命名空间下，供本地插件稳定发现（不再依赖 ?debug=1） */
+    window.SKFE = window.SKFE || {};
+    window.SKFE.__skfe = window.__skfe;
 })();

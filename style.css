@@ -128,10 +128,12 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
 
   .ui-sheet-head { /* 分区顶部的标题条 */
     display: flex; align-items: center; gap: 8px; /* 水平排列 */
-    padding: 4px 0 8px; /* 上下留白 */
+    padding: 7px 10px; /* 标题左右留出内边距，不再贴左边框 */
+    margin: 0 0 4px; /* 与下方内容拉开一点 */
     font-size: 13px; font-weight: 600; color: var(--text-main); /* 标题字重字号 */
     position: sticky; top: 0; z-index: 3; /* 分区内滚动时标题吸顶 */
     background: var(--bg-panel); /* 吸顶需要不透明底 */
+    border-radius: var(--radius-control); /* 与全局控件统一圆角，不再方形 */
   } /* 分区标题结束 */
   /* v7.3.0：右上角那颗「返回属性」已删除 —— 属性自己也成了底部栏入口，不再需要往回跳。 */
 
@@ -1688,6 +1690,30 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     color: var(--text-sub); /* 次要文字色 */
   } /* 提示文字样式结束 */
 
+  /* ==================== 面板背景渐变（内置） ====================
+     勾选后展开，滑条占满可用宽度（不再像插件里那么短），全部复用主题变量。 */
+  .theme-grad { margin-top: 7px; }
+  .theme-grad-head { display: grid; grid-template-columns: 116px 1fr; align-items: center; gap: 6px; }
+  .theme-grad-head label { font-size: 11.5px; line-height: 1.25; color: var(--text-sub); }
+  .theme-grad-head input[type=checkbox] {
+    justify-self: start; width: 16px; height: 16px; margin: 0;
+    accent-color: var(--color-primary); cursor: pointer;
+  }
+  .theme-grad-body { margin-top: 6px; }
+  .theme-grad-body[hidden] { display: none; }
+  .theme-grad-row { display: grid; align-items: center; gap: 6px; margin-top: 6px; }
+  /* 颜色行：标签 起色 · 标签 止色，各自等宽，颜色块固定 */
+  .theme-grad-row.colors { grid-template-columns: 46px 32px 46px 32px 1fr; }
+  /* 滑条行：标签 · 长滑条 · 数值；滑条占满整行剩余宽度 */
+  .theme-grad-row.range { grid-template-columns: 46px minmax(0, 1fr) 40px; }
+  .theme-grad-row > label { font-size: 11px; color: var(--text-sub); white-space: nowrap; }
+  .theme-grad-row input[type=color] { width: 32px; height: 24px; padding: 0; cursor: pointer; }
+  .theme-grad-row input[type=range] { width: 100%; min-width: 0; height: 24px; accent-color: var(--color-primary); }
+  .theme-grad-row .theme-val {
+    width: 40px; text-align: right; font-size: 11px; color: var(--text-main);
+    font-variant-numeric: tabular-nums;
+  }
+
   @media (max-width: 768px) { /* 移动端（屏幕宽度 ≤ 768px）适配 */
     #ui { /* 移动端控制面板 */
       top: auto; bottom: 0; left: 0; right: 0; /* 固定在底部 */
@@ -2127,3 +2153,40 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     #btnTrackKeyCopy span, #btnTrackKeyPaste span { display: none; }
     #btnTrackKeyCopy, #btnTrackKeyPaste { padding: 4px 8px; }
   }
+
+  /* ==================== 本地插件系统（#sheetPlugins） ====================
+     全部复用现有主题 CSS 变量，随主题设置自动变色；不引入任何新色值。 */
+  #sheetPlugins .plugin-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  #sheetPlugins .plugin-empty { padding: 14px 10px; text-align: center; font-size: 12px;
+    line-height: 1.7; color: var(--text-sub); }
+  #sheetPlugins .plugin-card { border: 1px solid var(--border-color); border-radius: 10px;
+    padding: 8px 10px; background: var(--bg-input); }
+  #sheetPlugins .plugin-card.off { opacity: .58; }
+  #sheetPlugins .plugin-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  #sheetPlugins .plugin-title { font-size: 12.5px; font-weight: 600; color: var(--text-main); }
+  #sheetPlugins .plugin-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px;
+    background: var(--color-primary-soft); color: var(--color-primary); font-weight: 600; }
+  #sheetPlugins .plugin-badge.code { background: var(--color-danger-soft); color: var(--color-danger); }
+  #sheetPlugins .plugin-badge.off { background: var(--bg-panel); color: var(--text-sub); }
+  #sheetPlugins .plugin-meta { font-size: 10.5px; color: var(--text-sub); margin-top: 4px;
+    line-height: 1.55; word-break: break-all; }
+  #sheetPlugins .plugin-actions { display: flex; gap: 6px; margin-top: 7px; }
+  #sheetPlugins .plugin-actions button { flex: 1; }
+
+  /* ==================== 插件作者工具下载区（#sheetPlugins 内） ====================
+     复用主题 CSS 变量，随主题变色；单个「一键下载 ZIP」全宽按钮。 */
+  #sheetPlugins .plugin-author-kit { margin-top: 10px; }
+  #sheetPlugins .plugin-kit-title { font-size: 12px; font-weight: 700; color: var(--text-main);
+    margin-bottom: 3px; }
+  #sheetPlugins .plugin-kit-desc { font-size: 10.5px; color: var(--text-sub); line-height: 1.6;
+    margin-bottom: 8px; }
+  #sheetPlugins .plugin-kit-download { display: flex; align-items: center; justify-content: center;
+    gap: 6px; width: 100%; padding: 9px 8px; font-size: 12px; line-height: 1.3; font-weight: 700;
+    color: var(--color-primary); text-decoration: none; background: var(--btn-bg);
+    border: 1px solid var(--color-primary); border-radius: var(--radius-control);
+    transition: background .15s, transform .1s; }
+  #sheetPlugins .plugin-kit-download::before { content: '↓'; font-size: 15px; line-height: 1; }
+  #sheetPlugins .plugin-kit-download:hover { background: var(--btn-hover); }
+  #sheetPlugins .plugin-kit-download:active { transform: scale(.98); }
+  #sheetPlugins .plugin-kit-note { font-size: 10px; color: var(--text-sub); line-height: 1.6;
+    margin-top: 8px; }

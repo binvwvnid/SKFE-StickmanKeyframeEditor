@@ -3,7 +3,7 @@
 <head> <!-- 网页头部，包含元数据和外部引用 -->
 <meta charset="UTF-8"> <!-- 设置字符编码为 UTF-8，防止中文乱码 -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover"> <!-- 移动端视口设置：宽度同设备，允许缩放，适配刘海屏 -->
-<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.7.8</title> <!-- 网页标题，带有多语言属性 -->
+<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.8.0</title> <!-- 网页标题，带有多语言属性；运行时由 i18n 注入 version.js 的版本号 -->
 <link rel="stylesheet" href="./style.css"> <!-- 引入外部样式表 -->
 </head> <!-- 头部结束 -->
 <body> <!-- 网页主体开始 -->
@@ -98,7 +98,7 @@
   <div id="uiMain"> <!-- v7.3.0：「属性」分区（data-sheet="props"），标题头由 JS 动态插入，见 mountUiSheets -->
 
   <div id="watermark"> <!-- 控制面板顶部的作者/版本水印 -->
-    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.7.8</div> <!-- 软件名称及版本 -->
+    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.8.0</div> <!-- 软件名称及版本 -->
     <div class="author" data-i18n="watermark.author">作者 binvwvnid · QQ 交流群 1121039855</div> <!-- 作者信息及群号 -->
   </div> <!-- 水印结束 -->
 
@@ -813,6 +813,31 @@
         <input type="range" id="themePanelAlpha" min="0.2" max="1" step="0.01" value="1"> <!-- 透明度滑条 -->
         <span class="theme-val" id="themePanelAlphaVal">1.00</span> <!-- 数值 -->
       </div> <!-- 行结束 -->
+      <!-- 面板背景渐变（勾选后展开；默认 Pink 主题开启） -->
+      <div class="theme-grad" id="themeGradBox">
+        <div class="theme-grad-head">
+          <label data-i18n="theme.gradEnable">启用渐变</label>
+          <input type="checkbox" id="themeGradEnabled">
+        </div>
+        <div class="theme-grad-body" id="themeGradBody">
+          <div class="theme-grad-row colors">
+            <label data-i18n="theme.gradStart">起始色</label>
+            <input type="color" id="themeGradStart" value="#f7f5ea">
+            <label data-i18n="theme.gradEnd">结束色</label>
+            <input type="color" id="themeGradEnd" value="#ff243a">
+          </div>
+          <div class="theme-grad-row range">
+            <label data-i18n="theme.gradAngle">方向</label>
+            <input type="range" id="themeGradAngle" min="0" max="360" step="5" value="5">
+            <span class="theme-val" id="themeGradAngleVal">5°</span>
+          </div>
+          <div class="theme-grad-row range">
+            <label data-i18n="theme.gradAlpha">透明度</label>
+            <input type="range" id="themeGradAlpha" min="0.05" max="1" step="0.01" value="0.37">
+            <span class="theme-val" id="themeGradAlphaVal">0.37</span>
+          </div>
+        </div>
+      </div>
     </div> <!-- 背景组结束 -->
 
     <div class="theme-group"> <!-- 按钮颜色组 -->
@@ -921,6 +946,24 @@
   <div class="ui-sheet" id="sheetProject" hidden></div> <!-- 项目 -->
   <div class="ui-sheet" id="sheetExport" hidden></div> <!-- 导出 -->
   <div class="ui-sheet" id="sheetTheme" hidden></div> <!-- 主题 -->
+  <div class="ui-sheet" id="sheetPlugins" hidden> <!-- 插件：本地插件管理分区（插件宿主 host.js 接管渲染） -->
+    <div class="row" style="gap:6px; margin-top:2px;">
+      <button id="btnImportPlugin" class="btn-primary btn-sm" style="flex:1;" data-i18n="plugin.import">导入插件</button>
+      <input type="file" id="pluginFileInput" accept=".json,.zip" style="display:none;"> <!-- 隐藏的文件选择器：json=数据型 / zip=代码型 -->
+    </div>
+    <div class="hint" data-i18n="plugin.hint">插件只在你的浏览器本地生效，不改动 SKFE 原文件。数据型为 .json，代码型为 .zip。导入的 zip 根目录必须直接有 manifest.json（不能在文件夹里再套一层）。</div>
+
+    <!-- 作者工具：给脚本作者的模板 / 校验脚本 / 示例插件，供下载 -->
+    <div class="plugin-author-kit">
+      <div class="plugin-kit-title" data-i18n="plugin.kitTitle">插件作者工具 · 下载</div>
+      <div class="plugin-kit-desc" data-i18n="plugin.kitDesc">制作插件所需的全部文档、模板、校验脚本与示例，已打包成一个 zip，一键下载。</div>
+      <a class="plugin-kit-download" href="./js/plugin-kit/SKFE插件作者工具包.zip" download="SKFE插件作者工具包.zip" data-i18n="plugin.kitDownloadAll" data-i18n-title="plugin.kitDownloadAllTitle">一键下载全部（ZIP）</a>
+      <div class="plugin-kit-note" data-i18n="plugin.kitNote">内含授权声明、接口设计文档、API 参考、模板、校验脚本与示例源码。这是资料包，不能直接导入；测试画布网格请用包内 canvas-grid.zip。SKFE 非开源，仅授权制作与私下分享插件，禁止二次公开发布或抹消作者署名。</div>
+    </div>
+
+    <div class="divider"></div>
+    <div id="pluginList" class="plugin-list"></div> <!-- 已装插件列表，由 host.js 动态渲染 -->
+  </div> <!-- 插件分区结束 -->
   </div> <!-- #uiScroll 结束 -->
 
   <!-- 底部固定栏：不参与上面的滚动，一行排列、超出可左右滑动 -->
@@ -935,6 +978,7 @@
     <button class="ui-tab" type="button" data-sheet="project" role="tab" aria-label="项目" data-i18n-aria-label="tab.project" data-i18n-title="tab.project" title="项目"><i data-icon="folder-open"></i></button>
     <button class="ui-tab" type="button" data-sheet="export" role="tab" aria-label="导出" data-i18n-aria-label="tab.export" data-i18n-title="tab.export" title="导出"><i data-icon="download"></i></button>
     <button class="ui-tab" type="button" data-sheet="theme" role="tab" aria-label="主题" data-i18n-aria-label="tab.theme" data-i18n-title="tab.theme" title="主题"><i data-icon="clear"></i></button>
+    <button class="ui-tab" type="button" data-sheet="plugins" role="tab" aria-label="插件" data-i18n-aria-label="tab.plugins" data-i18n-title="tab.plugins" title="插件"><i data-icon="diamond-two"></i></button> <!-- 插件入口：主题右侧 -->
   </div> <!-- 底部栏结束 -->
 </div> <!-- ==================== 核心控制面板主容器结束 ==================== -->
 
@@ -1146,6 +1190,7 @@
 </div> <!-- 分部缓动弹窗结束 -->
 
 <!-- 引入外部 JavaScript 脚本 -->
+<script src="./js/version.js"></script> <!-- 版本号单一来源，必须在 i18n 之前 -->
 <script src="./js/locales/zh-CN.js"></script> <!-- 引入中文语言包 -->
 <script src="./js/locales/en.js"></script> <!-- 引入英文语言包 -->
 <script src="./js/i18n.js"></script> <!-- 引入国际化核心逻辑 -->
@@ -1175,5 +1220,9 @@
 <script src="./js/platform.js"></script> <!-- 运行环境适配层：浏览器/桌面/移动端的文件保存差异 -->
 <script src="./js/features/track-strip.js"></script> <!-- v7.4.0：轨道模式（独立模块，只读 AppState.tracks，不改现有帧块逻辑） -->
 <script src="./js/app.js"></script> <!-- 引入主程序逻辑 -->
+
+<!-- ==================== 本地插件系统（必须在 app.js 之后，此时 __skfe 已就绪） ==================== -->
+<script src="./js/vendor/jszip.min.js"></script> <!-- 代码型 zip 解压库（离线内置） -->
+<script src="./js/plugins/host.js"></script> <!-- 插件宿主：解析/存储/执行/管理 -->
 </body> <!-- 主体结束 -->
 </html> <!-- 文档结束 -->

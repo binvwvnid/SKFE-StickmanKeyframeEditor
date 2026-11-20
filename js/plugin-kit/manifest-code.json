@@ -1,0 +1,10 @@
+{
+  "id": "com.example.addstickman",
+  "name": "加火柴人按钮（代码型）",
+  "version": "1.0.0",
+  "author": "SKFE",
+  "description": "代码型插件示例：在工具区加一个按钮，点击后在当前帧插入一个火柴人。",
+  "type": "code",
+  "skfeVersion": ">=7.7.0",
+  "entry": "index.js"
+}

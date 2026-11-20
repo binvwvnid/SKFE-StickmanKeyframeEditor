@@ -1,0 +1,16 @@
+{
+  "id": "com.example.cream-theme",
+  "name": "奶油色示例（数据型）",
+  "version": "1.0.0",
+  "author": "SKFE",
+  "description": "数据型插件示例：往 SKFE 命名空间写入一组自定义配色，导入后在控制台可见 SKFE.core.colorUtils.MY_BRAND。",
+  "type": "data",
+  "skfeVersion": ">=7.7.0",
+  "contributes": {
+    "core.colorUtils.MY_BRAND": {
+      "primary": "#ed9e94",
+      "cream": "#f7f5ea",
+      "accent": "#b92d5d"
+    }
+  }
+}

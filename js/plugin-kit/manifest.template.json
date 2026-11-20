@@ -1,0 +1,12 @@
+{
+  "id": "com.author.myplugin",
+  "name": "我的插件",
+  "version": "1.0.0",
+  "author": "你的名字",
+  "description": "一句话说明这个插件做什么",
+  "type": "data",
+  "skfeVersion": ">=7.8.0",
+  "contributes": {
+    "core.colorUtils.MY_BRAND": { "primary": "#ed9e94", "gold": "#f7f5ea" }
+  }
+}

@@ -44,9 +44,12 @@
       }
       return key;
     }
-    if (vars && typeof text === 'string') {
+    if (typeof text === 'string') {
+      /* v7.8.0：自动注入 SKFE 版本号，语言包里写 {version} 即可。
+         显示值唯一来源为 js/version.js，不再各处硬编码。 */
+      var merged = Object.assign({ version: (window.SKFE && window.SKFE.version) || '' }, vars || {});
       text = text.replace(/\{(\w+)\}/g, function (match, name) {
-        return Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : match;
+        return Object.prototype.hasOwnProperty.call(merged, name) ? String(merged[name]) : match;
       });
     }
     return text;

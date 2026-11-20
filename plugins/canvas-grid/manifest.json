@@ -1,0 +1,10 @@
+{
+  "id": "com.skfe.community.canvasgrid",
+  "name": "画布网格叠加（代码型示例）",
+  "version": "1.0.0",
+  "author": "SKFE 社区",
+  "description": "代码型插件示例：在「画布」分区底部加一个开关按钮，画布上叠加一层可自定义间距与颜色的线网格，不影响导出。",
+  "type": "code",
+  "skfeVersion": ">=7.7.0",
+  "entry": "index.js"
+}

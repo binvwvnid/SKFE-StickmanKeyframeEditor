@@ -22,14 +22,18 @@ SKFE.features.theme = (function () {
     return (v == null || v === key) ? fallback : v;
   }
 
-  const THEME_STORAGE_KEY = 'skfe_theme_v2';
+  const THEME_STORAGE_KEY = 'skfe_theme_v3';
+  /* 默认主题 = Pink（配图色：画布与按钮使用取色器中的 #f7f5ea 奶油白） */
   const DEFAULT_THEME = {
-    canvasBg: '#faf7eb', canvasAlpha: 1,
-    panelBg: '#b8db8e', panelAlpha: 0.62,
-    btnBg: '#f3a787', btnHover: '#f5f9f0',
-    primary: '#86c451',
-    textMain: '#274f10', textSub: '#dc701d',
-    borderColor: '#ffffff'
+    canvasBg: '#f7f5ea', canvasAlpha: 1,
+    panelBg: '#f9c3c5', panelAlpha: 0.36,
+    btnBg: '#f7f5ea', btnHover: '#f0a29f',
+    primary: '#ed9e94',
+    textMain: '#551029', textSub: '#b92d5d',
+    borderColor: '#f9c3c5',
+    /* 面板背景渐变：默认 Pink 开启（其他预设不带这些字段，保持纯色） */
+    gradEnabled: true, gradStart: '#f7f5ea', gradEnd: '#ff243a',
+    gradAngle: 5, gradAlpha: 0.37
   };
   let themeConfig = { ...DEFAULT_THEME };
 
@@ -37,9 +41,21 @@ SKFE.features.theme = (function () {
     themeCanvasBg: 'canvasBg', themePanelBg: 'panelBg',
     themeBtnBg: 'btnBg', themeBtnHover: 'btnHover',
     themePrimary: 'primary', themeTextMain: 'textMain',
-    themeTextSub: 'textSub', themeBorderColor: 'borderColor'
+    themeTextSub: 'textSub', themeBorderColor: 'borderColor',
+    themeGradStart: 'gradStart', themeGradEnd: 'gradEnd'
   };
-  const THEME_ALPHA_FIELDS = { themeCanvasAlpha: 'canvasAlpha', themePanelAlpha: 'panelAlpha' };
+  const THEME_ALPHA_FIELDS = {
+    themeCanvasAlpha: 'canvasAlpha', themePanelAlpha: 'panelAlpha',
+    themeGradAlpha: 'gradAlpha'
+  };
+
+  /* 渐变色 → CSS linear-gradient（角度语义同 CSS：0deg 向上、90deg 向右） */
+  function panelGradient(cfg) {
+    const a = Number(cfg.gradAngle) || 0;
+    return 'linear-gradient(' + a + 'deg, ' +
+      SKFE.core.colorUtils.themeHexToRgba(cfg.gradStart, cfg.gradAlpha) + ' 0%, ' +
+      SKFE.core.colorUtils.themeHexToRgba(cfg.gradEnd, cfg.gradAlpha) + ' 100%)';
+  }
 
   function getConfig() { return themeConfig; }
 
@@ -59,7 +75,10 @@ SKFE.features.theme = (function () {
     if (!cfg) cfg = themeConfig;
     const style = document.documentElement.style;
     style.setProperty('--bg-page', SKFE.core.colorUtils.themeHexToRgba(cfg.canvasBg, cfg.canvasAlpha));
-    style.setProperty('--bg-panel', SKFE.core.colorUtils.themeHexToRgba(cfg.panelBg, cfg.panelAlpha));
+    /* 启用渐变时用 linear-gradient 覆盖面板底色，未启用则维持原纯色 */
+    style.setProperty('--bg-panel', cfg.gradEnabled
+      ? panelGradient(cfg)
+      : SKFE.core.colorUtils.themeHexToRgba(cfg.panelBg, cfg.panelAlpha));
     style.setProperty('--btn-bg', cfg.btnBg);
     style.setProperty('--btn-hover', cfg.btnHover);
     style.setProperty('--color-primary', cfg.primary);
@@ -87,6 +106,16 @@ SKFE.features.theme = (function () {
       const label = document.getElementById(id + 'Val');
       if (label) label.textContent = val.toFixed(2);
     });
+    /* 渐变开关 / 方向 / 展开状态 */
+    const gradCb = document.getElementById('themeGradEnabled');
+    if (gradCb) gradCb.checked = !!themeConfig.gradEnabled;
+    const gradAngle = document.getElementById('themeGradAngle');
+    const angle = (Number(themeConfig.gradAngle) || 0);
+    if (gradAngle) gradAngle.value = angle;
+    const angleVal = document.getElementById('themeGradAngleVal');
+    if (angleVal) angleVal.textContent = angle + '°';
+    const gradBody = document.getElementById('themeGradBody');
+    if (gradBody) gradBody.hidden = !themeConfig.gradEnabled;
   }
 
   function readThemeUI() {
@@ -103,6 +132,18 @@ SKFE.features.theme = (function () {
       const label = document.getElementById(id + 'Val');
       if (label) label.textContent = val.toFixed(2);
     });
+    /* 渐变开关 / 方向 */
+    const gradCb = document.getElementById('themeGradEnabled');
+    if (gradCb) themeConfig.gradEnabled = !!gradCb.checked;
+    const gradAngle = document.getElementById('themeGradAngle');
+    if (gradAngle) {
+      const a = Number(gradAngle.value) || 0;
+      themeConfig.gradAngle = a;
+      const angleVal = document.getElementById('themeGradAngleVal');
+      if (angleVal) angleVal.textContent = a + '°';
+    }
+    const gradBody = document.getElementById('themeGradBody');
+    if (gradBody) gradBody.hidden = !themeConfig.gradEnabled;
   }
 
   function bindThemeInputs() {
@@ -116,6 +157,11 @@ SKFE.features.theme = (function () {
       if (!el) return;
       el.addEventListener('input', () => { readThemeUI(); applyThemeConfig(themeConfig); saveThemeConfig(); });
     });
+    /* 渐变开关（change）与方向滑条（input） */
+    const gradCb = document.getElementById('themeGradEnabled');
+    if (gradCb) gradCb.addEventListener('change', () => { readThemeUI(); applyThemeConfig(themeConfig); saveThemeConfig(); });
+    const gradAngle = document.getElementById('themeGradAngle');
+    if (gradAngle) gradAngle.addEventListener('input', () => { readThemeUI(); applyThemeConfig(themeConfig); saveThemeConfig(); });
     const resetBtn = document.getElementById('btnResetTheme');
     if (resetBtn) {
       resetBtn.addEventListener('click', () => {
@@ -128,7 +174,7 @@ SKFE.features.theme = (function () {
   }
 
   /* ==================== 主题预设存储逻辑 ==================== */
-  const THEME_PRESET_KEY = 'skfe_theme_presets_v1';
+  const THEME_PRESET_KEY = 'skfe_theme_presets_v2';
   let themePresets = [];
 
   function loadThemePresets() {
@@ -139,21 +185,22 @@ SKFE.features.theme = (function () {
       if (raw === null) {
         const DEFAULT_THEME_PRESETS = [
           { 
+            name: 'Pink', 
+            config: { 
+              canvasBg: '#f7f5ea', canvasAlpha: 1,
+              panelBg: '#f9c3c5', panelAlpha: 0.36, 
+              btnBg: '#f7f5ea', btnHover: '#f0a29f', 
+              primary: '#ed9e94', textMain: '#551029', textSub: '#b92d5d', borderColor: '#f9c3c5',
+              gradEnabled: true, gradStart: '#f7f5ea', gradEnd: '#ff243a', gradAngle: 5, gradAlpha: 0.37
+            } 
+          },
+          { 
             name: 'TSC', 
             config: { 
               canvasBg: '#faf7eb', canvasAlpha: 1,
               panelBg: '#b8db8e', panelAlpha: 0.62, 
               btnBg: '#f3a787', btnHover: '#f5f9f0', 
               primary: '#86c451', textMain: '#274f10', textSub: '#dc701d', borderColor: '#ffffff' 
-            } 
-          },
-          { 
-            name: 'Pink', 
-            config: { 
-              canvasBg: '#f9e8da', canvasAlpha: 1,
-              panelBg: '#f9c3c5', panelAlpha: 0.36, 
-              btnBg: '#f9e8da', btnHover: '#f0a29f', 
-              primary: '#ed9e94', textMain: '#551029', textSub: '#b92d5d', borderColor: '#f9c3c5' 
             } 
           },
           { 
@@ -227,7 +274,9 @@ SKFE.features.theme = (function () {
       };
       
       item.onclick = () => {
-        themeConfig = { ...DEFAULT_THEME, ...cfg };
+        /* 预设未声明 gradEnabled 时按 false 处理，避免从 DEFAULT_THEME 继承成开启；
+           只有显式开启渐变的预设（如 Pink）才带渐变。 */
+        themeConfig = { ...DEFAULT_THEME, ...cfg, gradEnabled: cfg.gradEnabled === true };
         syncThemeUI();
         applyThemeConfig(themeConfig);
         saveThemeConfig();
