@@ -1,17 +1,19 @@
 # SKFE 插件 API 参考
 
-> 适用版本：SKFE v7.8.0　│　核实日期：2026-11-20
+> 适用版本：SKFE v7.8.1　│　核实日期：2026-11-20
 > 源码仓库：https://github.com/binvwvnid/SKFE-StickmanKeyframeEditor
 >
 > **这份文档给谁**：插件作者，以及被托付写插件的 AI。
 >
 > **和《插件接口设计文档》的区别**：那份讲"为什么这么设计"，这份讲"照着抄就能跑"。
-> 这里所有签名、字段名、DOM id、事件名都逐条对着 SKFE v7.8.0 源码核实过，**没有一处是猜的**。
+> 这里所有签名、字段名、DOM id、事件名都逐条对着 SKFE v7.8.1 源码核实过，**没有一处是猜的**。
 >
-> **关于行号**：文中所有 `文件:行号` 基于 v7.7.8 快照，仅供快速定位；源码后续改动会让行号漂移。
+> **关于行号**：文中所有 `文件:行号` 基于 v7.8.0 快照，仅供快速定位；源码后续改动会让行号漂移。
 > 找不到时用**函数名 / 常量名 / DOM id / 事件名**搜索，不要依赖行号。
 >
-> **授权提醒**：SKFE 不是开源项目，只授权制作与私下分享插件文件；禁止二次公开发布本体或修改版、禁止抹消作者署名。完整条款见作者工具包内《版权与授权声明.md》。
+> **授权提醒**：SKFE 不是开源项目。只允许两种情况：① 获得作者明确授权后修改；② 按官方接口制作并私下分享插件。
+> 禁止二次公开发布本体或修改版、打包售卖、抹消作者署名、QQ 群与版本水印。
+> 完整条款见 `README.md` 开头与作者工具包内《版权与授权声明.md》。
 
 ---
 
@@ -94,7 +96,8 @@ window
 | `on` | `on(event, callback)` | 注册回调 |
 | `emit` | `emit(event, ...args)` | 派发；每个回调被 try/catch 包裹，出错只打日志 |
 
-**没有 `off()`**。订阅后无法退订，删插件后必须刷新页面才清得掉。
+**没有 `off()`**。订阅后无法退订，禁用/删除插件后必须刷新页面才清得掉。
+`Bus.on()` 只登记回调，不返回结果句柄；想临时停用自己的监听，就在回调开头用标志位 return。
 
 四个事件的真实语义：
 
@@ -191,8 +194,13 @@ P0 已实施：源码在 app.js:17172–17239 定义这些函数，无条件挂�
 | `exportSelectedSVGs` | `()` | `void` | 内部 async 打包 ZIP，扫所有轨道 |
 | `exportSelectedJPGs` | `()` | `void` | 逐张下载，setTimeout 错开 |
 | `exportSelectedGIF` | `()` | `void` | 内部 async |
-| `exportProjectJSON` | `()` | `void` | 触发 .json 下载；不改状态 |
+| `exportProjectJSON` | `()` | `{version, frames, tracks, ...}` | 触发 .json 下载并**返回当前工程数据对象**；不改 AppState |
 | `importProjectJSON` | `(file)` | `void` | `file` 是 File 对象；异步读、校验版本、加载 |
+
+**v7.8.1 补充**：导出面板新增 `exportSelectedSVGs()`（内部 async 打包 ZIP，只取矢量元件，
+文字/位图/视频/发光/扭曲不导出），`exportSelectedPNGs()`、`exportSelectedJPGs()`、
+`exportSelectedGIF()` 仍保持原有语义。UI 上的「导出并保存项目」= `exportProjectJSON(name)` +
+`projectLibrary.save(data, name)` + `projectLibrary.refresh()`，不是单独的新底层 API。
 | `deserializeProject` | `(data)` | `{newFrames, newTracks, promises}` | 纯解析，不改状态 |
 | `applyLoadedProject` | `(data)` | `Promise` | 大面积覆盖 AppState 与全局设置；**不写历史** |
 | `exportActionPresets` | `()` | `void` | 导出动作预设 json |
@@ -233,13 +241,13 @@ S.core.eventBus.EventBus.emit('need:render');
 | `projectLibrary.remove` | `(id)` | `Promise<void>` |
 | `projectLibrary.refresh` | `()` | `void`，重建 `#projectList` DOM |
 
-### 2.8 P0 待扩充的接口（当前不在 `__skfe` 里，设计已列）
+### 2.8 v7.8.1 补充导出的接口
 
-这些函数源码里真实存在，P0 会把它们加进导出对象。签名已核实：
+下列函数已从 v7.7.8 的「待扩充」清单**正式加入 `window.__skfe`**，可直接调用：
 
 | 函数 | 真实签名 | 返回 / 说明 |
 |---|---|---|
-| `setActiveTool` | `(name)` | `void`；传当前同名会关闭；如 `'layer'`、`'canvas'` |
+| `setActiveTool` | `(name)` | `void`；传当前同名会关闭；如 `'layer'`、`'canvas'`、`'mask'` |
 | `zoomViewAt` | `(clientX, clientY, factor)` | `boolean`；factor>0；以鼠标点为锚缩放 |
 | `clampViewOffset` | `()` | `boolean`；保证画布至少 5% 在屏内 |
 | `canvasPosLocked` | `()` | `boolean`；视图固定后画布坐标锁定 |
@@ -251,6 +259,10 @@ S.core.eventBus.EventBus.emit('need:render');
 | `seekVideoClipsToFrame` | `(idx)` | `void`；24ms 防抖 |
 | `applyBasicMaskToCanvas` | `(c, W, H, M, obb, cfg)` | `void`；底层绘制，参数复杂 |
 | `applyChromaMaskToCanvas` | `(c, W, H, M, obb, cfg)` | `void`；同上 |
+
+> **音频元件注意**：`makeAudioClip` / `playAudioClips` / `pauseAudioClips` / `disposeAudioClipSource`
+> 当前仍是 app.js 内部函数，**没有**暴露到 `__skfe`；插件不要直接调它们。
+> 如需创建音频元件，走 UI 导入或构造合法 `audioClip` 对象后交给轨道数据层。
 
 ---
 
@@ -286,6 +298,7 @@ S.core.eventBus.EventBus.emit('need:render');
 | `'shape'` | `makeShape(shapeType,x,y)` app.js:2990 | 形状；shape 值 `circle/rect/tri` |
 | `'acc'` | `makeAccessory()` app.js:3005 | 配件 |
 | `'videoClip'` | `makeVideoClip(...)` app.js:3030 | 独立视频元件 |
+| `'audioClip'` | 内部 `makeAudioClip(...)`，**未暴露到 `__skfe`** | 音频元件；只播声音、不进元件列表、轨道置底、仅音量可调 |
 | `'bubble'` | `makeBubble()` app.js:3218 | 对话气泡 |
 | `'ink'` | brush.js:884 | 矢量画笔笔迹 |
 | `'camera'` | `makeCamera(x,y)` camera.js:11 | 摄像机 |
@@ -330,6 +343,10 @@ S.core.eventBus.EventBus.emit('need:render');
 **shape**（app.js:2990）：上面公共字段 + `shape, fillColor, strokeColor, strokeWidth, bindTo, targetId, offX, offY`
 
 **videoClip**（app.js:3030）：公共字段 + `videoFrame, videoLoop`，`img` 是 video 元素
+
+**audioClip**（v7.8.1，内部 `makeAudioClip`）：公共字段 + `volume`（0~1，默认 1）。
+音源本体存在 app.js 内部 Map `audioClipSources` 中，元件对象本身**没有** `img`；
+它不进元件列表、不画画面、不参与静态导出，只在自己的轨道段落区间播放声音。
 
 **bubble**（app.js:3218）：公共字段 + `text, textColor, fontSize, fillColor, strokeColor, strokeWidth, gradientColor, isGradient`
 
@@ -387,7 +404,9 @@ AppState.tracks = {
 ```
 
 **不包含** `objects`、`selected`、`viewOffset`、`viewScale`、`activeTrackId`——这些只在运行时存在。
-存图片时 `img` 会被换成 `imgSrc`（app.js:807–831），videoClip 还会有 `videoSrc/videoW/videoH/videoDurMs/videoFps`。
+存图片时 `img` 会被换成 `imgSrc`（app.js:807–831），videoClip 还会有
+`videoSrc/videoW/videoH/videoDurMs/videoFps`；v7.8.1 起 audioClip 还会有
+`audioSrc`（整轨只写一次）、`audioDurMs`、`audioFps`、`volume`。
 
 ---
 
@@ -485,6 +504,7 @@ AppState.tracks = {
 | 导出 PNG / JPG | `#btnExportPNG` / `#btnExportJPG` |
 | 撤销 / 重做 | `#btnUndo` / `#btnRedo` |
 | 加火柴人 / 复制 / 重置 | `#btnNew` / `#btnClone` / `#btnReset` |
+| 导入插件 / 插件列表（v7.8.1） | `#btnImportPlugin` / `#pluginFileInput` / `#pluginList` |
 
 **`data-tool` 合法值**（8 个）：`layer`、`proportion`、`joints`、`glow`、`mask`、`eraser`、`canvas`、`theme`。
 切换工具调 `S.__skfe.setActiveTool(name)`，别自己改 class。
@@ -621,6 +641,9 @@ plugin.onDisable(function () { installed = false; Bus.emit('need:render'); });
 - [ ] 没有假设 `renderFrameToDataURL()` 返回字符串（返回 canvas）
 - [ ] 没有把 `objects` 当数据源写（数据源是 `tracks`）
 - [ ] 多步修改用 `txRun()` 包起来，避免产生一堆历史记录
+- [ ] 没有调用未暴露的 `makeAudioClip` / `playAudioClips`（v7.8.1 仍为内部函数）
+- [ ] 没有把 audioClip 塞进元件列表；它只在轨道里显示并置底
+- [ ] 没有用 `EventBus.off()` 或假设 `on()` 返回退订句柄
 
 ---
 
@@ -634,6 +657,7 @@ plugin.onDisable(function () { installed = false; Bus.emit('need:render'); });
 | 关键帧系统 | js/systems/keyframes.js |
 | 事件总线 | js/core/event-bus.js:8–20 |
 | 事件订阅与初始化 | js/app.js:16958–17021 |
+| 插件宿主运行时（导入 / 执行 / 列表） | js/plugins/host.js |
 | DOM 结构 | index.html:10–1226 |
 | 子系统导出 | 各 js/core、js/features、js/systems 文件导出块 |
 | 工程格式 | js/app.js:1001–1065、804–853 |

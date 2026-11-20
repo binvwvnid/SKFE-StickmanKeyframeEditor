@@ -12,7 +12,7 @@
    v7.7.8：画布至少 5% 留在屏幕内（所有平移/缩放加 clamp）；固定视图后禁止改画布 xy 世界坐标。
    v7.8.0：本地插件系统（数据型/代码型，完全信任模型）；主题面板背景渐变内置为原生功能；
            底部栏分区标题栏圆角与内边距；PWA 缓存标签随 7.8.0 同步，避免旧缓存卡住。 */
-const VERSION = 'skfe-v7.8.0';
+const VERSION = 'skfe-v7.8.1';
 const SHELL = ['./', './index.html', './style.css', './manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {

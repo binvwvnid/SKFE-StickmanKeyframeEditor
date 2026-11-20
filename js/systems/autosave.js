@@ -91,12 +91,7 @@ SKFE.systems.autosave = (function () {
       .then(data => { if (data) D.applyData(data); })
       .catch(err => { autoArchiveEnabled = false; });
 
-    const btnClearAutoArchive = document.getElementById('btnClearAutoArchive');
-    if (btnClearAutoArchive) {
-      btnClearAutoArchive.onclick = () => {
-        if (confirm('确定清除自动存档？此操作不可恢复。')) clearAutoArchive();
-      };
-    }
+    /* v7.8.1：「清除自动存档」按钮已删除；后台自动保存与启动恢复照常工作 */
 
     window.addEventListener('beforeunload', () => saveToAutoArchive());
     document.addEventListener('visibilitychange', () => {

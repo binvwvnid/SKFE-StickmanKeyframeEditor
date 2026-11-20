@@ -122,7 +122,13 @@
   let _renderList = null;
   window.__isExporting = false; // 导出时用于局部画布判断
 
-  const counts = { figure: 0, image: 0, acc: 0, shape: 0, bubble: 0, ink: 0 }; // brush-v5.1.0: §6.3.10 追加 ink 计数
+  /* v7.8.1：默认名 = 纯数字身份标记（1、2、3…），元件条上已有类型图标区分类别。
+     每种元件类型各自独立计数：火柴人 1、2、3；圆 1、2；插入视频 1、2……
+     计数按添加时间递增（type 内独立计数器），不消耗 uid，插帧不会跳号。 */
+  const nameSeqByType = Object.create(null);
+  const DEFAULT_NAME_RE = /^(?:Stickman|Image|Acc|Video|Circle|Square|Triangle|Bubble|Camera|Ink)\d+$/i;
+
+  const nameTypeKey = (type) => (type ? String(type) : '_');
 
   const PRESET_KEY = 'tco_figure_presets_v1';
   let presets = [];
@@ -396,6 +402,32 @@ function syncDistortToAllFrames(obj) {
      后续播放/导出只认这段连续帧区间，不在段落外继续放完整视频。 */
   function fillVideoClipToLength(obj, frameCount, frameMs) {
     if (!obj || obj.type !== 'videoClip') return;
+    const count = Math.max(1, Math.round(frameCount || 1));
+    const ms = Math.max(1, Math.round(frameMs || 83));
+    const id = String(obj.id);
+    const t = AppState.tracks[id];
+    if (!t || !t.frames) return;
+    const start = AppState.currentFrameIndex;
+    const need = start + count;
+    while (AppState.frames.length < need) {
+      AppState.frames.push({ id: ++uid, duration: ms, isTween: false });
+    }
+    while (t.frames.length < need) t.frames.push(null);
+    for (let i = start; i < need; i++) {
+      if (i === start) { t.frames[i] = obj; continue; }
+      const c = cloneObjectKeepImg(obj);
+      if (!c) continue;
+      c.id = obj.id;
+      t.frames[i] = c;
+    }
+    syncMainLengthFromTracks();
+    AppState.objects = getCombinedObjectsForRender();
+    updateFrameBar();
+  }
+
+  /* v7.8.1：音频元件铺满原长（与视频同构，但只承载声音） */
+  function fillAudioClipToLength(obj, frameCount, frameMs) {
+    if (!obj || obj.type !== 'audioClip') return;
     const count = Math.max(1, Math.round(frameCount || 1));
     const ms = Math.max(1, Math.round(frameMs || 83));
     const id = String(obj.id);
@@ -804,7 +836,7 @@ function syncDistortToAllFrames(obj) {
   const PROJECT_VERSION = 3;
   const PROJECT_MIN_VERSION = 3;
 
-  function cloneObjectForSave(o, seenVideoIds) {
+  function cloneObjectForSave(o, seenVideoIds, seenAudioIds) {
     const copy = JSON.parse(JSON.stringify(o, (k, v) => (k === 'img' ? undefined : v)));
     if (o.img && o.img.src) copy.imgSrc = o.img.src;
     /* v7.7.1：视频元件是「一个完整视频」，直接把原始视频文件存成 dataURL，
@@ -827,6 +859,18 @@ function syncDistortToAllFrames(obj) {
       delete copy.videoLoop;
       delete copy.videoFrames;   /* 兼容清理：老版本的抽帧字段不再写回 */
     }
+    /* v7.8.1：音频元件同样只把 dataURL 写一次，避免工程体积按帧数翻倍 */
+    if (o.type === 'audioClip') {
+      const src = audioClipSources.get(o.id);
+      if (src && src.dataUrl) {
+        copy.audioDurMs = src.durMs;
+        copy.audioFps = src.fps;
+        if (!seenAudioIds || !seenAudioIds.has(String(o.id))) {
+          copy.audioSrc = src.dataUrl;
+          if (seenAudioIds) seenAudioIds.add(String(o.id));
+        }
+      }
+    }
     return copy;
   }
 
@@ -841,12 +885,13 @@ function syncDistortToAllFrames(obj) {
   function serializeTracks() {
     const out = {};
     const seenVideoIds = new Set(); /* v7.7.6：同一视频的 dataURL 整轨只写一次 */
+    const seenAudioIds = new Set(); /* v7.8.1：同一音频的 dataURL 整轨只写一次 */
     for (const id in AppState.tracks) {
       const t = AppState.tracks[id];
       if (!t) continue;
       out[id] = {
         name: t.name || id,
-        frames: (t.frames || []).map(d => d ? cloneObjectForSave(d, seenVideoIds) : null)
+        frames: (t.frames || []).map(d => d ? cloneObjectForSave(d, seenVideoIds, seenAudioIds) : null)
       };
     }
     return out;
@@ -960,6 +1005,29 @@ function syncDistortToAllFrames(obj) {
         }
         delete o.videoFrames;
       }
+      /* v7.8.1：重建音频元件音源（dataURL → <video>，只播声音） */
+      if (o.type === 'audioClip' && o.audioSrc && !audioClipSources.has(o.id)) {
+        const v = document.createElement('video');
+        v.src = o.audioSrc; v.muted = true; v.playsInline = true; v.preload = 'auto'; v.loop = false;
+        const src = {
+          id: o.id, video: v, dataUrl: o.audioSrc,
+          durMs: o.audioDurMs || 0, fps: o.audioFps || 12
+        };
+        audioClipSources.set(o.id, src);
+        promises.push(new Promise((resolve) => {
+          let settled = false;
+          const done = () => {
+            if (settled) return; settled = true;
+            if (v.duration && isFinite(v.duration)) src.durMs = Math.round(v.duration * 1000);
+            resolve();
+          };
+          v.addEventListener('loadedmetadata', done, { once: true });
+          v.addEventListener('error', done, { once: true });
+          setTimeout(done, 3000);
+          v.load();
+        }));
+        delete o.audioSrc;
+      }
       if (typeof o.id === 'number') uid = Math.max(uid, o.id);
       if (o.ax === undefined) o.ax = 0;
       if (o.ay === undefined) o.ay = 0;
@@ -995,25 +1063,32 @@ function syncDistortToAllFrames(obj) {
     }
     if (!newFrames.length) newFrames = [{ id: 1, duration: Math.round(1000 / (defaultFPS || 12)), isTween: false }];
     alignMainMetaWithTracks(newFrames, newTracks);
+    /* v7.8.1：老工程的按类型编号默认名 → 按添加时间的全局数字序号 */
+    renumberNamesFromTracks(newTracks);
     return { newFrames, newTracks, promises };
   }
 
-  function exportProjectJSON() {
-    const projectData = {
-      version: PROJECT_VERSION,
-      minVersion: PROJECT_MIN_VERSION,
-      frames: serializeFrames(),
-      tracks: serializeTracks(),
-      currentFrameIndex: AppState.currentFrameIndex, defaultFPS,
-      groundLineEnabled, groundLineY,
-      onionEnabled, onionBefore, onionAfter,
-      canvasBounds: AppState.canvasBounds, canvasBoundsEnabled: AppState.canvasBoundsEnabled,
-      pageBgColor, gridEnabled, gridSize,
-      canvasMaskEnabled, canvasMaskAlpha,
-      canvasMaskBgColor, canvasMaskGridColor, // 新增
-    };
+  function exportProjectJSON(name) {
+    const projectData = buildCurrentProjectData();
     const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
-    SKFE.platform.save(blob, 'skfe_project_' + Date.now() + '.json');
+    /* v7.8.1：支持自定义文件名；非法字符替换成下划线，避免下载失败 */
+    const base = String(name || '').trim() || ('skfe_project_' + Date.now());
+    const safe = base.replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
+    SKFE.platform.save(blob, safe + '.json');
+    return projectData;
+  }
+
+  /* v7.8.1：按输入框里的名字导出 JSON，同时以同名存一份到项目库 */
+  function exportAndSaveProject() {
+    const input = document.getElementById('projectNameInput');
+    const name = String(input ? input.value.trim() : '') || tr2('project.unnamed', '未命名项目');
+    const data = exportProjectJSON(name);
+    return saveProjectToLibrary(data, name)
+      .then(() => {
+        updateProjectListUI();
+        showHistoryToast(tr2('project.exportSaved', '已导出并保存到项目库'), 'success');
+      })
+      .catch(err => alert(tr2('project.exportSaveFail', '导出成功，但保存到项目库失败: ') + err.message));
   }
 
   function applyLoadedProject(data) {
@@ -1255,31 +1330,7 @@ function syncDistortToAllFrames(obj) {
     };
   }
 
-  function saveProjectToLocal() {
-    try {
-      const projectData = buildCurrentProjectData();
-      localStorage.setItem(PROJECT_SAVE_KEY, JSON.stringify(projectData));
-      alert(tr2('project.savedLocal', '已保存到本地'));
-    } catch (err) {
-      alert(tr2('project.saveFail', '保存失败，可能超出了本地存储限制: ') + err.message);
-    }
-  }
-
-  function loadProjectFromLocal() {
-    const raw = localStorage.getItem(PROJECT_SAVE_KEY);
-    if (!raw) return alert(tr2('project.noneLocal', '本地没有保存的项目'));
-    try {
-      const data = JSON.parse(raw);
-      applyLoadedProject(data).then(() => {
-        EventBus.emit('history:save', '读取本地项目');
-        alert(tr2('project.loadOk', '本地项目读取成功'));
-      });
-    } catch (err) {
-      alert(tr2('project.loadFail', '读取失败: ') + err.message);
-    }
-  }
-
-  document.getElementById('btnExportProject').onclick = exportProjectJSON;
+  document.getElementById('btnExportProject').onclick = exportAndSaveProject;
   document.getElementById('btnImportProject').onclick = () => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -1290,13 +1341,14 @@ function syncDistortToAllFrames(obj) {
     };
     input.click();
   };
-  document.getElementById('btnSaveProjectLocal').onclick = saveProjectToLocal;
-  document.getElementById('btnLoadProjectLocal').onclick = loadProjectFromLocal;
+  /* v7.8.1：「保存项目 / 读取项目」入口删除，读取改由项目库列表的「打开」承担 */
   {
     const btnLib = document.getElementById('btnSaveProjectToLibrary');
     if (btnLib) btnLib.onclick = () => {
       const data = buildCurrentProjectData();
-      const name = tr2('project.libAutoName', '项目 ') + new Date().toLocaleString();
+      const nameInput = document.getElementById('projectNameInput');
+      const name = (nameInput && nameInput.value.trim()) ||
+        (tr2('project.libAutoName', '项目 ') + new Date().toLocaleString());
       saveProjectToLibrary(data, name)
         .then(() => {
           updateProjectListUI();
@@ -1441,12 +1493,27 @@ function syncDistortToAllFrames(obj) {
   }
 
   function captureVideoFrame(idx) {
-    if (!refVideo || refVideo.readyState < 2) return;
+    if (!refVideo || refVideo.readyState < 2) return false;
     const offCanvas = document.createElement('canvas');
     offCanvas.width = refVideo.videoWidth;
     offCanvas.height = refVideo.videoHeight;
     offCanvas.getContext('2d').drawImage(refVideo, 0, 0);
     videoCache[idx] = offCanvas;
+    return true;
+  }
+
+  /* v7.8.1：loadedmetadata 时 readyState 只有 1，直接抓帧会静默失败。
+     等视频真的有当前帧数据（HAVE_CURRENT_DATA）再执行回调。 */
+  function whenVideoFrameReady(video, token, cb) {
+    if (!video || token !== videoLoadToken) return;
+    if (video.readyState >= 2) { cb(); return; }
+    const done = () => {
+      video.removeEventListener('loadeddata', done);
+      video.removeEventListener('canplay', done);
+      if (token === videoLoadToken) cb();
+    };
+    video.addEventListener('loadeddata', done);
+    video.addEventListener('canplay', done);
   }
 
   let videoClipSeekTimer = null;
@@ -1463,19 +1530,30 @@ function syncDistortToAllFrames(obj) {
     seekVideoClipsToFrame(idx); /* v7.7.1：视频元件定格到对应帧 */
     if (!refVideo || refVideo.readyState < 1) return;
     if (videoCache[idx]) return;
+    const token = videoLoadToken;
     if (seekDebounceTimer) clearTimeout(seekDebounceTimer);
     seekDebounceTimer = setTimeout(() => {
+      if (token !== videoLoadToken) return;
+      const video = refVideo;
+      if (!video) return;
       const target = getFrameStartTime(idx);
-      const dur = refVideo.duration || 0;
+      const dur = video.duration || 0;
       const time = Math.min(target, Math.max(0, dur - 0.001));
-      if (Math.abs(refVideo.currentTime - time) < 0.001) { captureVideoFrame(idx); return; }
-      refVideo.currentTime = time;
-      const onSeeked = () => {
-        refVideo.removeEventListener('seeked', onSeeked);
+      const grab = () => {
         captureVideoFrame(idx);
         if (AppState.currentFrameIndex === idx) EventBus.emit('need:render');
       };
-      refVideo.addEventListener('seeked', onSeeked);
+      if (Math.abs(video.currentTime - time) < 0.001) {
+        whenVideoFrameReady(video, token, grab);
+        return;
+      }
+      video.currentTime = time;
+      const onSeeked = () => {
+        video.removeEventListener('seeked', onSeeked);
+        if (token !== videoLoadToken) return;
+        grab();
+      };
+      video.addEventListener('seeked', onSeeked);
     }, 30);
   }
 
@@ -1587,7 +1665,7 @@ function syncDistortToAllFrames(obj) {
         if (token !== videoLoadToken) return;
         refVideoVisible = true;
         videoObj = {
-          id: 'video-obj', type: 'video', name: '🎥 参考视频',
+          id: 'video-obj', type: 'video', name: '参考视频',
           x: 0, y: 0, w: refVideo.videoWidth, h: refVideo.videoHeight,
           scale: 1, alpha: 0.55, layer: -9999, locked: false
         };
@@ -1595,6 +1673,13 @@ function syncDistortToAllFrames(obj) {
         seekVideoToFrame(AppState.currentFrameIndex);
         EventBus.emit('need:render');
         setTimeout(() => { if (token === videoLoadToken) hideVideoProgress(); }, 250);
+      });
+      /* v7.8.1：loadedmetadata 时还没有帧数据，必须等 loadeddata 再抓帧+重绘，
+         否则首次导入后画布一片空白，要切一次显隐才显示。 */
+      refVideo.addEventListener('loadeddata', () => {
+        if (token !== videoLoadToken) return;
+        seekVideoToFrame(AppState.currentFrameIndex);
+        EventBus.emit('need:render');
       });
       refVideo.addEventListener('error', () => {
         if (token !== videoLoadToken) return;
@@ -3018,6 +3103,130 @@ function importActionPresets() {
   const videoClipSources = new Map(); // id -> { video, dataUrl, w, h, durMs, fps, frameCache }
   let videoClipRaf = null;
 
+  /* ==================== v7.8.1 音频元件（type:'audioClip'） ====================
+     第一版不做真转码：导入音频/视频都用 <video> 元素承载音轨，只播声音不画画面。
+     与视频元件共用「按轨道段落换算时间」的机制，因此移动/分割后只播所在帧区间。
+     不进元件列表、不参与画布渲染、不导出画面。 */
+  const audioClipSources = new Map(); // id -> { video, dataUrl, durMs, fps }
+  let audioClipRaf = null;
+
+  function audioClipObjectAt(id, idx) {
+    const tid = String(id);
+    const t = AppState.tracks[tid];
+    if (!t || !t.frames || idx < 0 || idx >= t.frames.length) return null;
+    const d = getTrackFrame(tid, idx);
+    return (d && d.type === 'audioClip' && String(d.id) === tid) ? d : null;
+  }
+
+  function audioClipSegmentAt(id, idx) {
+    const has = (i) => !!audioClipObjectAt(id, i);
+    if (!has(idx)) return null;
+    let s = idx, e = idx;
+    while (has(s - 1)) s--;
+    while (has(e + 1)) e++;
+    return { start: s, end: e, count: e - s + 1 };
+  }
+
+  function audioClipTimeAt(src, frameIdx, obj) {
+    const id = (src && src.id != null) ? src.id : (obj && obj.id);
+    const o = obj || (id != null ? audioClipObjectAt(id, frameIdx) : null);
+    const seg = (id != null && o) ? audioClipSegmentAt(id, frameIdx) : null;
+    const start = seg ? seg.start : 0;
+    let t = 0;
+    for (let i = start; i < frameIdx; i++) t += (AppState.frames[i] && AppState.frames[i].duration) || Math.round(1000 / ((src && src.fps) || 12));
+    t /= 1000;
+    const dur = (src && src.video && isFinite(src.video.duration) && src.video.duration > 0)
+      ? src.video.duration
+      : (src && src.durMs ? src.durMs / 1000 : 0);
+    return dur > 0 ? Math.min(t, Math.max(0, dur - 0.02)) : t;
+  }
+
+  function makeAudioClip(videoEl, dataUrl, durMs, fps) {
+    const id = ++uid;
+    videoEl.loop = false;
+    videoEl.muted = true;
+    audioClipSources.set(id, {
+      id, video: videoEl, dataUrl: dataUrl || '',
+      durMs: durMs || 0, fps: fps || 12
+    });
+    const r = Math.min(1, 360 / 640);
+    return {
+      id, type: 'audioClip', name: 'Audio' + id,
+      x: 0, y: 0, w: 320 * r, h: 180 * r,
+      alpha: 1, scale: 1, layer: 0, locked: false,
+      volume: 1,
+      bindTo: 'none', targetId: null, offX: 0, offY: 0,
+      rot: 0, ax: 0, ay: 0, mirror: false,
+      distort: makeDistortField(), mask: makeMaskField()
+    };
+  }
+
+  function pauseSingleAudioClip(src) {
+    const v = src && src.video;
+    if (!v) return;
+    try { v.pause(); } catch (_) {}
+    v.muted = true;
+  }
+
+  /* v7.8.2：音频像「参考视频」那样连续播放 —— 只在进入段落那一刻 set 一次起点并 play()，
+     段内不再逐帧 seek（逐帧按 fps 拽 currentTime 会把声音卡成碎块，声音本就不该受 fps 影响）。
+     src.playSeg 记住当前正在播的段落起点，段内直接放行；换段/出段才重新定位或停音。 */
+  function playAudioClips(idx) {
+    audioClipSources.forEach((src, id) => {
+      const v = src.video;
+      if (!v || v.readyState < 1) return;
+      const o = audioClipObjectAt(id, idx);
+      if (!o) {
+        if (src.playSeg != null) { pauseSingleAudioClip(src); src.playSeg = null; }
+        return;
+      }
+      const seg = audioClipSegmentAt(id, idx);
+      const segStart = seg ? seg.start : idx;
+      /* 音量只认元件自己的 volume 字段，默认 1 */
+      const vol = (typeof o.volume === 'number') ? Math.max(0, Math.min(1, o.volume)) : 1;
+      try { v.volume = vol; } catch (_) {}
+      /* 同一段内已经在播：不碰 currentTime，让声音自然连续走 */
+      if (src.playSeg === segStart && !v.paused && !v.muted) return;
+      /* 进入新段落 / 从静音恢复：set 一次段内起点，然后连续播放 */
+      src.playSeg = segStart;
+      const target = audioClipTimeAt(src, idx, o);
+      v.loop = false;
+      try { v.currentTime = target; } catch (_) {}
+      v.muted = false;
+      const p = v.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    });
+  }
+
+  function pauseAudioClips() {
+    audioClipSources.forEach((src) => pauseSingleAudioClip(src));
+  }
+
+  function disposeAudioClipSource(id) {
+    const src = audioClipSources.get(id);
+    if (!src) return;
+    const v = src.video;
+    if (v) {
+      try { v.pause(); } catch (_) {}
+      try { v.muted = true; } catch (_) {}
+      try { v.removeAttribute('src'); v.load(); } catch (_) {}
+    }
+    audioClipSources.delete(id);
+  }
+
+  function cleanupOrphanAudioClipSources() {
+    if (!audioClipSources.size) return;
+    const alive = new Set();
+    for (const tid in AppState.tracks) {
+      const t = AppState.tracks[tid];
+      if (!t || !t.frames) continue;
+      for (const d of t.frames) if (d && d.type === 'audioClip') alive.add(String(d.id));
+    }
+    Array.from(audioClipSources.keys()).forEach(id => {
+      if (!alive.has(String(id))) disposeAudioClipSource(id);
+    });
+  }
+
   function makeVideoClip(videoEl, dataUrl, w, h, x, y, durMs, fps) {
     const id = ++uid;
     /* v7.7.6：不循环。视频只在其轨道段落覆盖的帧区间播放画面与声音。 */
@@ -3231,18 +3440,45 @@ function importActionPresets() {
     return { enabled: false, corners: null, baseW: 0, baseH: 0 };
   }
 
+  /* v7.8.1：默认名 = 每种类型独立递增的纯数字（1、2、3…），按添加时间。
+     不用 uid（插帧也会消耗 uid，会跳号）。 */
   function generateName(obj) {
-    if (obj.type === 'figure') { counts.figure++; obj.name = 'Stickman' + counts.figure; }
-    else if (obj.type === 'image') { counts.image++; obj.name = 'Image' + counts.image; }
-    else if (obj.type === 'acc') { counts.acc++; obj.name = 'Acc' + counts.acc; }
-    else if (obj.type === 'videoClip') { counts.videoClip = (counts.videoClip || 0) + 1; obj.name = 'Video' + counts.videoClip; }
-    else if (obj.type === 'shape') {
-      counts.shape++;
-      const map = { circle: 'Circle', rect: 'Square', tri: 'Triangle' };
-      obj.name = map[obj.shape] + counts.shape;
-    } else if (obj.type === 'bubble') { counts.bubble++; obj.name = 'Bubble' + counts.bubble; }
-    else if (obj.type === 'camera') { counts.camera = (counts.camera || 0) + 1; obj.name = 'Camera' + counts.camera; }
-    else if (obj.type === 'ink') { counts.ink = (counts.ink || 0) + 1; obj.name = 'Ink' + counts.ink; } // brush-v5.1.0: §6.3.9
+    const key = nameTypeKey(obj && obj.type);
+    const n = (nameSeqByType[key] || 0) + 1;
+    nameSeqByType[key] = n;
+    obj.name = String(n);
+  }
+
+  /* v7.8.1：老工程默认名（Stickman1 / Circle2 / Video3… 或全局纯数字）
+     按「每种类型各从 1 开始」重排。按 id（uid）升序 = 添加时间顺序。
+     只动看起来是默认名的，用户自己起的名字一律保留，但仍占该类型的位次。 */
+  function renumberNamesFromTracks(tracks) {
+    const seen = new Map();
+    for (const tid in tracks) {
+      const frames = tracks[tid] && tracks[tid].frames;
+      if (!frames) continue;
+      frames.forEach(slot => {
+        if (!KF.isReal(slot) || slot.type === 'video') return;
+        if (!seen.has(slot.id)) seen.set(slot.id, slot);
+      });
+    }
+    const objs = [...seen.values()].sort((a, b) => (a.id || 0) - (b.id || 0));
+    const perType = Object.create(null);
+    objs.forEach(o => {
+      const key = nameTypeKey(o.type);
+      const n = (perType[key] || 0) + 1;
+      perType[key] = n;
+      nameSeqByType[key] = Math.max(nameSeqByType[key] || 0, n);
+      const nm = (typeof o.name === 'string') ? o.name.trim() : '';
+      if (!nm || DEFAULT_NAME_RE.test(nm) || /^\d+$/.test(nm)) {
+        const newName = String(n);
+        for (const tid in tracks) {
+          const frames = tracks[tid] && tracks[tid].frames;
+          if (!frames) continue;
+          frames.forEach(slot => { if (KF.isReal(slot) && slot.id === o.id) slot.name = newName; });
+        }
+      }
+    });
   }
 
   /* ==================== 末端样式 ==================== */
@@ -7648,7 +7884,9 @@ function importActionPresets() {
     if (o.type === 'figure') return 'stickman';
     if (o.type === 'image') return 'add-picture';
     if (o.type === 'acc') return 'add-picture';
-    if (o.type === 'videoClip') return 'videocamera';
+    if (o.type === 'videoClip') return 'video-two';
+    if (o.type === 'audioClip') return 'audio'; /* v7.8.1：音频元件 */
+    if (o.type === 'video') return 'video'; /* v7.8.1：参考视频用胶片图标，与插入视频区分 */
     if (o.type === 'shape') return 'square';
     if (o.type === 'bubble') return 'comment-one';
     if (o.type === 'ink') return 'pencil';
@@ -8060,9 +8298,8 @@ function importActionPresets() {
     label.className = 'layer-name';
     label.textContent = raw;
     btn.title = raw;
-    const last = btn.lastElementChild;
-    if (last) btn.insertBefore(label, last);
-    else btn.appendChild(label);
+    /* v7.8.1：name 现在就是添加序号，直接放到图标后面；不再有单独 idx 小字 */
+    btn.appendChild(label);
   }
 
   function updateLayerList() {
@@ -8071,22 +8308,25 @@ function importActionPresets() {
        没有（老 HTML）就退回只刷新纵向列表。 */
     if (!layerListEl) { scheduleRenderLayerPop(); return; }
     layerListEl.innerHTML = '';
-    let idx = 1;
     if (videoObj) {
       if (videoObj.locked === undefined) videoObj.locked = false;
       const btn = document.createElement('div');
       btn.className = 'layer-btn' + (videoObj === AppState.selected ? ' active' : '') + (videoObj.locked ? ' locked' : '');
-      btn.innerHTML = `<span>🎥</span><span class="idx">${idx++}</span>`;
+      /* v7.8.1：只画一个矢量胶片图标 + 名字，不再叠加 🎥 emoji（此前两个图标重复） */
+      btn.innerHTML = `<span>${ic('video')}</span>`;
       attachLayerName(btn, videoObj);
       btn.onclick = () => { select(videoObj); EventBus.emit('need:render'); };
       layerListEl.appendChild(btn);
     }
-    const sorted = [...AppState.objects].sort((a, b) => (b.layer.body || b.layer) - (a.layer.body || a.layer));
+    /* v7.8.1：按添加时间（id/uid 升序）排列，序号就是 name；不再按 layer 高低倒排 */
+    const sorted = [...AppState.objects].sort((a, b) => (a.id || 0) - (b.id || 0));
     sorted.forEach(o => {
       /* v6.1.0：参考视频在 AppState.objects 里也会出现一份（渲染合并视图需要它），
          但列表顶部已经单独渲染了 🎥 那一行。这里必须跳过，否则会多出一个
          图标兜底成 ❓、又因为视频不允许 delete 而删不掉的幽灵元件。 */
       if (o.type === 'video' || o === videoObj) return;
+      /* v7.8.1：音频元件不进元件列表，只在轨道模式里出现并置底 */
+      if (o.type === 'audioClip') return;
       if (o.locked === undefined) o.locked = false;
       const btn = document.createElement('div');
       btn.className = 'layer-btn' + (o === AppState.selected ? ' active' : '') + (o.locked ? ' locked' : '');
@@ -8094,13 +8334,14 @@ function importActionPresets() {
       if (o.type === 'figure') icon = 'stickman';
       else if (o.type === 'image') icon = 'add-picture';
       else if (o.type === 'acc') icon = 'add-picture';
-      else if (o.type === 'videoClip') icon = 'videocamera';
+      else if (o.type === 'videoClip') icon = 'video-two';
+      else if (o.type === 'audioClip') icon = 'audio';
       else if (o.type === 'shape') icon = 'square';
       else if (o.type === 'bubble') icon = 'comment-one';
       else if (o.type === 'ink') icon = 'pencil'; // brush-v5.1.0: §6.3.9
       else if (o.type === 'camera') icon = 'videocamera';
       else if (o.type === 'video') icon = 'video'; /* 兜底：万一别处把视频带进来，也不要显示问号 */
-      btn.innerHTML = `<span>${ic(icon)}</span><span class="idx">${idx++}</span>`;
+      btn.innerHTML = `<span>${ic(icon)}</span>`;
       attachLayerName(btn, o);
       if (o.hidden) { btn.classList.add('hidden-obj'); btn.title = (o.name || '') + tr2('layerPop.hiddenTag', '（已隐藏）'); }
       btn.onclick = () => { select(o); EventBus.emit('need:render'); };
@@ -9612,6 +9853,7 @@ function importActionPresets() {
     }
     /* v7.7.1：视频元件带声音 —— 复刻参考视频机制，随播放取消静音并同步 currentTime */
     playVideoClips(idx);
+    playAudioClips(idx); /* v7.8.1：音频元件随播放取消静音，只播所在帧区间 */
 
     EventBus.emit('need:render');
     playTimer = requestAnimationFrame(playTick);
@@ -9631,6 +9873,7 @@ function importActionPresets() {
       updateVideoUI();
     }
     pauseVideoClips(); /* v7.7.1：视频元件暂停并静音 */
+    pauseAudioClips(); /* v7.8.1：音频元件暂停并静音 */
     seekVideoClipsToFrame(AppState.currentFrameIndex); /* 回到当前帧对应的画面 */
     EventBus.emit('need:render');
   }
@@ -9655,6 +9898,7 @@ function importActionPresets() {
       if (!refVideoPlaying) seekVideoToFrame(AppState.currentFrameIndex);
       /* v7.7.6：帧推进时同步视频元件——段落外停音，段落内按段内时间继续。 */
       if (videoClipSources.size) playVideoClips(st.idx);
+      if (audioClipSources.size) playAudioClips(st.idx); /* 音频随帧推进切换段落 */
       renderCanvas(false);
       updateFrameBarHighlight();
       SKFE.systems.camera.updateCameraPreview(); // ⬅️ 新增这一行！让预览窗口跟着刷新
@@ -10882,6 +11126,7 @@ function importActionPresets() {
       reconcileAllTracks();
       trimTrailingEmptyFrames();
       cleanupOrphanVideoClipSources(); /* v7.7.4：删帧后不再出场的视频要停音 */
+      cleanupOrphanAudioClipSources(); /* v7.8.1：删帧后不再出场的音频要停音 */
       if (AppState.currentFrameIndex >= AppState.frames.length) AppState.currentFrameIndex = AppState.frames.length - 1;
       if (AppState.currentFrameIndex < 0) AppState.currentFrameIndex = 0;
       invalidateAllFrameThumbs();
@@ -10908,6 +11153,7 @@ function importActionPresets() {
     reconcileAllTracks();
     trimTrailingEmptyFrames();
     cleanupOrphanVideoClipSources(); /* v7.7.4：删帧后不再出场的视频要停音 */
+      cleanupOrphanAudioClipSources(); /* v7.8.1：删帧后不再出场的音频要停音 */
     if (AppState.currentFrameIndex >= AppState.frames.length) AppState.currentFrameIndex = AppState.frames.length - 1;
     if (AppState.currentFrameIndex < 0) AppState.currentFrameIndex = 0;
     invalidateAllFrameThumbs();
@@ -11234,6 +11480,7 @@ function importActionPresets() {
     }
     /* v7.7.4：轨道没了，视频元件也就不再出场——把它的 <video> 停掉，防止音频残留。 */
     cleanupOrphanVideoClipSources();
+    cleanupOrphanAudioClipSources();
     /* 轨道少了一行，面板要重画（事件只是排进 rAF，不会打断当前的加载/删除流程） */
     if (removed && typeof EventBus !== 'undefined') EventBus.emit('need:render');
     return removed;
@@ -12928,6 +13175,7 @@ function togglePin(part) {
     const isFig = AppState.selected && AppState.selected.type === 'figure';
     const isAcc = AppState.selected && AppState.selected.type === 'acc';
     const isVideoClip = AppState.selected && AppState.selected.type === 'videoClip';
+    const isAudioClip = AppState.selected && AppState.selected.type === 'audioClip';
     const isShape = AppState.selected && AppState.selected.type === 'shape';
     const isBubble = AppState.selected && AppState.selected.type === 'bubble';
     const isInk = AppState.selected && AppState.selected.type === 'ink'; // brush-v5.1.0
@@ -13088,6 +13336,19 @@ function togglePin(part) {
     }
 
     updateToolVisibility(isFig, hasSel, isCamera);
+
+    /* v7.8.1：音频元件属性只留名称 + 音量，其余全部隐藏 */
+    const uiMainEl = document.getElementById('uiMain');
+    if (uiMainEl) uiMainEl.classList.toggle('audio-mode', !!isAudioClip);
+    const volRow = document.getElementById('audioVolumeRow');
+    if (volRow) volRow.style.display = isAudioClip ? 'flex' : 'none';
+    if (isAudioClip) {
+      const vol = (typeof AppState.selected.volume === 'number') ? AppState.selected.volume : 1;
+      const volInput = document.getElementById('audioVolume');
+      const volVal = document.getElementById('audioVolumeVal');
+      if (volInput && document.activeElement !== volInput) volInput.value = vol;
+      if (volVal) volVal.textContent = Math.round(vol * 100) + '%';
+    }
 
     /* v7.7.3：蒙版面板（非火柴人元件） */
     const maskCfg = maskFill(AppState.selected);
@@ -14938,6 +15199,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     refreshSubTrackOptions();
     invalidateAllFrameThumbs();
     updateFrameBar();
+    cleanupOrphanAudioClipSources(); /* v7.8.1：删掉音频元件后立即停音并释放音源 */
     EventBus.emit('app:update', '删除对象');
   }
 
@@ -15289,6 +15551,53 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         alert('已插入视频元件：默认铺满视频原长（约 ' + frameCount + ' 帧）。\n播放时只在这段帧区间显示画面并出声；它仍可像图片一样调整大小、扭曲、关键帧、位移，也可挂载到火柴人。');
       } catch (err) {
         alert('插入视频失败：' + (err && err.message ? err.message : err));
+      }
+    });
+  }
+
+  /* v7.8.1：音频元件导入 —— 音频与视频都用 <video> 承载音轨，只播声音不画画面。
+     接受 audio/* 与 video/*，因此「视频转音频」= 直接导入视频当音频用。 */
+  const audioClipInput = document.createElement('input');
+  audioClipInput.type = 'file';
+  audioClipInput.accept = 'audio/*,video/*';
+  audioClipInput.style.display = 'none';
+  document.body.appendChild(audioClipInput);
+  const btnInsertAudio = document.getElementById('btnInsertAudio');
+  if (btnInsertAudio) {
+    btnInsertAudio.onclick = () => audioClipInput.click();
+    audioClipInput.addEventListener('change', async e => {
+      const file = e.target.files && e.target.files[0];
+      audioClipInput.value = '';
+      if (!file) return;
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = () => reject(new Error('音频读取失败'));
+          fr.readAsDataURL(file);
+        });
+        const media = document.createElement('video');
+        media.src = dataUrl; media.muted = true; media.playsInline = true; media.preload = 'auto';
+        await new Promise((resolve, reject) => {
+          media.addEventListener('loadedmetadata', resolve, { once: true });
+          media.addEventListener('error', () => reject(new Error('音频解码失败')), { once: true });
+          setTimeout(() => reject(new Error('音频读取超时')), 15000);
+        });
+        const frameMs0 = (AppState.frames[0] && AppState.frames[0].duration) || 83;
+        const fps = Math.max(1, Math.min(30, Math.round(1000 / frameMs0)));
+        const frameMs = Math.round(1000 / fps);
+        const durMs = Math.round((media.duration || 0) * 1000);
+        const frameCount = Math.max(1, Math.round(durMs / frameMs));
+        const sp = getSpawnPoint();
+        const obj = makeAudioClip(media, dataUrl, durMs, fps);
+        generateName(obj); addObjectToFrames(obj);
+        fillAudioClipToLength(obj, frameCount, frameMs);
+        select(obj);
+        EventBus.emit('need:render'); EventBus.emit('need:syncUI');
+        EventBus.emit('history:save', '导入音频元件');
+        alert('已导入音频元件：默认铺满音频原长（约 ' + frameCount + ' 帧）。\n播放时只在这段帧区间出声，可在轨道里移动、分割；属性里只能调音量。');
+      } catch (err) {
+        alert('导入音频失败：' + (err && err.message ? err.message : err));
       }
     });
   }
@@ -15940,6 +16249,22 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   });
   objAlpha.addEventListener('change', () => EventBus.emit('history:save', '调整透明度'));
 
+  /* v7.8.1：音频元件音量 —— 改自己帧上的 volume，并即时作用到正在播放的音源 */
+  const audioVolumeInput = document.getElementById('audioVolume');
+  const audioVolumeVal = document.getElementById('audioVolumeVal');
+  if (audioVolumeInput) {
+    audioVolumeInput.addEventListener('input', e => {
+      if (!AppState.selected || AppState.selected.type !== 'audioClip') return;
+      const v = Math.max(0, Math.min(1, +e.target.value));
+      AppState.selected.volume = v;
+      if (audioVolumeVal) audioVolumeVal.textContent = Math.round(v * 100) + '%';
+      const src = audioClipSources.get(AppState.selected.id);
+      if (src && src.video) { try { src.video.volume = v; } catch (_) {} }
+      markCurrentFrameModified();
+    });
+    audioVolumeInput.addEventListener('change', () => EventBus.emit('history:save', '调整音量'));
+  }
+
   btnUp.onclick = () => moveLayer('up');
   btnDown.onclick = () => moveLayer('down');
   btnTop.onclick = () => moveLayer('top');
@@ -15989,6 +16314,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     AppState.activeTrackId = TRACK_ALL_ID;
     AppState.objects = [];
     AppState.selected = null; AppState.canvasSelected = false;
+    /* v7.8.1：清空所有帧后，各类型元件默认名也从 1 重新开始 */
+    Object.keys(nameSeqByType).forEach(k => delete nameSeqByType[k]);
     drag = null;
     isPanning = false;
     trackThumbCache.clear();
@@ -16326,37 +16653,83 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     /* ---- 拆原「高级设置」弹窗：开关归高级、导出归导出、项目/动作归项目 ---- */
     let projectArchiveRow = null;   /* 旧弹窗 rows[3]：工程存档 */
     let projectActionsRow = null;   /* 旧弹窗 rows[4]：动作库 */
+    /* v7.8.1：导出相关控件先收集引用，稍后在「导出」分区按功能分组统一摆放 */
+    const expToggleEls = [];
+    const expSeqBtns = [];
+    const expVideoBtns = [];
+    let expBgLabel = null;
     const adv = document.getElementById('timelineAdvancedPanel');
     if (adv) {
       const rows = Array.prototype.slice.call(adv.querySelectorAll(':scope > .adv-row'));
       projectArchiveRow = rows[3] || null;
       projectActionsRow = rows[4] || null;
       move(rows[0], uiSheetEls.advanced);                       /* 其他画面可见性 */
-      move(rows[1], uiSheetEls.advanced);                       /* 各种开关 + 清空帧 + 置顶 */
+      /* v7.8.1：把原来挤在一行的十几个开关按功能拆成多组，每组带小标题，布局更清晰 */
+      const advRow1 = rows[1];
+      /* 小标题工厂（带 i18n，切语言同步） */
+      const advSub = (i18nKey, fallback) => {
+        const d = document.createElement('div');
+        d.className = 'section-title adv-group-title';
+        d.dataset.i18n = i18nKey;
+        d.textContent = (window.t ? window.t(i18nKey) : fallback);
+        return d;
+      };
+      /* 建一个分组：小标题 + 一行。selectors 里每个字符串是一个 CSS 选择器，
+         找到元素后：若它在 .adv-fps-group 内则整组搬，否则搬它自己（要求直接挂在原行下）。 */
+      const makeAdvGroup = (titleKey, fallback, selectors) => {
+        const title = advSub(titleKey, fallback);
+        const row = document.createElement('div');
+        row.className = 'adv-row adv-group-row';
+        selectors.forEach(sel => {
+          const target = advRow1 && advRow1.querySelector(sel);
+          if (!target) return;
+          const fpsGroup = target.closest('.adv-fps-group');
+          const el = fpsGroup || target;
+          if (el.parentElement === advRow1) row.appendChild(el);
+        });
+        if (!row.children.length) return;
+        uiSheetEls.advanced.appendChild(title);
+        uiSheetEls.advanced.appendChild(row);
+      };
+      /* 导出参数三个开关只影响导出结果，收集后统一放进「导出」分区 */
+      ['gifTransparent', 'gifHD3x', 'hd1080p'].forEach(cbId => {
+        const b = advRow1 && advRow1.querySelector('.adv-toggle[data-toggle="' + cbId + '"]');
+        if (b) expToggleEls.push(b);
+      });
+
+      /* 高级分区的四组：播放 / 洋葱皮 / 界面显示 / 帧操作 */
+      makeAdvGroup('adv.grpPlayback', '播放', ['#fpsSlider']);
+      makeAdvGroup('adv.grpOnion', '洋葱皮', [
+        '.adv-toggle[data-toggle="onionCheck"]', '#onionBefore', '#onionAfter'
+      ]);
+      makeAdvGroup('adv.grpDisplay', '界面显示', [
+        '.adv-toggle[data-toggle="frameThumbMode"]',
+        '.adv-toggle[data-toggle="cameraPreviewCheck"]',
+        '.adv-toggle[data-toggle="autoCollapseTimeline"]',
+        '#btnTimelineDock'
+      ]);
+      makeAdvGroup('adv.grpFrames', '帧操作', ['#btnClearAllFrames', '#btnClearOtherFrames']);
+      /* 剩下的零散控件若还有，原样成一组兜底，避免丢失 */
+      if (advRow1 && advRow1.children.length) {
+        const rest = document.createElement('div');
+        rest.className = 'adv-row adv-group-row';
+        while (advRow1.firstElementChild) rest.appendChild(advRow1.firstElementChild);
+        if (rest.children.length) {
+          uiSheetEls.advanced.appendChild(advSub('adv.grpOther', '其他'));
+          uiSheetEls.advanced.appendChild(rest);
+        }
+      }
       /* v7.1.0：全局属性修改 + 它的说明面板搬到控制面板顶部（全屏旁边），不再进「高级」分区 */
 
-      /* v7.0.6：把「透明底 / 3x高清 / 1080p」这三个**导出参数**从这排通用开关里挑出来，
-         单独成行放进「导出」分区（它们只影响导出结果，留在高级里容易找不到） */
-      const expToggles = document.createElement('div');
-      expToggles.className = 'adv-row';
-      expToggles.style.marginTop = '4px';
-      ['gifTransparent', 'gifHD3x', 'hd1080p'].forEach(cbId => {
-        const b = rows[1] && rows[1].querySelector('.adv-toggle[data-toggle="' + cbId + '"]');
-        if (b) expToggles.appendChild(b);
-      });
-      if (expToggles.children.length) uiSheetEls.export.appendChild(expToggles);
-
       if (rows[2]) {                                            /* 视频行：导出按钮抽给「导出」 */
-        const exportRow = document.createElement('div');
-        exportRow.className = 'row';
-        exportRow.style.flexWrap = 'wrap';
-        /* v7.7.1：补上 btnExportSVGSeq —— 之前漏搬导致「导出SVG序列」按钮留在空壳高级弹窗里，
-           面板重排后永远看不见。现在与 GIF/PNG序列/MP4 一起进入「导出」分区。 */
-        ['btnExportGIF', 'btnExportPNGSeq', 'btnExportSVGSeq', 'btnExportMP4'].forEach(id => {
-          move(document.getElementById(id), exportRow);
+        /* v7.8.1：序列帧与视频导出拆成两组；SVG序列按钮也要带上（曾漏搬导致看不见） */
+        ['btnExportGIF', 'btnExportPNGSeq', 'btnExportSVGSeq'].forEach(id => {
+          const b = document.getElementById(id);
+          if (b) expSeqBtns.push(b);
         });
-        move(rows[2].querySelector('.adv-color-label'), exportRow);
-        uiSheetEls.export.appendChild(exportRow);
+        const mp4 = document.getElementById('btnExportMP4');
+        if (mp4) expVideoBtns.push(mp4);
+        expBgLabel = rows[2].querySelector('.adv-color-label'); /* label 内含 mp4BgColor */
         move(rows[2], uiSheetEls.advanced);                     /* 剩下的导入视频 / 显隐 / 播放 */
       }
 
@@ -16369,36 +16742,48 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       if (advHead) advHead.remove();
     }
 
-    /* ---- 导出：面板顶部的 PNG/JPG + 高清勾选（全屏**留在原位**） ---- */
-    const pngRow = rowOf(document.getElementById('btnExportPNG'));
-    const topExportRow = document.createElement('div');
-    topExportRow.className = 'row';
-    move(document.getElementById('btnExportPNG'), topExportRow);
-    move(document.getElementById('btnExportJPG'), topExportRow);
-    const hdRow = rowOf(document.getElementById('exportHD'));
-    /* 顺序：PNG/JPG → 高清勾选 → 视频导出（更常用的放前面） */
-    const exportHead = uiSheetEls.export.querySelector('.ui-sheet-head');
-    if (exportHead) {
-      exportHead.after(topExportRow);
-      if (hdRow) topExportRow.after(hdRow);
-    } else {
-      uiSheetEls.export.appendChild(topExportRow);
-      move(hdRow, uiSheetEls.export);
-    }
-    const fsBtn = document.getElementById('btnFullscreen');
-    if (fsBtn) fsBtn.style.flex = '0 0 auto';                 /* 只剩全屏时别再拉满整行 */
+    /* ---- 导出分区（v7.8.1 整理）：小标题 + 行，按功能分成四组 ----
+       静态图片 → 视频 → 序列帧/动图 → 导出选项。按钮尺寸统一，去掉零散堆叠。 */
+    const expSub = (key, fallback) => {
+      const d = document.createElement('div');
+      d.className = 'section-title adv-group-title';
+      d.dataset.i18n = key;
+      d.textContent = (window.t ? window.t(key) : fallback);
+      return d;
+    };
+    const expGroup = (key, fallback, els) => {
+      const list = els.filter(Boolean);
+      if (!list.length) return;
+      const row = document.createElement('div');
+      row.className = 'adv-row adv-group-row';
+      list.forEach(el => row.appendChild(el));
+      uiSheetEls.export.appendChild(expSub(key, fallback));
+      uiSheetEls.export.appendChild(row);
+    };
 
-    /* v7.1.0：「导出时画布优先」从「画布」分区搬到「导出」—— 它只影响导出结果，
-       和透明底/3x高清那排是同一类设置，放在导出里才找得到。 */
-    const expFirstBtn = document.getElementById('btnExportCanvasFirst');
-    if (expFirstBtn) {
-      const canvasFirstRow = document.createElement('div');
-      canvasFirstRow.className = 'row';
-      canvasFirstRow.style.marginTop = '8px';
-      canvasFirstRow.appendChild(expFirstBtn);
-      uiSheetEls.export.appendChild(canvasFirstRow);
-    }
-    if (pngRow) pngRow.style.justifyContent = 'flex-start';    /* 靠左 */
+    /* 1) 静态图片：PNG / JPG + 高清勾选（全屏与全局属性修改留在控制栏原位） */
+    const pngBtn = document.getElementById('btnExportPNG');
+    const jpgBtn = document.getElementById('btnExportJPG');
+    if (pngBtn) pngBtn.style.flex = '';
+    if (jpgBtn) jpgBtn.style.flex = '';
+    const hdWrap = rowOf(document.getElementById('exportHD'));
+    const hdLabel = hdWrap ? (hdWrap.querySelector('.checkbox-label') || hdWrap) : null;
+    expGroup('exp.grpImage', '静态图片', [pngBtn, jpgBtn, hdLabel]);
+    if (hdWrap && !hdWrap.children.length) hdWrap.remove();
+
+    /* 2) 视频：MP4 + 背景色 */
+    expGroup('exp.grpVideo', '视频', [...expVideoBtns, expBgLabel]);
+
+    /* 3) 序列帧 / 动图：GIF / PNG序列 / SVG序列 */
+    expGroup('exp.grpSeq', '序列帧与动图', expSeqBtns);
+
+    /* 4) 导出选项：透明底 / 3x高清 / 1080p / 导出时画布优先 */
+    expGroup('exp.grpOptions', '导出选项', [
+      ...expToggleEls, document.getElementById('btnExportCanvasFirst')
+    ]);
+
+    const fsBtn = document.getElementById('btnFullscreen');
+    if (fsBtn) fsBtn.style.flex = '0 0 auto';                 /* 全屏别再拉满整行 */
 
     /* ---- 项目分区内部顺序：本地预设 → 动作库 → 工程存档/项目库 ---- */
     /* 1) 本地预设 + 清空画布 */
@@ -16890,6 +17275,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     else if (o.type === 'image') queueImageObj(o, isSel, isExporting, opts);
     else if (o.type === 'acc') queueAcc(o, isSel, isExporting, opts);
     else if (o.type === 'videoClip') queueVideoClip(o, isSel, isExporting, opts);
+    /* v7.8.1：音频元件只在轨道里出声，不参与画布/导出画面绘制 */
+    else if (o.type === 'audioClip') { /* no visual */ }
     else if (o.type === 'shape') queueShape(o, isSel, isExporting, opts);
     else if (o.type === 'bubble') queueBubble(o, isSel, isExporting, opts);
     else if (o.type === 'video') queueVideo(o, isSel, isExporting, opts);

@@ -185,6 +185,22 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     background: var(--border-color); border-radius: 999px; /* 滑块使用全局边框色，胶囊形圆角 */
   } /* 滚动条自定义结束 */
 
+  /* v7.8.6：主控制面板滚动条收细、轨道透明，避免右侧滑块盖住通栏条内容 */
+  #uiScroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, .16) transparent;
+  }
+  #uiScroll::-webkit-scrollbar { width: 4px; height: 4px; background: transparent; }
+  #uiScroll::-webkit-scrollbar-track { background: transparent; }
+  #uiScroll::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, .16);
+    border: 1px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+  }
+  #uiScroll:hover::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, .26); background-clip: padding-box; }
+  #uiScroll::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .38); background-clip: padding-box; }
+
   #uiDragHandle { /* 控制面板顶部的拖动条手柄 */
     flex: 0 0 auto; /* 不参与压缩 */
     width: auto; height: 20px; display: flex; justify-content: center; align-items: center; /* 高度 20px，内容水平垂直居中 */
@@ -695,6 +711,9 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
 
   .adv-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; } /* 高级设置行：弹性布局，自动换行，间距 6px，底部外边距 8px */
   .adv-row:last-child { margin-bottom: 0; } /* 最后一行无底部外边距 */
+  /* v7.8.1：高级分区按功能分组——小标题 + 一行，行距收紧、按钮尺寸统一，布局更清晰 */
+  .adv-group-title { margin: 10px 0 5px; } /* 分组小标题：与上组拉开、与下方行收紧 */
+  .adv-group-row { margin-bottom: 0; gap: 6px; } /* 分组行：行内间距统一 */
   .adv-row > button { /* 高级设置行内的按钮 */
     padding: 5px 10px; min-height: 28px; font-size: 11.5px; /* 内边距，高度，字号 */
     border-radius: 8px; border: 1px solid transparent; /* 圆角，透明边框 */
@@ -825,6 +844,14 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     font-size: 12px; outline: none; /* 字号，移除焦点轮廓 */
   } /* 预设名称输入框基础样式结束 */
   .ease-preset-row input[type=text]:focus { box-shadow: var(--focus-ring); } /* 聚焦光圈 */
+  /* v7.8.1：项目库行的名字输入框 —— 与导出/存库按钮同一行，风格与预设名输入一致 */
+  #projectNameInput {
+    flex: 1 1 120px; min-width: 90px; padding: 7px 9px;
+    border: 1px solid transparent; border-radius: 9px;
+    background: var(--bg-input); color: var(--text-main);
+    font-size: 12px; outline: none;
+  }
+  #projectNameInput:focus { box-shadow: var(--focus-ring); }
   .ease-preset-list { /* 缓动预设列表 */
     max-height: 120px; overflow-y: auto; margin-top: 8px; /* 最大高度，纵向滚动，外边距 */
     padding-top: 6px; border-top: 1px solid var(--border-color); /* 顶部内边距，顶部分割线 */
@@ -986,10 +1013,14 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
 
   input[type=color] { /* 全局颜色选择器 */
     width: 36px; height: 26px; /* 宽高 */
-    border: 1px solid var(--border-color); /* 边框 */
+    border: none; /* v7.8.1：去掉颜色块外侧多余的框 */
     border-radius: 8px; padding: 0; /* 圆角，无内边距 */
-    background: var(--bg-panel); cursor: pointer; /* 面板背景色，指针 */
+    background: transparent; cursor: pointer; /* 透明底，指针 */
   } /* 全局颜色选择器样式结束 */
+  /* v7.8.1：去掉 Chrome 原生色块自带的灰边/内衬，色块直接铺满圆角 */
+  input[type=color]::-webkit-color-swatch-wrapper { padding: 0; border: none; }
+  input[type=color]::-webkit-color-swatch { border: none; border-radius: 8px; }
+  input[type=color]::-moz-color-swatch { border: none; border-radius: 8px; }
   input[type=range] { flex: 1; min-width: 60px; accent-color: var(--color-primary); } /* 全局滑条：弹性填充，最小宽度，主色强调 */
   select { /* 全局下拉框 */
     font-size: 13px; padding: 5px 8px; /* 字号，内边距 */
@@ -1389,9 +1420,11 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     /* 面板底色是半透明的（rgba .62），不模糊的话滚上去的内容会透出字影 */
     -webkit-backdrop-filter: blur(18px) saturate(1.25);
     backdrop-filter: blur(18px) saturate(1.25);
-    z-index: 20; padding: 4px 0 2px; /* 层级 20，内边距 */
-    margin: 0 -12px; /* 负边距，使背景占满整个面板宽度 */
-    padding-left: 12px; padding-right: 12px; /* 左右内边距补偿 */
+    z-index: 20; /* 层级 20 */
+    /* v7.8.1：与「高级」等分区标题条同款圆角条，底部两角不再直角 */
+    border-radius: var(--radius-control);
+    padding: 4px 8px;
+    margin: 0 0 4px;
     border-bottom: none; /* 无底部边框 */
   } /* 吸顶头部样式结束 */
 
@@ -1401,8 +1434,10 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     top: calc(var(--sticky-header-h, 44px)); /* 紧贴在元件横向条下方（v7.1.0：条恢复了，不再上叠 11px） */
     z-index: 19; /* 层级略低于吸顶头部 */
     background: var(--bg-panel); /* 面板色背景 */
-    margin: 0 -12px; /* 负边距占满宽度 */
-    padding: 6px 12px; /* 内边距 */
+    /* v7.8.1：与元件条同款圆角条，底部两角改圆角 */
+    border-radius: var(--radius-control);
+    padding: 6px 8px;
+    margin: 0 0 4px;
     border-bottom: none; /* 无底部边框 */
   } /* 工具芯片包裹层样式结束 */
 
@@ -1416,7 +1451,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     padding: 5px 11px; min-height: 28px; /* 内边距，最小高度 */
     font-size: 11.5px; font-weight: 600; line-height: 1.5; /* 字号，加粗，行高 */
     border-radius: var(--radius-chip); border: 1px solid transparent; /* 胶囊圆角，透明边框 */
-    background: var(--btn-bg); color: var(--text-sub); /* 按钮背景色，次要文字色 */
+    background: transparent; color: var(--text-sub); /* v7.8.1：默认无底色，只有选中时才高亮 */
     flex-shrink: 0; /* 禁止弹性收缩 */
   } /* 工具芯片基础样式结束 */
   .tool-chip:hover { background: var(--btn-hover); } /* 悬浮背景色 */
@@ -1435,6 +1470,12 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
      .tool-panel 本身带 var(--bg-panel) + 毛玻璃，跟 #ui 同色 —— 两层一叠就比面板更暗，
      看起来像块突兀的深色底图。分区里直接把底和圆角内边距都去掉，融进面板。 */
   .ui-sheet .tool-panel {
+    background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none;
+    padding: 0; border-radius: 0; margin-top: 0;
+  }
+  /* v7.8.1：属性区 #uiMain 里的设置面板（层级 / 比例 / 关节 / 发光 / 蒙版）
+     和 .ui-sheet 一样透明融入面板——展开时不要那层独立的渐变底色块。 */
+  #uiMain .tool-panel {
     background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none;
     padding: 0; border-radius: 0; margin-top: 0;
   }
@@ -2039,16 +2080,6 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .ts-ruler { border-bottom: 1px solid var(--border-color); touch-action: none; cursor: ew-resize; }
   .ts-gutter-head { justify-content: flex-start; gap: 4px; font-size: 11px; color: var(--text-sub); }
   .ts-gutter-head > span { margin-right: auto; }
-  /* 刻度尺左边的放大 / 缩小 */
-  .ts-zoom {
-    width: 20px; height: 18px; padding: 0; margin-left: 3px;
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: 13px; line-height: 1; font-weight: 700;
-    border: 1px solid var(--border-color); border-radius: 5px;
-    background: var(--bg-panel); color: var(--text-sub); cursor: pointer;
-  }
-  .ts-zoom:hover { background: var(--btn-hover); color: var(--text-main); }
-  .ts-zoom:active { transform: scale(.94); }
   .ts-tick {
     position: absolute; top: 4px; padding-left: 3px;
     font-size: 10px; line-height: 1; color: var(--text-sub);
@@ -2190,3 +2221,40 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #sheetPlugins .plugin-kit-download:active { transform: scale(.98); }
   #sheetPlugins .plugin-kit-note { font-size: 10px; color: var(--text-sub); line-height: 1.6;
     margin-top: 8px; }
+
+  /* ==================== v7.8.1 音频元件：属性只留名称 + 音量 ==================== */
+  #uiMain.audio-mode > * { display: none !important; }
+  #uiMain.audio-mode > .section-title { display: block !important; }
+  #uiMain.audio-mode > #objNameRow { display: flex !important; }
+  #uiMain.audio-mode > #audioVolumeRow { display: flex !important; }
+  #uiMain.audio-mode #objColorRow { display: none !important; }
+  #uiMain.audio-mode #objNameInput { flex: 1 1 auto !important; width: auto !important; }
+
+  /* 音频轨波形柱体：铺满长条、深色声波压在标签下层 */
+  .ts-clip.has-wave { background-size: 100% 100% !important; background-repeat: no-repeat !important;
+    color: #fff; opacity: .9; }
+  .ts-clip.has-wave .ts-lab { position: relative; z-index: 1; }
+
+  /* v7.8.6：属性区三条横条（分区标题 / 元件条 / 更多设置条）改成通栏直条。
+     用负 margin 吃掉 #uiScroll 的左右 12px 内边距，让它们横跨整个面板；
+     高度收细到 32px，内部按钮同步压到 24px，仍保持垂直居中、不截断。 */
+  .ui-sheet-head,
+  #objStrip,
+  .settings-chips-wrapper {
+    height: 32px;
+    min-height: 32px;
+    box-sizing: border-box;
+    margin-left: -12px;
+    margin-right: -12px;
+    padding: 0 12px;
+    border-radius: 0;
+  }
+  #objStrip .layer-list { padding-bottom: 0; }
+  #objStrip .layer-btn,
+  #objStrip .strip-lock-btn { min-height: 24px; padding: 3px 8px; }
+  .settings-chips-wrapper .tool-chips {
+    height: 100%;
+    padding-bottom: 0;
+    align-items: center;
+  }
+  .settings-chips-wrapper .tool-chip { min-height: 24px; padding: 3px 9px; }

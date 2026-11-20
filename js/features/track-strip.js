@@ -69,6 +69,57 @@
   function totalFrames() { return Math.max(1, api ? api.totalFrames() : 1); }
   function fps() { const f = api && api.fps ? api.fps() : 12; return (f > 0 ? f : 12); }
 
+  /* v7.8.4：音频波形占位。第一版不做真实采样解码（视频音轨浏览器无法直接 decode），
+     用元件 id + 段序号派生的「平滑包络 + 细竖线」画一条近似截图的声波带，随长条宽度铺满。
+     包络由几个不同频率的正弦叠加，呈连绵起伏（而非逐柱乱跳）；再叠一层低通平滑噪声做细节。
+     同一个 id/段每次画出的形状一致，不会因重绘跳动。 */
+  const waveCache = new Map();
+  function audioWaveURL(id, si, width) {
+    const w = Math.max(16, Math.round(width));
+    const key = id + '|' + si + '|' + w;
+    if (waveCache.has(key)) return waveCache.get(key);
+    const h = 22;
+    let seed = 0;
+    const s = String(id) + ':' + si;
+    for (let i = 0; i < s.length; i++) seed = (seed * 31 + s.charCodeAt(i)) >>> 0;
+    /* 由 id 派生三个相位，让不同音频的包络各异但各自稳定 */
+    const p1 = ((seed & 1023) / 1023) * Math.PI * 2;
+    const p2 = (((seed >>> 10) & 1023) / 1023) * Math.PI * 2;
+    const p3 = (((seed >>> 20) & 1023) / 1023) * Math.PI * 2;
+    let rng = (seed >>> 5) >>> 0;
+    const nextRand = () => {
+      rng = (rng * 1664525 + 1013904223) >>> 0;
+      return rng / 4294967296;
+    };
+    const bars = [];
+    const step = 2;
+    let noise = 0.5;
+    for (let x = 0; x < w; x += step) {
+      const u = w > 1 ? x / (w - 1) : 0;
+      /* 平滑包络：多频正弦叠加，形成连续的波峰波谷 */
+      let env = 0.52
+        + 0.28 * Math.sin(u * Math.PI * 2.4 + p1)
+        + 0.16 * Math.sin(u * Math.PI * 6.3 + p2)
+        + 0.09 * Math.sin(u * Math.PI * 12.7 + p3);
+      env = Math.max(0.08, Math.min(1, env));
+      /* 低通噪声：细节起伏但相邻柱不跳变 */
+      noise = noise * 0.68 + nextRand() * 0.32;
+      const a = env * (0.82 + noise * 0.18);
+      const bh = Math.max(1, Math.round(a * h));
+      bars.push('<rect x="' + x + '" y="' + ((h - bh) / 2).toFixed(1) + '" width="1" height="' + bh + '"/>');
+    }
+    /* v7.8.5：写成明确深色，不依赖 currentColor —— 背景图是独立文档，
+       拿不到宿主元素的 CSS color，之前可能因此画成和长条同色而看不见。 */
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h +
+      '" fill="#5b2b38" fill-opacity=".72" shape-rendering="crispEdges">' + bars.join('') + '</svg>';
+    let url;
+    try { url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg); }
+    catch (_) { url = ''; }
+    if (waveCache.size > 400) waveCache.clear();
+    waveCache.set(key, url);
+    return url;
+  }
+
   /* 左列（眼睛 + 元件名）实际多宽 —— 单一真值来源是样式里的 --ts-gutter。
      手机断点下它是 84px，JS 再写死 108 的话播放头会整体右偏一格多（v7.4.9 修的）。 */
   function readGutter() {
@@ -257,6 +308,12 @@
     /* v7.4.7：全空白帧的轨道不画行 —— 元件已经彻底删掉了，这一行不该留在面板里。
        （数据层由 pruneEmptyTracks 清，这里再兜一层，避免别的入口漏扫。） */
     const ids = Object.keys(map).filter(id => map[id] && map[id].frames && map[id].frames.some(d => d != null));
+    /* v7.8.1：音频轨永远置底（元件列表里根本不出现），其余保持原顺序 */
+    const isAudioTrack = (id) => {
+      const frames = map[id] && map[id].frames;
+      return !!(frames && frames.some(d => d && d.type === 'audioClip'));
+    };
+    ids.sort((a, b) => (isAudioTrack(a) ? 1 : 0) - (isAudioTrack(b) ? 1 : 0));
     const total = Math.max(totalFrames(), 1);
     const width = total * colW;
     const rowsH = Math.max(ids.length, 1) * ROW_H;
@@ -275,12 +332,10 @@
     const thumbOn = !!(api.thumbMode && api.thumbMode());
     let html = '';
 
-    /* 刻度尺（左列顺带放放大/缩小） */
+    /* 刻度尺（v7.8.1：去掉 ＋/－ 按钮，改由轨道区滚轮 / 双指捏合缩放） */
     html += '<div class="ts-row ts-ruler-row">';
     html += '<div class="ts-gutter ts-gutter-head">' +
       '<span>' + T('track.gutterHead', '元件') + '</span>' +
-      '<button class="ts-zoom" type="button" data-zoom="-1" title="' + esc(T('track.zoomOut', '缩小（缩到很小改显示分:秒）')) + '">−</button>' +
-      '<button class="ts-zoom" type="button" data-zoom="1" title="' + esc(T('track.zoomIn', '放大')) + '">＋</button>' +
       '</div>';
     html += '<div class="ts-lane ts-ruler" style="width:' + width + 'px">';
     for (let i = 0; i < total; i += rs.step) {
@@ -312,8 +367,19 @@
         const label = (s.a + 1) + (s.b > s.a ? '–' + (s.b + 1) : '');
         const sel = isClipSelected(id, s.a, s.b);
         /* 缩略图：只取这一段的头一帧，横向平铺成胶片条 —— 每段只渲染一次，不拖慢大工程 */
+        const trackData = map[id].frames[s.a];
+        const isAudio = !!(trackData && trackData.type === 'audioClip');
         let cls = '', style = 'left:' + left + 'px;width:' + w + 'px';
-        if (thumbOn && api.renderThumb) {
+        if (isAudio) {
+          /* v7.8.1：音频轨显示波形柱体（占位），不取画面缩略图 */
+          const wave = audioWaveURL(id, si, Math.round(w));
+          /* v7.8.5：style 属性本身用双引号包着，这里内部必须改单引号；
+             否则数据 URL 里的双引号会提前闭合 style 属性，浏览器只解析到 url( ，长条就是空白。 */
+          if (wave) {
+            cls = ' has-wave';
+            style += ";background-image:url('" + String(wave).replace(/'/g, '%27') + "')";
+          }
+        } else if (thumbOn && api.renderThumb) {
           let url = null;
           try { url = api.renderThumb(id, s.a); } catch (_) { url = null; }
           if (url) { cls = ' has-thumb'; style += ';background-image:url(' + url + ')'; }
@@ -969,15 +1035,49 @@
     render();
   }
 
-  /* ---------------- 缩放 ---------------- */
-  function zoom(dir) {
-    const i = COLW_STEPS.indexOf(colW);
-    let k = i < 0 ? COLW_STEPS.indexOf(26) : i;
+  /* ---------------- 缩放（v7.8.1：滚轮 / 双指，＋－ 按钮已移除） ---------------- */
+  let zoomRaf = 0;
+  let zoomPending = null;
+
+  /* 以锚点帧把列宽设成 next；连续手势用 rAF 合并重绘。
+     v7.8.3：放大时锚点固定在可视区左端（gutter 右侧第一帧），左端显示不动；
+     缩小时仍以指针 / 双指中点所在帧为锚点（缩小行为保持不变）。 */
+  function zoomTo(next, clientX) {
+    zoomPending = { next: next, clientX: clientX };
+    if (zoomRaf) return;
+    zoomRaf = requestAnimationFrame(() => {
+      zoomRaf = 0;
+      const z = zoomPending;
+      zoomPending = null;
+      if (!z || !enabled) return;
+      const min = COLW_STEPS[0], max = COLW_STEPS[COLW_STEPS.length - 1];
+      const v = Math.max(min, Math.min(max, Math.round(z.next)));
+      if (v === colW) return;
+      const sc = $('tsScroll');
+      const rect = sc ? sc.getBoundingClientRect() : null;
+      const anchorLeft = v > colW; /* 放大 → 锚左端；缩小 → 锚指针 */
+      const px = (anchorLeft && rect) ? (rect.left + gutterPx) : z.clientX;
+      let anchor = null;
+      if (sc && rect && typeof px === 'number') {
+        anchor = (sc.scrollLeft + px - rect.left - gutterPx) / colW;
+      }
+      colW = v;
+      try { localStorage.setItem(COLW_KEY, String(colW)); } catch (_) {}
+      render();
+      if (sc && rect && anchor != null && isFinite(anchor)) {
+        sc.scrollLeft = Math.max(0, anchor * colW - (px - rect.left - gutterPx));
+      }
+    });
+  }
+
+  /* 档位缩放（滚轮用）。连续捏合后 colW 可能落在档位之间，取最近档位再走一步。 */
+  function zoom(dir, clientX) {
+    let k = 0;
+    for (let i = 1; i < COLW_STEPS.length; i++) {
+      if (Math.abs(COLW_STEPS[i] - colW) < Math.abs(COLW_STEPS[k] - colW)) k = i;
+    }
     k = Math.max(0, Math.min(COLW_STEPS.length - 1, k + (dir > 0 ? 1 : -1)));
-    if (COLW_STEPS[k] === colW) return;
-    colW = COLW_STEPS[k];
-    try { localStorage.setItem(COLW_KEY, String(colW)); } catch (_) {}
-    render();
+    zoomTo(COLW_STEPS[k], clientX);
   }
 
   /* ---------------- 框选（空白处按住拖） ---------------- */
@@ -1049,6 +1149,11 @@
   let press = null;   /* 待判定的长按：{ sx, sy, timer, tap } */
   let pan = null;     /* 长按没等到就划走了 → 平移轨道 */
 
+  /* v7.8.1：轨道区双指捏合缩放（仅轨道模式），与单指拖拽互斥 */
+  const pinchPointers = new Map();
+  let pinching = false;
+  let pinch0 = null;
+
   function clearPress() {
     if (!press) return;
     clearTimeout(press.timer);
@@ -1067,6 +1172,12 @@
     const r = laneRef().getBoundingClientRect();
     const i = Math.floor((clientX - r.left) / colW);
     return Math.max(0, Math.min(totalFrames() - 1, i));
+  }
+
+  /* v7.8.2：是否落在顶部刻度尺行（用户截图里的蓝色时间刻度范围）。
+     滚轮 / 双指缩放只在这一行生效；下方长条区域的滚轮交还原生上下滚动。 */
+  function inRuler(target) {
+    return !!(target && target.closest && target.closest('.ts-ruler-row'));
   }
 
   function bindDrag() {
@@ -1111,8 +1222,26 @@
     cv.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-      /* 放大 / 缩小、眼睛都是「按一下」的动作，交给 click 处理（键盘也能用），这里只让路 */
-      if (e.target.closest('[data-zoom]') || e.target.closest('[data-eye]')) return;
+      /* v7.8.1：双指落下即进入缩放 —— 仅限刻度尺行（蓝色范围）；长条区域留给上下滚动 */
+      if (e.pointerType !== 'mouse' && inRuler(e.target)) {
+        pinchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pinchPointers.size >= 2) {
+          clearPress();
+          drag = null; pan = null;
+          pinching = true;
+          const pts = Array.from(pinchPointers.values());
+          pinch0 = {
+            d: Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
+            cw: colW
+          };
+          try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+          e.preventDefault();
+          return;
+        }
+      }
+
+      /* 眼睛是「按一下」的动作，交给 click 处理；捏合中不启动任何拖拽 */
+      if (e.target.closest('[data-eye]') || pinching) return;
 
       /* v7.4.9：刻度尺（时间显示那一栏）按住拖 = 刷时间线，按一下 = 跳到那一帧。
          放在最前面：这一栏只有 22px 高，拖它的人想的是拖时间线，不该起框选。 */
@@ -1273,10 +1402,8 @@
       return;
     });
 
-    /* 按一下的动作：缩放、眼睛 */
+    /* 按一下的动作：眼睛（缩放已改为滚轮 / 双指，不再有按钮） */
     cv.addEventListener('click', (e) => {
-      const zm = e.target.closest('[data-zoom]');
-      if (zm) { zoom(+zm.dataset.zoom); return; }
       const eye = e.target.closest('[data-eye]');
       if (eye) {
         lastPickedId = eye.dataset.eye;
@@ -1294,6 +1421,17 @@
     });
 
     cv.addEventListener('pointermove', (e) => {
+      /* v7.8.1：两指捏合 —— 按初始间距比例缩放列宽，以双指中点为锚点 */
+      if (pinchPointers.has(e.pointerId)) {
+        pinchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+      if (pinching && pinch0 && pinchPointers.size >= 2) {
+        const pts = Array.from(pinchPointers.values());
+        const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        zoomTo(pinch0.cw * d / pinch0.d, (pts[0].x + pts[1].x) / 2);
+        e.preventDefault();
+        return;
+      }
       /* 长按还没到就划走了：不是拖长条，是想滚轨道 —— 改成平移 */
       if (press && !drag) {
         const dx = e.clientX - press.sx, dy = e.clientY - press.sy;
@@ -1517,8 +1655,38 @@
       }
       render();
     };
+    /* v7.8.1：抬手释放捏合指针，双指结束后不残留单指拖拽状态 */
+    const releasePinch = (e) => {
+      pinchPointers.delete(e.pointerId);
+      if (pinchPointers.size < 2) { pinching = false; pinch0 = null; }
+    };
+    cv.addEventListener('pointerup', releasePinch);
+    cv.addEventListener('pointercancel', releasePinch);
     cv.addEventListener('pointerup', finish);
     cv.addEventListener('pointercancel', finish);
+
+    /* v7.8.2：PC 滚轮缩放只在顶部刻度尺行（蓝色范围）生效；
+       下方长条区域不拦截，滚轮保持原生上下移动；Shift+滚轮仍留给横向滚动。 */
+    const sc = $('tsScroll');
+    if (sc) {
+      sc.addEventListener('wheel', (e) => {
+        if (!enabled) return;
+        if (e.shiftKey) return;
+        if (!inRuler(e.target)) return; /* 长条区域：交给原生上下滚动 */
+        e.preventDefault();
+        zoom(e.deltaY < 0 ? 1 : -1, e.clientX);
+      }, { passive: false });
+    }
+
+    /* 阻止浏览器把轨道区的双指识别成页面缩放（pointer 事件拦不住原生 pinch） */
+    const strip = $('trackStrip');
+    if (strip) {
+      const blockNativePinch = (e) => {
+        if (e.touches && e.touches.length >= 2) e.preventDefault();
+      };
+      strip.addEventListener('touchstart', blockNativePinch, { passive: false });
+      strip.addEventListener('touchmove', blockNativePinch, { passive: false });
+    }
   }
 
   /* 键盘：Ctrl/⌘+C 复制、Ctrl/⌘+V 粘贴、Delete 删除选中的关键帧、Esc 取消选择。
