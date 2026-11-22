@@ -3,7 +3,7 @@
 <head> <!-- 网页头部，包含元数据和外部引用 -->
 <meta charset="UTF-8"> <!-- 设置字符编码为 UTF-8，防止中文乱码 -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover"> <!-- 移动端视口设置：宽度同设备，允许缩放，适配刘海屏 -->
-<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.0</title> <!-- 网页标题，带有多语言属性；运行时由 i18n 注入 version.js 的版本号 -->
+<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.1</title> <!-- 网页标题，带有多语言属性；运行时由 i18n 注入 version.js 的版本号 -->
 <link rel="stylesheet" href="./style.css"> <!-- 引入外部样式表 -->
 </head> <!-- 头部结束 -->
 <body> <!-- 网页主体开始 -->
@@ -98,7 +98,7 @@
   <div id="uiMain"> <!-- v7.3.0：「属性」分区（data-sheet="props"），标题头由 JS 动态插入，见 mountUiSheets -->
 
   <div id="watermark"> <!-- 控制面板顶部的作者/版本水印 -->
-    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.0</div> <!-- 软件名称及版本 -->
+    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.1</div> <!-- 软件名称及版本 -->
     <div class="author" data-i18n="watermark.author">作者 binvwvnid · QQ 交流群 1121039855</div> <!-- 作者信息及群号 -->
   </div> <!-- 水印结束 -->
 
@@ -1033,6 +1033,7 @@
     <input type="checkbox" id="onionCheck" checked style="display:none"> <!-- 洋葱皮开关状态 -->
     <input type="checkbox" id="autoCollapseTimeline" style="display:none"> <!-- 自动收起时间轴状态 -->
     <input type="checkbox" id="frameThumbMode" checked style="display:none"> <!-- 缩略图显示状态 -->
+    <input type="checkbox" id="kfCurveCheck" style="display:none"> <!-- 段曲线显示状态（v7.9.0：默认关闭） -->
     <input type="checkbox" id="gifTransparent" checked style="display:none"> <!-- GIF 透明底状态 -->
     <input type="checkbox" id="gifHD3x" checked style="display:none"> <!-- GIF 高清状态 -->
     <input type="checkbox" id="hd1080p" style="display:none"> <!-- 1080p 高清状态 -->
@@ -1054,6 +1055,7 @@
       <span class="adv-fps-group"><span data-i18n="adv.prev">前</span><input type="range" id="onionBefore" min="0" max="10" value="1" class="small"><span id="onionBeforeVal">1</span></span> <!-- 洋葱皮前向帧数 -->
       <span class="adv-fps-group"><span data-i18n="adv.next">后</span><input type="range" id="onionAfter" min="0" max="10" value="1" class="small"><span id="onionAfterVal">1</span></span> <!-- 洋葱皮后向帧数 -->
       <button class="adv-toggle" data-toggle="frameThumbMode" data-i18n="adv.thumb">缩略图</button> <!-- 时间轴显示缩略图开关 -->
+      <button class="adv-toggle" data-toggle="kfCurveCheck" data-i18n="adv.curve" data-i18n-title="adv.curveTitle" title="显示/隐藏帧动画面板底部的段曲线">段曲线</button> <!-- v7.9.0：帧动画面板底部曲线显示开关，默认关闭 -->
       <button class="adv-toggle" data-toggle="cameraPreviewCheck"><i data-icon="videocamera"></i><span data-i18n="adv.preview">预览</span></button> <!-- 摄像机浮动预览窗口开关 -->
       <button class="adv-toggle" data-toggle="gifTransparent" data-i18n="adv.transparent">透明底</button> <!-- 导出透明背景开关 -->
       <button class="adv-toggle" data-toggle="gifHD3x" data-i18n="adv.hd3x">3x高清</button> <!-- 导出 3x 高清开关 -->

@@ -2,7 +2,7 @@
 
 火柴人关键帧动画编辑器 —— For the Alan Becker stick figure fandom.
 
-**作者**：binvwvnid　│　**QQ 交流群**：1121039855　│　**版本**：v7.9.0
+**作者**：binvwvnid　│　**QQ 交流群**：1121039855　│　**版本**：v7.9.1
 
 - 网页版：https://binvwvnid.github.io/SKFE-StickmanKeyframeEditor/
 - 安装包（Windows / 安卓）：https://github.com/binvwvnid/SKFE-StickmanKeyframeEditor/releases

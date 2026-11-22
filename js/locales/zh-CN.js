@@ -363,6 +363,8 @@ window.SKFE_LOCALES['zh-CN'] = {
   "adv.prev": "前",
   "adv.next": "后",
   "adv.thumb": "缩略图",
+  "adv.curve": "段曲线",
+  "adv.curveTitle": "开启后，在帧动画面板底部显示补间曲线；默认关闭",
   "adv.preview": "预览",
   "adv.transparent": "透明底",
   "adv.hd3x": "3x高清",

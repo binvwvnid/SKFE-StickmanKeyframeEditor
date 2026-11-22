@@ -362,6 +362,8 @@ window.SKFE_LOCALES['en'] = {
   "adv.prev": "Prev",
   "adv.next": "Next",
   "adv.thumb": "Thumbnails",
+  "adv.curve": "Curve",
+  "adv.curveTitle": "Show the tween curve at the bottom of the frame panel; off by default",
   "adv.preview": "Preview",
   "adv.transparent": "Transparent background",
   "adv.hd3x": "3× HD",

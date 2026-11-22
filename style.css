@@ -2120,8 +2120,15 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #timeline.track-mode .timeline-controls > #trackSelector,
   #timeline.track-mode .timeline-controls > .sep { display: none !important; }
 
-  /* 控制面板与底部栏压在轨道面板之上（轨道面板在它下方） */
-  body.track-mode-on #ui { z-index: 26; }
+  /* 控制面板与底部栏压在轨道面板之上（轨道面板在它下方）。
+     v7.9.0：帧动画面板置底时也套用同一套 z 轴规则。 */
+  body.track-mode-on #ui,
+  body.timeline-bottom-on #ui { z-index: 26; }
+
+  /* v7.9.0：帧动画面板置底时，控制面板底部入口栏（z 轴更高）会压住面板最下面一截。
+     JS 量出实际重叠高度写进 --tl-bottom-bar-gap，在这里给面板垫一段等高空白，
+     帧缩略图 / 进度条整体上移，底栏正好落在空白处，不再遮挡内容。轨道模式不吃这条。 */
+  #timeline.timeline-bottom:not(.track-mode) { padding-bottom: calc(4px + var(--tl-bottom-bar-gap, 0px)); }
 
   .ts-scroll {
     position: relative; height: 100%; overflow: auto;
@@ -2342,9 +2349,16 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     min-height: 32px;
     box-sizing: border-box;
     margin-left: -12px;
-    margin-right: -12px;
-    padding: 0 12px;
+    /* 右端多伸出一个滚动条宽度，垫在滑条下方；内容仍留 12px 安全边距 */
+    margin-right: calc(-12px - var(--ui-scrollbar-w, 0px));
+    padding: 0 calc(12px + var(--ui-scrollbar-w, 0px)) 0 12px;
     border-radius: 0;
+    /* 上下边各羽化 2px。主题里 --bg-panel 可能是渐变而非纯色，
+       所以用 mask 羽化整条，而不是往渐变里塞颜色停止点。 */
+    -webkit-mask-image: linear-gradient(to bottom,
+      transparent 0, #000 2px, #000 calc(100% - 2px), transparent 100%);
+    mask-image: linear-gradient(to bottom,
+      transparent 0, #000 2px, #000 calc(100% - 2px), transparent 100%);
   }
   #objStrip .layer-list { padding-bottom: 0; }
   #objStrip .layer-btn,

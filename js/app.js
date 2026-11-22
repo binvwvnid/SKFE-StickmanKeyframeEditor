@@ -144,6 +144,12 @@
   let multiSelectMode = false;
   let multiSelectedFrames = new Set();
   let frameThumbMode = true;
+  /* v7.9.0：帧动画面板底部的段曲线默认关闭。以前总是画着，很多用户嫌它占地方、
+     又看不懂那条线是什么意思。改成高级设置里一个开关，默认隐藏，想看再开。
+     用户选择存 localStorage，刷新后保留；默认（没存过）为关。 */
+  const KF_CURVE_KEY = 'skfe_kf_curve_v1';
+  let kfCurveEnabled = false;
+  try { kfCurveEnabled = localStorage.getItem(KF_CURVE_KEY) === '1'; } catch (_) {}
   let thumbVersion = 0;
   /* 子轨道缩略图缓存：key = trackId + '|' + frameIndex */
   const trackThumbCache = new Map();
@@ -2759,9 +2765,9 @@ function importActionPresets() {
     const dx = e.clientX - uiStartX;
     const dy = e.clientY - uiStartY;
     if (isMobile) {
-      const timelineVisible = getComputedStyle(timelineEl).display !== 'none';
-      // 判断时间轴是否在底部，如果在顶部则不留底部空隙
-      const bottomOffset = (timelineDock === 'bottom' && timelineVisible) ? (TIMELINE_H || 100) : 0;
+      /* v7.9.0：帧动画面板置底时也和轨道面板一样盖在底部栏下方，
+         不再把控制面板顶开，所以这里不再预留时间轴高度。 */
+      const bottomOffset = 0;
       if (uiResizable && uiCustomSize) {
         /* v7.2.1：开了自由缩放 —— 宽高是用户定的，拖动**只改位置**。
            顶边可以在整块可视区里自由移动（不再被 bottom:0 拴在底部），
@@ -3032,6 +3038,15 @@ function importActionPresets() {
     setTimeout(() => { tip.remove(); }, 3500);
   }
 
+  /* v7.9.0：帧动画面板第一次打开才默认进轨道界面。
+     用户一旦主动切回帧动画模式，就记下来，之后开合面板 / 刷新页面都尊重这个选择。 */
+  const TRACK_USER_FRAME_KEY = 'skfe_track_user_frame_v1';
+  let trackDefaultAppliedThisPage = false;
+  function userPickedFrameMode() {
+    try { return localStorage.getItem(TRACK_USER_FRAME_KEY) === '1'; }
+    catch (_) { return false; }
+  }
+
   /* v7.9.0：帧动画面板打开时，指向「轨道」按钮的箭头提示，3 秒后自动消失。
      定位放在按钮上方，箭头朝下指住按钮，告诉用户可以点它切回帧动画模式。 */
   let trackModeTipTimer = null;
@@ -3061,13 +3076,22 @@ function importActionPresets() {
   function toggleTimeline(show) {
     const tl = document.getElementById('timeline');
     const btnShow = document.getElementById('btnShowTimeline');
+    let tipAfterOpen = false;
     if (show) {
       tl.style.display = 'flex';
       btnShow.style.display = 'none';
       TIMELINE_H = 100;
-      /* v7.9.0：打开帧动画面板默认进入轨道界面 */
+      /* v7.9.0：只在本次网页打开后的第一次展开、且用户从未主动切回帧动画模式时，
+         才默认进入轨道界面。之后用户选了帧动画，就一直保留帧动画。 */
       const TS = SKFE.features && SKFE.features.trackStrip;
-      if (TS && TS.setEnabled && !TS.isEnabled()) TS.setEnabled(true);
+      if (!trackDefaultAppliedThisPage && !userPickedFrameMode() &&
+          TS && TS.setEnabled && TS.isEnabled && !TS.isEnabled()) {
+        trackDefaultAppliedThisPage = true;
+        TS.setEnabled(true);
+        tipAfterOpen = true;
+      } else {
+        trackDefaultAppliedThisPage = true;
+      }
     } else {
       hideTrackModeTip();
       tl.style.display = 'none';
@@ -3087,8 +3111,10 @@ function importActionPresets() {
       SKFE.systems.camera.fitCameraViewToAvailableArea();
       EventBus.emit('need:render');
     }
-    /* v7.9.0：布局稳定后再定位箭头提示（setEnabled 会改 dock 和高度，早定位会偏） */
-    if (show) setTimeout(showTrackModeTip, 60);
+    /* v7.9.0：布局稳定后再定位箭头提示（setEnabled 会改 dock 和高度，早定位会偏）。
+       只有「首次默认进轨道」才提示；用户自己切模式时不打扰。 */
+    if (show && tipAfterOpen) setTimeout(showTrackModeTip, 60);
+    else if (show) hideTrackModeTip();
   }
   document.getElementById('btnShowTimeline').onclick = () => toggleTimeline(true);
   document.getElementById('btnHideTimeline').onclick = () => toggleTimeline(false);
@@ -9536,11 +9562,18 @@ function importActionPresets() {
         }
         const entry = { v: thumbVersion, url: u };
         if (task.isSub) {
-          if (trackThumbCache.has(task.key)) { revokeThumbURL(u); return; }
+          /* v7.9.0：只在「已经有本版本图」时才跳过。旧版本缓存（history 落栈后
+             thumbVersion++ 会把所有缓存变成旧版）必须允许被新图覆盖，否则派生帧
+             的缩略图会一直停在编辑前的姿势，要再点一下帧才更新。 */
+          const old = trackThumbCache.get(task.key);
+          if (old && old.v === thumbVersion) { revokeThumbURL(u); return; }
+          if (old) discardThumbEntry(old);
           trackThumbCache.set(task.key, entry);
         } else {
           const frNow = AppState.frames[task.idx];
-          if (!frNow || frNow !== task.fr || frNow._thumb) { revokeThumbURL(u); return; }
+          if (!frNow || frNow !== task.fr) { revokeThumbURL(u); return; }
+          if (frNow._thumb && frNow._thumb.v === thumbVersion) { revokeThumbURL(u); return; }
+          if (frNow._thumb) discardThumbEntry(frNow._thumb);
           frNow._thumb = entry;
         }
         /* 帧块可能被复用给别的帧了，只有仍指向同一 key 的 <img> 才更新 */
@@ -9584,7 +9617,20 @@ function importActionPresets() {
   function queueThumb(key, idx, fr, isSub, trackId, ignoreCamera, img) {
     if (!fr) return;
     for (const t of thumbQueue) {
-      if (t.key === key) { if (img) t.img = img; return; }  /* 去重：复用最新节点 */
+      if (t.key === key) {
+        /* v7.9.0：版本/token 已过期的旧任务不能复用 —— generateOneThumb 会因
+           task.v !== thumbVersion 直接丢弃它，那一帧就永远停在旧预览。
+           命中同 key 但已过期 → 换成本次的新任务；未过期才复用最新 img 节点。 */
+        if (t.v !== thumbVersion || thumbTokenOf(key) !== t.token) {
+          t.v = thumbVersion;
+          t.token = thumbTokenOf(key);
+          t.fr = fr;
+          if (img) t.img = img;
+          return;
+        }
+        if (img) t.img = img;
+        return;
+      }
     }
     thumbQueue.push({
       key, idx, fr, isSub, trackId: trackId, ignoreCamera: !!ignoreCamera, img,
@@ -9616,6 +9662,8 @@ function importActionPresets() {
     const cvs = document.getElementById('kfCurveStrip');
     const bar = document.getElementById('frameBar');
     if (!wrap || !cvs || !bar) return;
+    /* v7.9.0：开关关闭时整块收起，不画也不占位；状态在切换开关的 change 里同步过来。 */
+    if (!kfCurveEnabled) { wrap.classList.remove('visible'); return; }
 
     if (!kfCurveScrollBound) {
       kfCurveScrollBound = true;
@@ -9983,13 +10031,18 @@ function importActionPresets() {
     reconcileAllTracks();
     syncMainLengthFromTracks();
     trimTrailingEmptyFrames();
+    /* 先记历史：saveHistory 会 bump thumbVersion，必须早于缩略图重新入队，
+       否则刚排好的预览任务会被新版本判废，要再点一帧才出现。 */
+    EventBus.emit('history:save', reorder ? '调整帧顺序' : '覆盖帧姿态');
     invalidateAllFrameThumbs();
     AppState.objects = getCombinedObjectsForRender();
     AppState.selected = isSubTrackMode() ? getActiveTrackObject() : null;
     if (isSubTrackMode()) { AppState.canvasSelected = false; cancelTransformBoxDrag(); anchorModeOn = false; }
     seekVideoToFrame(AppState.currentFrameIndex);
     updateFrameBar();
-    EventBus.emit('history:save', reorder ? '调整帧顺序' : '覆盖帧姿态');
+    /* 关键帧挪位后曲线和派生帧必须当场跟上，不等下一次点击去触发重画。 */
+    renderKfCurveStrip();
+    syncKeyframeButtonState();
     EventBus.emit('need:render');
     EventBus.emit('need:syncUI');
     return true;
@@ -10330,6 +10383,9 @@ function importActionPresets() {
       reconcileAllTracks();
       syncMainLengthFromTracks();
       trimTrailingEmptyFrames();
+      /* 先记历史：saveHistory 会 bump thumbVersion，必须早于缩略图重新入队，
+         否则刚排好的预览任务会被新版本判废，要再手点一帧才出现。 */
+      EventBus.emit('history:save', '添加帧');
       invalidateAllFrameThumbs();
       AppState.objects = getCombinedObjectsForRender();
       AppState.selected = getActiveTrackObject();
@@ -10338,7 +10394,6 @@ function importActionPresets() {
       seekVideoToFrame(AppState.currentFrameIndex);
       updateFrameBar();
       EventBus.emit('need:render'); EventBus.emit('need:syncUI');
-      EventBus.emit('history:save', '添加帧');
       return;
     }
     const insertAt = AppState.currentFrameIndex + 1;
@@ -10367,6 +10422,8 @@ function importActionPresets() {
     reconcileAllTracks();
     syncMainLengthFromTracks();
     AppState.currentFrameIndex = insertAt;
+    /* 同上：历史先写，缩略图后入队，保证加帧预览当场生成。 */
+    EventBus.emit('history:save', '添加帧');
     invalidateAllFrameThumbs();
     AppState.objects = getCombinedObjectsForRender();
     AppState.selected = null; AppState.canvasSelected = false;
@@ -10374,7 +10431,6 @@ function importActionPresets() {
     seekVideoToFrame(AppState.currentFrameIndex);
     updateFrameBar();
     EventBus.emit('need:render'); EventBus.emit('need:syncUI');
-    EventBus.emit('history:save', '添加帧');
   }
 
   /* v7.0.1：删除关键帧 ≠ 清空。
@@ -12266,7 +12322,7 @@ function importActionPresets() {
       /* 收回：只回收主轨广播出来的锚点 */
       for (const r of mainRows) { KF.clearKey(r.t.frames[idx]); off++; cleared.push(r.id); }
       kept = rows.length - mainRows.length;
-    } else {
+    } else if (pending.length) {
       /* 补齐：只给参数变了的元件补 main。
          没变过的元件保持自己的插值（补一个锚点反而会把它的段打断），直接跳过。 */
       for (const r of rows) {
@@ -12277,11 +12333,32 @@ function importActionPresets() {
         KF.markKey(r.live, 'main');
         on++;
       }
-      if (!on) {
+    } else {
+      /* v7.9.0：全局也要能「先打关键帧定位置、再改动作」。
+         旧逻辑在这里只弹「这一帧没有元件的参数发生变化，不用补关键帧」，用户想先锁一帧
+         再摆姿势就被卡住（改动作自动落帧那条路是通的，反过来就不行）。
+         现在退化成和子轨 K 一样：只锁「当前选中的那个元件」（origin='sub'），
+         不给没动过的其它元件凭空插锚点、打断它们的插值段。再按一次 = 取消，保持 toggle。 */
+      const selId = AppState.selected && String(AppState.selected.id);
+      const target = selId ? rows.find(r => r.id === selId) : null;
+      if (target && target.t) {
+        const t = target.t;
+        while (t.frames.length <= idx) t.frames.push(null);
+        if (target.hasKey) {
+          KF.clearKey(t.frames[idx]);
+          off++; cleared.push(target.id);
+        } else if (target.live) {
+          t.frames[idx] = target.live;
+          KF.markKey(target.live, 'sub');
+          on++;
+        }
+        kept = rows.length - 1;
+      }
+      if (!on && !off) {
         if (kept === rows.length) {
           showHistoryToast('这一帧的关键帧是手动打的，主轨取消不会删它们；要取消请到该元件的子轨里点', 'redo', 2600);
         } else {
-          showHistoryToast('这一帧没有元件的参数发生变化，不用补关键帧（要锁住某个元件请到它的子轨里按 K）', 'redo', 2800);
+          showHistoryToast('这一帧没有元件需要锁定，先选中要改的元件再按关键帧', 'redo', 2800);
         }
         return;
       }
@@ -12512,10 +12589,11 @@ function importActionPresets() {
       AppState.canvasSelected = false;
       multiSelectedFrames.clear();
       reconcileAllTracks();   /* v7.0.0：多选复制的槽位也要按段重新归一化 */
+      /* 历史先写，避免 saveHistory 的 thumbVersion++ 把刚入队的预览任务判废。 */
+      EventBus.emit('history:save', '复制帧');
       invalidateAllFrameThumbs();
       updateFrameBar();
       EventBus.emit('need:render'); EventBus.emit('need:syncUI');
-      EventBus.emit('history:save', '复制帧');
       return;
     }
     if (subMode) {
@@ -12542,6 +12620,8 @@ function importActionPresets() {
       reconcileAllTracks();
       syncMainLengthFromTracks();
       trimTrailingEmptyFrames();
+      /* 同上：历史先写，复制出来的帧预览才能当场出现。 */
+      EventBus.emit('history:save', '复制帧');
       invalidateAllFrameThumbs();
       AppState.objects = getCombinedObjectsForRender();
       AppState.selected = getActiveTrackObject();
@@ -12550,7 +12630,6 @@ function importActionPresets() {
       seekVideoToFrame(AppState.currentFrameIndex);
       updateFrameBar();
       EventBus.emit('need:render'); EventBus.emit('need:syncUI');
-      EventBus.emit('history:save', '复制帧');
       return;
     }
     const insertAt = AppState.currentFrameIndex + 1;
@@ -12575,13 +12654,14 @@ function importActionPresets() {
     reconcileAllTracks();
     syncMainLengthFromTracks();
     AppState.currentFrameIndex = insertAt;
+    /* 同上：历史先写，复制帧预览立即入队生成。 */
+    EventBus.emit('history:save', '复制帧');
     invalidateAllFrameThumbs();
     AppState.objects = getCombinedObjectsForRender();
     AppState.selected = null; AppState.canvasSelected = false;
     seekVideoToFrame(AppState.currentFrameIndex);
     updateFrameBar();
     EventBus.emit('need:render'); EventBus.emit('need:syncUI');
-    EventBus.emit('history:save', '复制帧');
   };
 
   /* ==================== 导出尺寸 & 裁剪 ==================== */
@@ -16111,8 +16191,20 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     const sp = getSpawnPoint();
     const f = makeFigure(sp.x, sp.y, currentColor, currentLW);
     f.layer = { body: 1, head: 2, armL: 1, armR: 1, legL: 1, legR: 1 };
-    generateName(f); addObjectToFrames(f); select(f); EventBus.emit('need:render');
+    generateName(f);
+    addObjectToFrames(f);
+    /* 新增火柴人默认在「它出现的首帧」（添加时所在帧）落一颗关键帧；
+       无关键帧 clip 的整体调节规则保持不变，只是新火柴人不再从裸 clip 起步。 */
+    const tid = String(f.id);
+    const t = AppState.tracks[tid];
+    const first = AppState.currentFrameIndex;
+    if (t && t.frames && t.frames[first] === f && !KF.isKey(f)) KF.markKey(f, 'sub');
+    select(f);
+    /* 历史先写：saveHistory 会 bump thumbVersion，之后再让缩略图入队，预览才会当场刷新。 */
     EventBus.emit('history:save', '添加火柴人');
+    invalidateAllFrameThumbs();
+    updateFrameBar();
+    EventBus.emit('need:render'); EventBus.emit('need:syncUI');
   }
   function addShape(type) {
     const sp = getSpawnPoint();
@@ -17578,6 +17670,18 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     EventBus.emit('need:render');
   });
   document.getElementById('frameThumbMode').addEventListener('change', e => { frameThumbMode = e.target.checked; updateFrameBar(); EventBus.emit('need:render'); });
+  /* v7.9.0：段曲线开关。默认关，开/关都立刻重画（关时 renderKfCurveStrip 直接收起）。 */
+  {
+    const curveCb = document.getElementById('kfCurveCheck');
+    if (curveCb) {
+      curveCb.checked = kfCurveEnabled;
+      curveCb.addEventListener('change', e => {
+        kfCurveEnabled = !!e.target.checked;
+        try { localStorage.setItem(KF_CURVE_KEY, kfCurveEnabled ? '1' : '0'); } catch (_) {}
+        renderKfCurveStrip();
+      });
+    }
+  }
 
   /* 导出按钮 */
   const btnExportPNG = document.getElementById('btnExportPNG');
@@ -17774,6 +17878,17 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     /* 属性区的标题必须插到最前面（水印、面板标题行都在它后面），否则会跑到属性列表末尾 */
     addHead(propsBox, 'props', true);
 
+    /* v7.9.0：内容长高 / 变矮会改变 #uiScroll 有没有滚动条。
+       用 ResizeObserver 盯着每个分区，rAF 去抖后只量一次宽度，避免布局抖动。 */
+    if (typeof ResizeObserver !== 'undefined') {
+      let sbRaf = 0;
+      const sbObserver = new ResizeObserver(() => {
+        if (sbRaf) return;
+        sbRaf = requestAnimationFrame(() => { sbRaf = 0; syncUiScrollbarWidth(); });
+      });
+      Object.keys(uiSheetEls).forEach(k => { if (uiSheetEls[k]) sbObserver.observe(uiSheetEls[k]); });
+    }
+
     /* ---- 元件：添加物体 / 编辑操作 / 元件列表（纵向，v7.0.6 起不再是浮窗） ---- */
     const addSummary = document.querySelector('[data-i18n="add.summary"]');
     move(addSummary ? addSummary.closest('.add-details') : null, uiSheetEls.objects);
@@ -17853,6 +17968,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       ]);
       makeAdvGroup('adv.grpDisplay', '界面显示', [
         '.adv-toggle[data-toggle="frameThumbMode"]',
+        '.adv-toggle[data-toggle="kfCurveCheck"]',
         '.adv-toggle[data-toggle="cameraPreviewCheck"]',
         '.adv-toggle[data-toggle="autoCollapseTimeline"]',
         '#btnTimelineDock'
@@ -18001,6 +18117,16 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     switchUiSheet(isMobile ? null : 'props');
   }
 
+  /* v7.9.0：量出 #uiScroll 实际滚动条宽度，写进 CSS 变量。
+     三条通栏横条靠这个宽度把右端伸到滚动条下面：轨道透明、滑块压在上面，
+     右端就不会被滚动条裁掉。 */
+  function syncUiScrollbarWidth() {
+    const scroll = document.getElementById('uiScroll');
+    if (!scroll) return;
+    const w = Math.max(0, scroll.offsetWidth - scroll.clientWidth);
+    scroll.style.setProperty('--ui-scrollbar-w', w + 'px');
+  }
+
   function switchUiSheet(key) {
     const scroll = document.getElementById('uiScroll');
     const bar = document.getElementById('uiBottomBar');
@@ -18044,6 +18170,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       updateResizeHandlePos();   /* 全关时藏起右下角 ◢ 手柄，展开时贴回面板角上 */
       if (!wasCollapsed && key === 'objects') scheduleRenderLayerPop();  /* 元件列表平时不渲染，展开时补一次 */
     }
+    /* 分区内容高度一变，纵向滚动条可能出现 / 消失，横条右端要跟着重算。 */
+    syncUiScrollbarWidth();
 
     EventBus.emit('need:render');
   }
@@ -18053,6 +18181,28 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (!tl) return;
     const visible = getComputedStyle(tl).display !== 'none';
     const h = visible ? tl.offsetHeight : 0;
+    /* v7.9.0：不管是轨道模式还是帧动画模式，只要时间轴展开并置底，
+       控制面板就盖在它上面（z 轴），不再把它顶开（y 轴）。 */
+    document.body.classList.toggle('timeline-bottom-on', visible && timelineDock === 'bottom');
+    syncUiScrollbarWidth();
+
+    /* v7.9.0：帧动画面板置底时，控制面板底部栏（那排入口图标）z 轴盖在面板最下面一截上，
+       会压住帧缩略图和进度条。给面板底部垫一段与该栏等高的空白，让内容整体上移，
+       底栏正好压在空白上，不再遮东西。只在「底栏确实压到面板底部」时垫，桌面端顶置
+       或底栏不在屏幕最底时不加，免得白白多出一截空。 */
+    const barEl = document.getElementById('uiBottomBar');
+    let barGap = 0;
+    if (visible && barEl && timelineDock === 'bottom' && !tl.classList.contains('track-mode')) {
+      const br = barEl.getBoundingClientRect();
+      const tr = tl.getBoundingClientRect();
+      const overlap = Math.min(br.bottom, tr.bottom) - Math.max(br.top, tr.top);
+      /* 底栏贴着屏幕最底（移动端）才会盖到面板底部；桌面端它停在面板中段，不用垫 */
+      if (overlap > 0 && br.bottom >= window.innerHeight - 2) {
+        barGap = Math.round(Math.min(br.height, overlap));
+      }
+    }
+    tl.style.setProperty('--tl-bottom-bar-gap', barGap + 'px');
+
     const coord = document.getElementById('coordDisplay');
     const hist = document.getElementById('historyControls');
     const ui = document.getElementById('ui');
@@ -18109,14 +18259,9 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       const isCollapsed = ui.classList.contains('collapsed');
 
       let bottomOffset = 0;
-      /* v7.4.9：轨道模式下面板**盖**在轨道面板上（z 轴），不再把它顶开（y 轴）。
-         理由：轨道面板本来就贴着屏幕底边，面板一展开就把它整块挤到看不清，
-         而且面板高度/轨道高度任一个刚变过，这个偏移就会算错，露出一条不三不四的轨道。
-         直接叠上去最干脆 —— 收起面板就看见轨道，位置也不来回跳。 */
-      const trackModeOn = !!(tl && tl.classList.contains('track-mode'));
-      if (timelineDock === 'bottom' && visible && !trackModeOn) {
-        bottomOffset = h;
-      }
+      /* v7.9.0：帧动画面板置底时套用轨道面板的位置规则 —— 面板盖在时间轴上（z 轴），
+         不再把它顶开（y 轴）。收起面板就看见时间轴，位置也不来回跳。 */
+      /* bottomOffset 保持 0：置底时间轴始终在控制面板下方。 */
 
       ui.style.bottom = (isCollapsed ? 0 : bottomOffset) + 'px';
       if (!isCollapsed) {
@@ -18705,6 +18850,19 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         updateFrameBar();
         EventBus.emit('need:render');
         EventBus.emit('need:syncUI');
+      },
+
+      /* v7.9.0：事务型操作（拖关键帧 / 拖段落 / 循环填充）在历史真正落栈之后
+         再刷一次缩略图与曲线。pushPreSnapshot 会 bump thumbVersion，若刷早了，
+         刚入队的预览任务会被判旧版本丢弃，派生帧也要再点一下才更新。 */
+      afterHistory() {
+        invalidateAllFrameThumbs();
+        AppState.objects = getCombinedObjectsForRender();
+        seekVideoToFrame(AppState.currentFrameIndex);
+        updateFrameBar();
+        renderKfCurveStrip();
+        syncKeyframeButtonState();
+        EventBus.emit('need:render');
       },
 
       /* v7.4.6：轨道改短之后，把时间轴尾巴上「所有元件都不出场」的空白帧收掉。

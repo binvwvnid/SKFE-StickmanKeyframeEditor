@@ -25,6 +25,8 @@
   const COLW_KEY = 'skfe_track_colw_v1';
   const HEIGHT_KEY = 'skfe_track_h_v1';
   const MODE_KEY = 'skfe_track_mode_v1';
+  /* v7.9.0：用户主动点回帧动画模式后写这个标记；app.js 首次默认进轨道时读它 */
+  const USER_FRAME_KEY = 'skfe_track_user_frame_v1';
 
   const GUTTER = 108;      /* 左列宽（眼睛 + 元件名），sticky 不随横向滚动 */
   const ROW_H = 32;        /* 每条轨道高度 */
@@ -711,6 +713,9 @@
     api.afterChange();
     if (api.isTxOpen && api.isTxOpen()) return;
     api.pushPre(api.snapshot(), label);
+    /* 单步操作：历史里的 thumbVersion++ 发生在 afterChange 之后。
+       历史落栈后再刷一遍，关键帧曲线与派生帧当场生效。 */
+    if (api.afterHistory) { try { api.afterHistory(); } catch (_) {} }
   }
 
   /* 把一整段操作包进一个事务。没有 isTxOpen 的旧内核也不会炸：begin/end 缺席时退化成原来的 commit 记法。
@@ -723,7 +728,10 @@
     try {
       return fn();
     } finally {
-      if (can) api.txEnd();
+      const changed = can ? (api.txEnd() !== false) : false;
+      /* 拖拽这类事务里，txEnd 才真正压历史并 bump thumbVersion；
+         所以曲线 / 派生帧 / 缩略图的最后一次刷新必须放在它后面。 */
+      if (changed && api.afterHistory) { try { api.afterHistory(); } catch (_) {} }
     }
   }
 
@@ -1294,9 +1302,27 @@
       : T('track.delDone', '这一段已经删掉'));
   }
 
-  /* 关键帧：给「选中的那条轨」在播放头处开/关关键帧（轨道模式下不认子轨选择器） */
+  /* 关键帧：给「选中的那条轨」在播放头处开/关关键帧（轨道模式下不认子轨选择器）
+     v7.9.0 回归修复：帧动画面板默认进轨道模式后，「全局」视图下用户常常还没点长条
+     就想在关键帧之间的派生帧上打一颗。旧版帧模式下这条走 app.js 的子轨路径、
+     不需要先选段，所以是自由的；进轨道模式后被本文件的委托拦截，却因为 selClip
+     为空直接 toast 退出 —— 这就是「派生帧不能加关键帧」的根因。
+     现在补一条兜底：没点长条时，按「当前选中元件 / 播放头处有画面的轨」找一条来打，
+     让打关键帧重新变成随时可做的动作。只有一条轨都没有可打目标时才提示。 */
   function toggleKey() {
-    const id = (selClip && selClip.id) || lastPickedId;
+    let id = (selClip && selClip.id) || lastPickedId;
+    if (!id && api.targetTrackId) id = api.targetTrackId();
+    if (!id) {
+      /* 全局视图没选元件：找播放头这一帧有姿态可打的第一条轨。
+         直接看轨里的实体帧（关键帧 / 普通帧），不靠 getTrackFrame —— 派生帧求值
+         在无头构造的工程里可能是空的，但轨里一定有两端关键帧可供 nearestPose 借姿势。 */
+      const tmap = tracksMap();
+      for (const tid in tmap) {
+        const t = tmap[tid];
+        if (!t || !t.frames) continue;
+        if (t.frames.some(f => f && KF().isReal(f))) { id = tid; break; }
+      }
+    }
     if (!id) { api.toast(T('track.needPick', '先在轨道上点一条长条，选中要操作的段')); return; }
     const t = trackOf(id);
     if (!t) return;
@@ -2185,12 +2211,17 @@
   /* ---------------- 模式开关 ---------------- */
   let dockBefore = null;   /* 进来之前是不是置顶的，退出时还原 */
 
-  function setEnabled(on) {
+  function setEnabled(on, userInitiated) {
     const tl = $('timeline');
     const strip = $('trackStrip');
     const btn = $('btnTrackMode');
     if (!tl || !strip) return;
+    const wasEnabled = enabled;
     enabled = !!on;
+    /* 只有用户亲手切回帧动画才算「选择」，程序化关轨道（撤销 / 初始化）不算。 */
+    if (userInitiated && wasEnabled && !enabled) {
+      try { localStorage.setItem(USER_FRAME_KEY, '1'); } catch (_) {}
+    }
     if (!on) {
       /* v7.9.0：切回帧动画模式时，收起「点轨道切回」的箭头提示 */
       const tip = document.getElementById('trackModeTip');
@@ -2258,7 +2289,7 @@
       }
 
       const btn = $('btnTrackMode');
-      if (btn) btn.addEventListener('click', () => setEnabled(!enabled));
+      if (btn) btn.addEventListener('click', () => setEnabled(!enabled, true));
 
       const splitBtn = $('btnSplit');
       if (splitBtn) splitBtn.addEventListener('click', split);
