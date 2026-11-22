@@ -346,14 +346,16 @@
         var statusLabel = r.enabled ? T('plugin.enabled') : T('plugin.disabled');
         var offCls = r.enabled ? '' : 'off';
         var toggleLabel = r.enabled ? T('plugin.btnDisable') : T('plugin.btnEnable');
-        var meta = 'v' + esc(m.version) + ' · SKFE ' + esc(m.skfeVersion) + (m.author ? ' · ' + esc(m.author) : '');
+        var meta = 'v' + esc(m.version) + ' · SKFE ' + esc(m.skfeVersion);
+        var authorLine = m.author ? '<br><span class="plugin-author">' + esc(T('plugin.author')) + esc(m.author) + '</span>' : '';
+        var descLine = m.description ? '<br>' + esc(m.description) : '';
         return '<div class="plugin-card ' + offCls + '" data-id="' + esc(r.id) + '">' +
           '<div class="plugin-head">' +
             '<span class="plugin-title">' + esc(m.name) + '</span>' +
             '<span class="plugin-badge ' + badgeCls + '">' + esc(typeLabel) + '</span>' +
             '<span class="plugin-badge ' + (r.enabled ? '' : 'off') + '">' + esc(statusLabel) + '</span>' +
           '</div>' +
-          '<div class="plugin-meta">' + meta + (m.description ? '<br>' + esc(m.description) : '') + '</div>' +
+          '<div class="plugin-meta">' + meta + authorLine + descLine + '</div>' +
           '<div class="plugin-actions">' +
             '<button class="btn-xs btn-soft" data-act="toggle" data-id="' + esc(r.id) + '">' + esc(toggleLabel) + '</button>' +
             '<button class="btn-xs btn-danger" data-act="delete" data-id="' + esc(r.id) + '">' + esc(T('plugin.btnDelete')) + '</button>' +

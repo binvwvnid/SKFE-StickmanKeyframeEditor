@@ -123,23 +123,6 @@
     <label class="checkbox-label"><input type="checkbox" id="exportHD" checked> <span data-i18n="export.hd">高清导出（4倍分辨率）</span></label> <!-- 高清导出复选框 -->
   </div> <!-- 导出选项行结束 -->
 
-    <div id="globalEditHelpBox" style="display:none;font-size:11.5px;color:var(--text-sub);line-height:1.7;padding:8px 10px;background:var(--bg-input);border-radius:8px;margin-bottom:8px;" data-i18n-html="adv.globalHelp"> <!-- 全局修改说明面板（默认隐藏） -->
-      <div style="font-weight:600;color:var(--text-main);margin-bottom:4px;">开启「全局属性修改」后，以下操作会同步到该元件的所有帧：</div> <!-- 说明标题 -->
-      · <b>颜色 / 线条粗细</b><br> <!-- 列表项 -->
-      · <b>头部空心/实心、自定义填充色、头型</b><br> <!-- 列表项 -->
-      · <b>身体比例</b>（头、臂、腿、躯干、小臂占比、小腿占比）<br> <!-- 列表项 -->
-      · <b>四肢独立</b>各参数（左右分别的臂长/腿长/小臂/小腿）<br> <!-- 列表项 -->
-      · <b>描边阴影</b>（开关、颜色、X/Y 偏移、羽化、扩展、不透明度、快捷预设、连同绑定图片）<br> <!-- 列表项 -->
-      · <b>侧面高光</b>（开关、颜色、粗细、方向）<br> <!-- 列表项 -->
-      · <b>手部渐变</b>（开关、颜色、起始位置）<br> <!-- 列表项 -->
-      · <b>后方四肢深色处理</b>（开关、自定义色）<br> <!-- 列表项 -->
-      · <b>地面阴影</b>（开关、颜色、透明度、宽度/高度拉伸）<br> <!-- 列表项 -->
-      · <b>关节固定 IK</b>（左脚/右脚/躯干/左手/右手）——所有帧同步固定 / 取消<br> <!-- 列表项 -->
-      · <b>位置移动</b>（拖躯干、移动手柄、输入坐标）——所有帧加上相同位移量<br> <!-- 列表项 -->
-      · <b>图层顺序 / 隐藏 / 锁定、重命名、绑定关系</b><br> <!-- 列表项 -->
-      <div style="margin-top:6px;color:var(--text-sub);">用户关键帧、自动补间帧和手动调节帧都会同步；手动调节帧不会被关键帧补间重新计算。画布、视图与导出设置不随帧变化，不需要同步。</div> <!-- 说明补充 -->
-    </div> <!-- 说明面板结束 -->
-
   <details class="add-details" open> <!-- 「添加物体」折叠面板（v7.0.6：默认展开，添加按钮一眼可见） -->
     <summary><i data-icon="add-one"></i><span data-i18n="add.summary">添加物体</span></summary> <!-- 折叠面板标题 -->
     <div> <!-- 折叠面板内容 -->
@@ -930,9 +913,9 @@
     <!-- 作者工具：给脚本作者的模板 / 校验脚本 / 示例插件，供下载 -->
     <div class="plugin-author-kit">
       <div class="plugin-kit-title" data-i18n="plugin.kitTitle">插件作者工具 · 下载</div>
-      <div class="plugin-kit-desc" data-i18n="plugin.kitDesc">制作插件所需的全部文档、模板、校验脚本与示例，已打包成一个 zip，一键下载。</div>
+      <div class="plugin-kit-desc" data-i18n="plugin.kitDesc">制作插件所需的文档、模板、校验脚本与示例，已打包成一个 zip，一键下载。</div>
       <a class="plugin-kit-download" href="./js/plugin-kit/SKFE插件作者工具包.zip" download="SKFE插件作者工具包.zip" data-i18n="plugin.kitDownloadAll" data-i18n-title="plugin.kitDownloadAllTitle">一键下载全部（ZIP）</a>
-      <div class="plugin-kit-note" data-i18n="plugin.kitNote">内含授权声明、接口设计文档、API 参考、模板、校验脚本与示例源码。这是资料包，不能直接导入；测试画布网格请用包内 canvas-grid.zip。SKFE 非开源，仅授权制作与私下分享插件，禁止二次公开发布或抹消作者署名。</div>
+      <div class="plugin-kit-note" data-i18n="plugin.kitNote">压缩包里包含：① 插件API参考.md（接口说明）；② 版权与授权声明.md；③ 工具包说明 README；④ manifest.template.json（数据型模板）与 manifest-code.json（代码型模板）；⑤ validate-plugin.js（插件校验脚本）与 build-kit.js（打包脚本）；⑥ 示例代码 example-code.js、example-data.json；⑦ 两个可直接导入的示例插件——示例插件-代码型.zip 与 canvas-grid.zip，并附画布网格插件源码目录。这是资料包，整体不能直接导入；想试用画布网格，请单独导入包内 canvas-grid.zip。SKFE 非开源，仅授权制作与私下分享插件，禁止二次公开发布或抹消作者署名。</div>
     </div>
 
     <div class="divider"></div>
@@ -1187,6 +1170,21 @@
   </div>
   <div id="changeLogBody" class="help-float-body"></div>
 </div> <!-- 更新记录浮窗结束 -->
+
+<!-- 帧动画面板打开后指向「轨道」按钮的箭头提示：3 秒后自动消失 -->
+<div id="trackModeTip" class="track-mode-tip" hidden>
+  <i data-icon="arrow-up" class="track-mode-tip-arrow"></i>
+  <span data-i18n="track.backToFramesTip">点「轨道」切回帧动画模式</span>
+</div>
+
+<!-- 全局属性说明浮窗：与「使用说明」同款，挂在 body 下 -->
+<div id="globalEditHelpFloat" class="help-float" hidden>
+  <div class="help-float-head">
+    <strong data-i18n="adv.help">说明</strong>
+    <button id="globalEditHelpClose" class="help-float-close" type="button" aria-label="关闭" data-i18n-title="help.close"><i data-icon="close"></i></button>
+  </div>
+  <div id="globalEditHelpBody" class="help-float-body" data-i18n-html="adv.globalHelp"></div>
+</div> <!-- 全局属性说明浮窗结束 -->
 
 <!-- 引入外部 JavaScript 脚本 -->
 <script src="./js/version.js"></script> <!-- 版本号单一来源，必须在 i18n 之前 -->

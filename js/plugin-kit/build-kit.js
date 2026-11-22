@@ -18,8 +18,7 @@ function add(fromDisk, zipName) {
 }
 
 console.log('打包 SKFE 插件作者工具包：');
-// 说明文档
-add(path.join(ROOT, '插件接口设计文档.md'), '插件接口设计文档.md');
+// 说明文档（注意：内部设计稿 / 排雷记录 / 手册是给作者本人和 AI 看的，禁止打进这个公开工具包）
 add(path.join(ROOT, '插件API参考.md'), '插件API参考.md');
 add(path.join(KIT, '版权与授权声明.md'), '版权与授权声明.md');
 add(path.join(KIT, 'README.md'), 'README-插件作者工具包.md');

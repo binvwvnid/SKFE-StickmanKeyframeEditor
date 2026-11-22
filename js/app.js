@@ -3032,6 +3032,31 @@ function importActionPresets() {
     setTimeout(() => { tip.remove(); }, 3500);
   }
 
+  /* v7.9.0：帧动画面板打开时，指向「轨道」按钮的箭头提示，3 秒后自动消失。
+     定位放在按钮上方，箭头朝下指住按钮，告诉用户可以点它切回帧动画模式。 */
+  let trackModeTipTimer = null;
+  function showTrackModeTip() {
+    const tip = document.getElementById('trackModeTip');
+    const btn = document.getElementById('btnTrackMode');
+    if (!tip || !btn) return;
+    const b = btn.getBoundingClientRect();
+    tip.hidden = false;
+    tip.style.opacity = '1';
+    const w = tip.offsetWidth;
+    tip.style.left = Math.round(Math.max(6, b.left + b.width / 2 - w / 2)) + 'px';
+    tip.style.top = Math.round(Math.max(6, b.top - tip.offsetHeight - 4)) + 'px';
+    clearTimeout(trackModeTipTimer);
+    trackModeTipTimer = setTimeout(() => {
+      tip.style.opacity = '0';
+      setTimeout(() => { tip.hidden = true; }, 300);
+    }, 3000);
+  }
+  function hideTrackModeTip() {
+    const tip = document.getElementById('trackModeTip');
+    if (tip) { tip.hidden = true; tip.style.opacity = '1'; }
+    clearTimeout(trackModeTipTimer);
+  }
+
   /* ==================== 时间轴开关 ==================== */
   function toggleTimeline(show) {
     const tl = document.getElementById('timeline');
@@ -3040,7 +3065,11 @@ function importActionPresets() {
       tl.style.display = 'flex';
       btnShow.style.display = 'none';
       TIMELINE_H = 100;
+      /* v7.9.0：打开帧动画面板默认进入轨道界面 */
+      const TS = SKFE.features && SKFE.features.trackStrip;
+      if (TS && TS.setEnabled && !TS.isEnabled()) TS.setEnabled(true);
     } else {
+      hideTrackModeTip();
       tl.style.display = 'none';
       btnShow.style.display = 'flex';
       TIMELINE_H = 0;
@@ -3058,6 +3087,8 @@ function importActionPresets() {
       SKFE.systems.camera.fitCameraViewToAvailableArea();
       EventBus.emit('need:render');
     }
+    /* v7.9.0：布局稳定后再定位箭头提示（setEnabled 会改 dock 和高度，早定位会偏） */
+    if (show) setTimeout(showTrackModeTip, 60);
   }
   document.getElementById('btnShowTimeline').onclick = () => toggleTimeline(true);
   document.getElementById('btnHideTimeline').onclick = () => toggleTimeline(false);
@@ -13597,12 +13628,44 @@ function importActionPresets() {
 
   document.getElementById('globalEdit').addEventListener('change', e => { globalEditEnabled = e.target.checked; });
   
+  /* v7.9.0：全局属性说明改为与「使用说明」同款浮窗（屏幕中心 70%、不透明白底）。
+     内容走 data-i18n-html="adv.globalHelp"，随语言切换自动更新。 */
   const globalEditHelpBtn = document.getElementById('globalEditHelpBtn');
-  const globalEditHelpBox = document.getElementById('globalEditHelpBox');
-  if (globalEditHelpBtn && globalEditHelpBox) {
-    globalEditHelpBtn.addEventListener('click', () => {
-      const isOpen = globalEditHelpBox.style.display !== 'none';
-      globalEditHelpBox.style.display = isOpen ? 'none' : 'block';
+  const globalEditHelpFloat = document.getElementById('globalEditHelpFloat');
+  const globalEditHelpClose = document.getElementById('globalEditHelpClose');
+  function positionGlobalEditHelpFloat() {
+    if (!globalEditHelpFloat || globalEditHelpFloat.hidden) return;
+    const w = globalEditHelpFloat.offsetWidth || Math.round(window.innerWidth * 0.7);
+    const h = globalEditHelpFloat.offsetHeight || Math.round(window.innerHeight * 0.7);
+    globalEditHelpFloat.style.left = Math.round((window.innerWidth - w) / 2) + 'px';
+    globalEditHelpFloat.style.top = Math.round((window.innerHeight - h) / 2) + 'px';
+  }
+  if (globalEditHelpBtn && globalEditHelpFloat) {
+    globalEditHelpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      /* 三个浮窗互斥 */
+      const qh = document.getElementById('quickHelpFloat');
+      const cl = document.getElementById('changeLogFloat');
+      if (qh) qh.hidden = true;
+      if (cl) cl.hidden = true;
+      globalEditHelpFloat.hidden = !globalEditHelpFloat.hidden;
+      if (!globalEditHelpFloat.hidden) positionGlobalEditHelpFloat();
+    });
+    if (globalEditHelpClose) {
+      globalEditHelpClose.addEventListener('click', (e) => {
+        e.stopPropagation();
+        globalEditHelpFloat.hidden = true;
+      });
+    }
+    document.addEventListener('pointerdown', (e) => {
+      if (globalEditHelpFloat.hidden) return;
+      if (e.target.closest('#globalEditHelpFloat') || e.target.closest('#globalEditHelpBtn')) return;
+      globalEditHelpFloat.hidden = true;
+    }, true);
+    document.addEventListener('scroll', positionGlobalEditHelpFloat, true);
+    window.addEventListener('resize', positionGlobalEditHelpFloat);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !globalEditHelpFloat.hidden) globalEditHelpFloat.hidden = true;
     });
   }
 
@@ -13646,6 +13709,8 @@ function importActionPresets() {
       loadQuickHelpContent();
       const clf = document.getElementById('changeLogFloat');
       if (clf) clf.hidden = true;
+      const gef = document.getElementById('globalEditHelpFloat');
+      if (gef) gef.hidden = true;
       quickHelpFloat.hidden = !quickHelpFloat.hidden;
       if (!quickHelpFloat.hidden) positionQuickHelpFloat();
     });
@@ -13725,6 +13790,8 @@ function importActionPresets() {
       e.stopPropagation();
       loadChangeLogContent();
       if (quickHelpFloat) quickHelpFloat.hidden = true;
+      const gef = document.getElementById('globalEditHelpFloat');
+      if (gef) gef.hidden = true;
       changeLogFloat.hidden = !changeLogFloat.hidden;
       if (!changeLogFloat.hidden) positionChangeLogFloat();
     });

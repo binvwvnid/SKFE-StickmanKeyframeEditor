@@ -2191,6 +2191,11 @@
     const btn = $('btnTrackMode');
     if (!tl || !strip) return;
     enabled = !!on;
+    if (!on) {
+      /* v7.9.0：切回帧动画模式时，收起「点轨道切回」的箭头提示 */
+      const tip = document.getElementById('trackModeTip');
+      if (tip) { tip.hidden = true; tip.style.opacity = '1'; }
+    }
     tl.classList.toggle('track-mode', enabled);
     strip.hidden = !enabled;
     if (btn) {

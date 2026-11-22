@@ -6,7 +6,15 @@
 
 > **项目地址**：https://github.com/binvwvnid/SKFE-StickmanKeyframeEditor （在线版：https://binvwvnid.github.io/SKFE-StickmanKeyframeEditor/）
 
-> 获取方式：打开 SKFE → 底部栏「插件」分区 →「一键下载全部（ZIP）」，这一个包里就有本工具包的全部内容（含授权声明、接口设计文档、API 参考、模板、校验脚本、示例）。无需再逐个下载。
+> 获取方式：打开 SKFE → 底部栏「插件」分区 →「一键下载全部（ZIP）」，这一个包里就有本工具包的全部内容（授权声明、API 参考、模板、校验脚本、示例）。无需再逐个下载。包内具体文件：
+>
+> - `版权与授权声明.md`、`README-插件作者工具包.md`（本文件）、`插件API参考.md`
+> - `manifest.template.json`（数据型模板）、`manifest-code.json`（代码型模板）
+> - `validate-plugin.js`（校验脚本）、`build-kit.js`（打包脚本）
+> - `example-code.js`、`example-data.json`（示例代码）
+> - `示例插件-代码型.zip`、`canvas-grid.zip`（两个可直接导入的示例），以及 `示例插件-画布网格/` 源码目录
+>
+> 这是资料包，整个 ZIP 不能直接导入；试用画布网格请单独导入包内 `canvas-grid.zip`。
 
 ---
 

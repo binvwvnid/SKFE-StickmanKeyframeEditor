@@ -1695,6 +1695,21 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     font-size: 14px; /* 字号 */
     transition: opacity .8s; /* 透明度过渡动画 */
   } /* 移动端提示条基础样式结束 */
+  .track-mode-tip { /* 帧动画面板打开时指向「轨道」按钮的箭头提示，3 秒后消失 */
+    position: fixed; z-index: 6002; left: 0; top: 0; /* 固定定位，位置由 JS 按按钮算 */
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 8px 12px; border-radius: var(--radius-chip);
+    background: var(--color-primary); color: var(--color-primary-text);
+    box-shadow: var(--shadow-float); pointer-events: none; /* 不拦截点击 */
+    font-size: 12px; font-weight: 600; white-space: nowrap;
+    transition: opacity .25s; /* 淡出过渡 */
+  }
+  .track-mode-tip[hidden] { display: none; }
+  .track-mode-tip-arrow { /* 向下的箭头，指向按钮 */
+    align-self: flex-end; width: 0; height: 0; margin-right: 14px;
+    border-left: 6px solid transparent; border-right: 6px solid transparent;
+    border-top: 7px solid var(--color-primary);
+  }
   .ios-save-overlay { /* iOS 专属保存图片遮罩层 */
     position: fixed; inset: 0; /* 固定定位，覆盖全屏 */
     background: var(--overlay-bg); /* 半透明遮罩背景 */
@@ -2282,6 +2297,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #sheetPlugins .plugin-badge.off { background: var(--bg-panel); color: var(--text-sub); }
   #sheetPlugins .plugin-meta { font-size: 10.5px; color: var(--text-sub); margin-top: 4px;
     line-height: 1.55; word-break: break-all; }
+  #sheetPlugins .plugin-author { color: var(--color-primary); font-weight: 600; }
   #sheetPlugins .plugin-actions { display: flex; gap: 6px; margin-top: 7px; }
   #sheetPlugins .plugin-actions button { flex: 1; }
 
