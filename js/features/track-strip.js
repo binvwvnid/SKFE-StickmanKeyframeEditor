@@ -224,6 +224,93 @@
     return o;
   }
 
+  /* ---------------- 段落循环标记（v7.9.0） ----------------
+     循环是「clip 段」的属性，不是某一帧的属性：挂在 track.loops = [{a,b}]。
+     这样不会污染帧对象，也不会被 cloneForEval() 带进求值结果。
+     ⚠️ 每一帧存画面，loops 单独记段落范围；拉长时按原段周期重复填充，
+     缩短时把范围裁掉，关闭循环后回退到旧的「复制边缘帧」行为。 */
+  function loopsOf(id) {
+    const t = trackOf(id);
+    if (!t) return [];
+    if (!Array.isArray(t.loops)) t.loops = [];
+    return t.loops;
+  }
+  function pruneLoops(id) {
+    const loops = loopsOf(id);
+    t_loop: for (let i = loops.length - 1; i >= 0; i--) {
+      const l = loops[i];
+      if (!l || !isFinite(l.a) || !isFinite(l.b) || l.b <= l.a) { loops.splice(i, 1); continue t_loop; }
+      for (let j = 0; j < i; j++) {
+        const m = loops[j];
+        if (m && m.a === l.a && m.b === l.b) { loops.splice(i, 1); continue t_loop; }
+      }
+    }
+    return loops;
+  }
+  /* v7.9.2：loops 存的是「原始循环周期」，不是当前被裁短后的可见范围。
+     当前 clip [a,b] 只要落在周期内，就仍属于这段循环；拉长时继续按原周期取样。 */
+  function findLoopForClip(id, a, b) {
+    const loops = loopsOf(id);
+    let hit = null;
+    for (const l of loops) {
+      if (!l || l.a > a || l.b < b) continue;
+      if (!hit || (l.b - l.a) > (hit.b - hit.a)) hit = l;
+    }
+    return hit;
+  }
+  function isLoopClip(id, a, b) { return !!findLoopForClip(id, a, b); }
+  function loopPeriodOf(id, a, b) { return findLoopForClip(id, a, b); }
+  /* 循环周期必须自带画面快照：缩短后轨道上只留前 5 帧，但原 1-9 的内容仍要能被再次拉长取回。 */
+  function makeLoopSource(id, a, b) {
+    const srcs = takeRange(id, a, b);
+    return srcs.map((o) => {
+      if (!o) return null;
+      const c = api.clone(o);
+      if (c.__k) delete c.__k.cut;
+      return c;
+    });
+  }
+  function setLoopAt(id, a, b, on) {
+    const loops = loopsOf(id);
+    const at = findLoopForClip(id, a, b);
+    if (on) {
+      if (!at) loops.push({ a: a, b: b, srcs: makeLoopSource(id, a, b) });
+    } else if (at) {
+      loops.splice(loops.indexOf(at), 1);
+    }
+    pruneLoops(id);
+  }
+  function moveLoopRange(id, oldA, oldB, d) {
+    const l = findLoopForClip(id, oldA, oldB);
+    if (!l) return;
+    l.a += d; l.b += d;
+    pruneLoops(id);
+  }
+  function clearLoopsIn(id, from, to) {
+    const loops = loopsOf(id);
+    for (let i = loops.length - 1; i >= 0; i--) {
+      const l = loops[i];
+      if (l && l.b >= from && l.a <= to) loops.splice(i, 1);
+    }
+  }
+  function modIndex(x, n) { return ((x % n) + n) % n; }
+
+  /* 取循环周期里的第 i 帧：一律从周期自带快照取样，不从当前轨道取。
+     这样缩短到 1-5 后再拉长，仍能完整拿回原 1-9 的画面。 */
+  function loopFillFrame(id, loop, i) {
+    if (!loop) return null;
+    const len = loop.b - loop.a + 1;
+    if (!(len > 0)) return null;
+    const si = loop.a + modIndex(i - loop.a, len);
+    if (Array.isArray(loop.srcs) && loop.srcs.length === len) {
+      const src = loop.srcs[modIndex(i - loop.a, len)];
+      return src ? api.clone(src) : null;
+    }
+    const o = cloneAt(id, si);
+    if (o && o.__k) delete o.__k.cut;
+    return o;
+  }
+
   /* 连续的「在场」帧合并成一条长条；__cut 处也要断开（分割出来的左右两段） */
   function computeSpans(arr) {
     const segs = KF().segments(arr);
@@ -250,7 +337,11 @@
     /* 缩略图开关 / 图案版本也算进指纹：不然改了动作、切了缩略图，长条上的小图不跟着换 */
     const thumbOn = (api && api.thumbMode && api.thumbMode()) ? 'T' : 't';
     const thumbRev = (api && api.thumbRev) ? api.thumbRev() : 0;
-    let s = gutterPx + '@' + totalFrames() + '#' + colW + '#' + thumbOn + thumbRev + '#';
+    /* v7.9.0：进入 / 退出组只改视图状态，不改轨道数据；把它算进指纹，
+       need:syncUI 才能立刻把轨道从「组载体」切到「组内成员」。 */
+    const SG = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+    const editing = SG ? (SG.getEditingGroupId() || '') : '';
+    let s = editing + '@' + gutterPx + '@' + totalFrames() + '#' + colW + '#' + thumbOn + thumbRev + '#';
     for (const id in map) {
       const arr = (map[id] && map[id].frames) || [];
       s += id + ':' + arr.length + ':' + (map[id].name || '') + ':';
@@ -260,7 +351,9 @@
         else if (KF().isDerived(slot)) s += 'd';
         else s += (KF().isKey(slot) ? 'k' : 'p') + (slot.hidden ? 'h' : '') + ((slot.__k && slot.__k.cut) ? 'c' : '');
       }
-      s += ';';
+      /* v7.9.0：循环标记住在 track.loops，不在帧槽里；不进指纹的话点「循环」长条不会立刻重画。 */
+      const loops = Array.isArray(map[id].loops) ? map[id].loops.map(l => (l ? l.a + '-' + l.b : '')).join(',') : '';
+      s += 'L' + loops + ';';
     }
     return s;
   }
@@ -295,6 +388,56 @@
     cv.querySelectorAll('.ts-row[data-id]').forEach((r) => {
       r.classList.toggle('ts-row-sel', String(r.dataset.id) === String(id));
     });
+    updateTrackGroupButtons();
+    updateTrackLoopButton();
+  }
+
+  /* v7.9.0：「进入编组 / 退出编组」按钮只在选中组载体或正在组内时出现。 */
+  function updateTrackGroupButtons() {
+    const btn = $('btnTrackEnterGroup');
+    if (!btn) return;
+    const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+    const editing = G ? G.getEditingGroupId() : null;
+    const id = (selClip && selClip.id) || lastPickedId;
+    const selectedGid = api && api.selectedGroupId ? api.selectedGroupId() : null;
+    const t = id ? tracksMap()[id] : null;
+    let isCarrier = false;
+    if (t && t.frames) {
+      for (const d of t.frames) {
+        if (d && d.type === 'group') { isCarrier = true; break; }
+      }
+    }
+    const show = !!(editing || isCarrier || selectedGid);
+    btn.style.display = show ? 'inline-flex' : 'none';
+    const icon = editing ? 'exit-group' : 'enter-group';
+    const ic = btn.querySelector('i[data-icon]');
+    if (ic && ic.getAttribute('data-icon') !== icon) {
+      ic.setAttribute('data-icon', icon);
+      ic.removeAttribute('data-icon-done');
+      if (root.SKFEApplyIcons) root.SKFEApplyIcons(ic);
+    }
+    const label = btn.querySelector('span');
+    const text = editing ? T('group.exit', '退出编组') : T('track.enterGroup', '进入编组');
+    btn.title = text;
+    if (label) label.textContent = text;
+  }
+
+  /* v7.9.0：循环按钮跟随「选中的那一段」。进组后成员不自开循环，按钮隐藏，
+     循环统一在组外对编组段设置，避免组循环和成员循环叠加。 */
+  function updateTrackLoopButton() {
+    const btn = $('btnTrackLoop');
+    if (!btn) return;
+    const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+    const editing = G ? G.getEditingGroupId() : null;
+    if (editing) { btn.style.display = 'none'; return; }
+    btn.style.display = '';
+    const clip = selClip || (selClips.length ? selClips[0] : null);
+    const on = !!(clip && isLoopClip(clip.id, clip.a, clip.b));
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.title = on ? T('track.loopOn', '已开启循环：拉长时会重复原段内容') : T('track.loopTitle', '开启后拉长该段会按原段内容循环重复');
+    const label = btn.querySelector('span');
+    if (label) label.textContent = T('track.loop', '循环');
   }
 
   function render() {
@@ -303,11 +446,32 @@
     if (!wrap || !cv) return;
     gutterPx = readGutter();   /* v7.4.9：先量左列宽，播放头 / 画布宽度都要用它 */
     lastSig = signature();
+    updateTrackGroupButtons();
+    updateTrackLoopButton();
 
     const map = tracksMap();
     /* v7.4.7：全空白帧的轨道不画行 —— 元件已经彻底删掉了，这一行不该留在面板里。
        （数据层由 pruneEmptyTracks 清，这里再兜一层，避免别的入口漏扫。） */
-    const ids = Object.keys(map).filter(id => map[id] && map[id].frames && map[id].frames.some(d => d != null));
+    const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+    const editingGid = G ? G.getEditingGroupId() : null;
+    /* v7.9.0：编组后，组外只显示组载体轨；点进组后只显示该组成员轨。
+       成员数据仍留在各自真实轨道里，只是这一帧不列出来。 */
+    const groupInfoOf = (id) => {
+      const t = map[id];
+      if (!t || !t.frames) return null;
+      for (const d of t.frames) {
+        if (!d) continue;
+        if (d.type === 'group') return { isCarrier: true, gid: String(d.gid || d.id) };
+        if (d.groupId != null) return { isCarrier: false, gid: String(d.groupId) };
+      }
+      return null;
+    };
+    const ids = Object.keys(map).filter(id => {
+      if (!(map[id] && map[id].frames && map[id].frames.some(d => d != null))) return false;
+      const gi = groupInfoOf(id);
+      if (editingGid) return !!gi && !gi.isCarrier && gi.gid === String(editingGid);
+      return !(gi && !gi.isCarrier);
+    });
     /* v7.8.1：音频轨永远置底（元件列表里根本不出现），其余保持原顺序 */
     const isAudioTrack = (id) => {
       const frames = map[id] && map[id].frames;
@@ -366,6 +530,7 @@
         const w = Math.max(colW, (s.b - s.a + 1) * colW);
         const label = (s.a + 1) + (s.b > s.a ? '–' + (s.b + 1) : '');
         const sel = isClipSelected(id, s.a, s.b);
+        const looped = isLoopClip(id, s.a, s.b);
         /* 缩略图：只取这一段的头一帧，横向平铺成胶片条 —— 每段只渲染一次，不拖慢大工程 */
         const trackData = map[id].frames[s.a];
         const isAudio = !!(trackData && trackData.type === 'audioClip');
@@ -385,9 +550,9 @@
           if (url) { cls = ' has-thumb'; style += ';background-image:url(' + url + ')'; }
         }
         /* 选中的长条两端冒出 ‹ › 两个把手（对应两条 10px 的命中区），一眼能看出可以拖 */
-        html += '<div class="ts-clip' + cls + (sel ? ' sel' : '') + '" data-id="' + esc(id) + '" data-si="' + si + '" data-a="' + s.a + '" data-b="' + s.b + '"' +
+        html += '<div class="ts-clip' + cls + (sel ? ' sel' : '') + (looped ? ' loop' : '') + '" data-id="' + esc(id) + '" data-si="' + si + '" data-a="' + s.a + '" data-b="' + s.b + '"' +
           ' style="' + style + '">' +
-          '<i class="ts-h ts-h-l">‹</i><span class="ts-lab">' + label + '</span><i class="ts-h ts-h-r">›</i></div>';
+          '<i class="ts-h ts-h-l">‹</i><span class="ts-lab">' + (looped ? '⟳ ' : '') + label + '</span><i class="ts-h ts-h-r">›</i></div>';
       });
       /* 关键帧菱形：压在长条正中间，可以单拖（改这一帧的时间）／Ctrl 点选多颗 */
       for (let i = 0; i < arr.length; i++) {
@@ -408,15 +573,13 @@
     scrollPlayheadIntoView();
   }
 
-  /* 播放头跑出可视区时把滚动带过去 */
+  /* v7.9.2：播放头默认停在可视轨道区正中；空白区左右拖就是换帧读取画面。 */
   function scrollPlayheadIntoView() {
     const sc = $('tsScroll');
     if (!sc || !enabled) return;
-    const x = api.currentFrame() * colW;
-    const viewL = sc.scrollLeft;
-    const viewR = viewL + sc.clientWidth - gutterPx;
-    if (x < viewL) sc.scrollLeft = Math.max(0, x - colW * 2);
-    else if (x > viewR - colW) sc.scrollLeft = x - (sc.clientWidth - gutterPx) + colW * 3;
+    const viewW = Math.max(1, sc.clientWidth - gutterPx);
+    const x = api.currentFrame() * colW + colW / 2;
+    sc.scrollLeft = Math.max(0, x - viewW / 2);
   }
 
   function syncPlayhead() {
@@ -580,17 +743,23 @@
     return { lo: lo, hi: hi };
   }
 
-  /* 右端拉到 nb：拉长只补普通帧（不产生关键帧），缩短把腾空的帧真正清掉 */
-  function stretchRight(id, b, nb) {
+  /* 右端拉到 nb。
+     loopPeriod 为 null 时保持旧语义：拉长复制边缘帧为普通帧；
+     loopPeriod={a,b} 时按原段周期重复填充（关键帧 / 曲线也按周期复刻，cut 不复刻）。 */
+  function stretchRight(id, a, b, nb, loopPeriod) {
     const t = trackOf(id);
     if (!t) return;
     const arr = t.frames;
     ensureLen(arr, Math.max(totalFrames(), arr.length));
     if (nb > b) {
-      const base = plainFrom(cloneAt(id, b));
-      if (!base) return;
       ensureLen(arr, nb + 1);
-      for (let i = b + 1; i <= nb; i++) arr[i] = api.clone(base);
+      if (loopPeriod) {
+        for (let i = b + 1; i <= nb; i++) arr[i] = loopFillFrame(id, loopPeriod, i);
+      } else {
+        const base = plainFrom(cloneAt(id, b));
+        if (!base) return;
+        for (let i = b + 1; i <= nb; i++) arr[i] = api.clone(base);
+      }
     } else if (nb < b) {
       /* 裁短（v7.4.5）：拖到 14 就把 15 之后全裁掉，落在里面的关键帧（比如 17）一起取消；
          剩下的尾巴（最后一个保留关键帧 +1 … 14）定格成那颗关键帧的姿势 ——
@@ -600,7 +769,11 @@
       /* 用干净清空：vacate 会在两侧都有关键帧时落一颗「隐藏头」，
          裁短的场合那颗头正好落在新区间外面（15 帧），又会变成看不见的残留。 */
       clearFrames(arr, nb + 1, b);
-      if (hold) {
+      /* v7.9.2：循环段缩短保留原段前几帧的真实画面（1-9 缩到 5 就显示 1-5），
+         并从周期快照重新烘焙可见帧；原 1-9 的内容仍留在 loop.srcs 里。 */
+      if (loopPeriod) {
+        for (let i = a; i <= nb; i++) arr[i] = loopFillFrame(id, loopPeriod, i);
+      } else if (hold) {
         for (let i = anchor + 1; i <= nb; i++) arr[i] = api.clone(hold);
       }
     }
@@ -626,32 +799,33 @@
     return -1;
   }
 
-  /* 左端拉到 na
-     - 往左拉长：这一段的头如果是关键帧（段的头 / 分割点），就把它一起往左挪。
-       否则左边那段「不出场段」或前一段会把这几个新长出来的帧吃回去，
-       表现就是「怎么拖都拖不动」。
-     - 新长出来的帧一律是普通帧（不在末尾加关键帧）。 */
-  function stretchLeft(id, a, na) {
+  /* 左端拉到 na。loopPeriod 为 null 时沿用旧语义（头是关键帧就一起左移，其余复制边缘帧）；
+     loopPeriod={a,b} 时按原段周期反向取样：新帧 na…a-1 对应原周期尾部，边界自然接上。 */
+  function stretchLeft(id, a, b, na, loopPeriod) {
     const t = trackOf(id);
     if (!t) return;
     const arr = t.frames;
     ensureLen(arr, Math.max(totalFrames(), arr.length));
     if (na < a) {
-      const base = plainFrom(cloneAt(id, a));
-      if (!base) return;
-      const head = arr[a];
-      const headIsKey = !!(head && !KF().isDerived(head) && KF().isKey(head));
-      if (headIsKey) {
-        /* 关键帧当头的段：头跟着挪到新的左端，原位置退回普通帧（不然会多出一个菱形） */
-        arr[na] = api.clone(head);
-        arr[a] = api.clone(base);
-        for (let i = na + 1; i < a; i++) arr[i] = api.clone(base);
+      if (loopPeriod) {
+        for (let i = na; i < a; i++) arr[i] = loopFillFrame(id, loopPeriod, i);
       } else {
-        for (let i = na; i < a; i++) {
-          const s = arr[i];
-          /* 让位给新长出来的帧：这里原有的隐藏关键帧（腾空留下的）先摘掉 */
-          if (s && !KF().isDerived(s) && KF().isKey(s) && s.hidden) KF().clearKey(s);
-          arr[i] = api.clone(base);
+        const base = plainFrom(cloneAt(id, a));
+        if (!base) return;
+        const head = arr[a];
+        const headIsKey = !!(head && !KF().isDerived(head) && KF().isKey(head));
+        if (headIsKey) {
+          /* 关键帧当头的段：头跟着挪到新的左端，原位置退回普通帧（不然会多出一个菱形） */
+          arr[na] = api.clone(head);
+          arr[a] = api.clone(base);
+          for (let i = na + 1; i < a; i++) arr[i] = api.clone(base);
+        } else {
+          for (let i = na; i < a; i++) {
+            const s = arr[i];
+            /* 让位给新长出来的帧：这里原有的隐藏关键帧（腾空留下的）先摘掉 */
+            if (s && !KF().isDerived(s) && KF().isKey(s) && s.hidden) KF().clearKey(s);
+            arr[i] = api.clone(base);
+          }
         }
       }
     } else if (na > a) {
@@ -661,7 +835,10 @@
       const anchor = firstKeyAtOrAfter(id, na);
       const hold = anchor >= 0 ? plainFrom(cloneAt(id, anchor)) : null;
       clearFrames(arr, a, na - 1);
-      if (hold) {
+      /* v7.9.2：循环段左端缩短同样从周期快照烘焙可见帧，原周期不裁 */
+      if (loopPeriod) {
+        for (let i = na; i <= b; i++) arr[i] = loopFillFrame(id, loopPeriod, i);
+      } else if (hold) {
         for (let i = na; i < anchor; i++) arr[i] = api.clone(hold);
       }
     }
@@ -673,12 +850,27 @@
     try { return api.boundIds(id) || []; } catch (_) { return []; }
   }
 
+  /* v7.9.0：判断一条轨是不是组载体（按任意帧里的 type:'group' 认，不依赖当前播放头） */
+  function isGroupCarrierTrack(id) {
+    const t = tracksMap()[id];
+    if (!t || !t.frames) return false;
+    return t.frames.some(d => !!(d && d.type === 'group'));
+  }
+
+  /* v7.9.0：组载体长条拖动时，成员轨必须跟着同一手势一起动 */
+  function groupMemberIdsOf(id) {
+    if (!api || !api.groupMemberIds) return [];
+    try { return (api.groupMemberIds(id) || []).map(String).filter(x => x && x !== String(id)); }
+    catch (_) { return []; }
+  }
+
   function applyDrag(st, d) {
     const t = trackOf(st.id);
     if (!t) return;
     const arr = t.frames;
     ensureLen(arr, Math.max(totalFrames(), arr.length));
     const ids = [st.id];
+    const memberIds = groupMemberIdsOf(st.id);
 
     if (st.mode === 'm') {
       /* 平移：抓出整段 → 原位腾空 → 写到新位置 */
@@ -687,24 +879,64 @@
       vacate(st.id, arr, st.a, st.b);
       putRange(arr, na, srcs);
       if (nb < st.b) vacate(st.id, arr, nb + 1, st.b);   /* 往左挪时右端要腾干净 */
+      moveLoopRange(st.id, st.a, st.b, d);
+      /* 组内成员同段一起平移，保持一个手势一步撤销 */
+      memberIds.forEach((mid) => {
+        if (!trackOf(mid)) return;
+        const mArr = trackOf(mid).frames;
+        const mSrcs = takeRange(mid, st.a, st.b);
+        vacate(mid, mArr, st.a, st.b);
+        putRange(mArr, na, mSrcs);
+        if (nb < st.b) vacate(mid, mArr, nb + 1, st.b);
+        moveLoopRange(mid, st.a, st.b, d);
+        if (ids.indexOf(mid) < 0) ids.push(mid);
+      });
     } else if (st.mode === 'r') {
       const b = st.b, nb = b + d;
-      stretchRight(st.id, b, nb);
+      /* v7.9.2：用「原始循环周期」取样。缩短只裁可见范围，不改 period；
+         再拉长时从周期开头继续重复，例如 1-9 缩到 5 再拉到 17 = 1-9 + 1-8。 */
+      const parentPeriod = loopPeriodOf(st.id, st.a, st.b);
+      stretchRight(st.id, st.a, b, nb, parentPeriod);
       /* 配饰跟着一起伸缩：只有「原来和主体同一端」的那些才跟，免得把别人拉长 */
       boundIdsOf(st.id).forEach((bid) => {
         const sp = computeSpans((tracksMap()[bid] || {}).frames || []).filter(x => x.b === b && x.a <= st.a);
         if (!sp.length) return;
-        stretchRight(bid, b, nb);
-        ids.push(bid);
+        const own = sp[sp.length - 1];
+        const period = loopPeriodOf(bid, own.a, own.b) || parentPeriod;
+        stretchRight(bid, own.a, b, nb, period);
+        if (ids.indexOf(bid) < 0) ids.push(bid);
+      });
+      /* 组成员无论原本占组内的哪一段，右端都跟到组的新右端 */
+      memberIds.forEach((mid) => {
+        const spans = computeSpans((tracksMap()[mid] || {}).frames || [])
+          .filter(x => x.a < st.b && x.b >= st.a);
+        if (!spans.length) return;
+        const sp = spans[spans.length - 1];
+        const period = loopPeriodOf(mid, st.a, st.b) || loopPeriodOf(mid, sp.a, sp.b);
+        stretchRight(mid, st.a, sp.b, nb, period);
+        if (ids.indexOf(mid) < 0) ids.push(mid);
       });
     } else {
       const a = st.a, na = a + d;
-      stretchLeft(st.id, a, na);
+      const parentPeriod = loopPeriodOf(st.id, st.a, st.b);
+      stretchLeft(st.id, a, st.b, na, parentPeriod);
       boundIdsOf(st.id).forEach((bid) => {
         const sp = computeSpans((tracksMap()[bid] || {}).frames || []).filter(x => x.a === a && x.b >= st.b);
         if (!sp.length) return;
-        stretchLeft(bid, a, na);
-        ids.push(bid);
+        const own = sp[0];
+        const period = loopPeriodOf(bid, own.a, own.b) || parentPeriod;
+        stretchLeft(bid, own.a, own.b, na, period);
+        if (ids.indexOf(bid) < 0) ids.push(bid);
+      });
+      /* 组成员无论原本占组内的哪一段，左端都跟到组的新左端 */
+      memberIds.forEach((mid) => {
+        const spans = computeSpans((tracksMap()[mid] || {}).frames || [])
+          .filter(x => x.a < st.b && x.b >= st.a);
+        if (!spans.length) return;
+        const sp = spans[0];
+        const period = loopPeriodOf(mid, st.a, st.b) || loopPeriodOf(mid, sp.a, sp.b);
+        stretchLeft(mid, st.a, sp.b, na, period);
+        if (ids.indexOf(mid) < 0) ids.push(mid);
       });
     }
     commit(ids, T('track.dragLabel', '调整轨道'));
@@ -739,6 +971,7 @@
       vacate(c.id, arr, c.a, c.b);
       putRange(arr, na, srcs);
       if (nb < c.b) vacate(c.id, arr, nb + 1, c.b);
+      moveLoopRange(c.id, c.a, c.b, d);
       if (ids.indexOf(c.id) < 0) ids.push(c.id);
     });
     commit(ids, T('track.moveClipLabel', '整体移动长条'));
@@ -962,6 +1195,40 @@
     return null;
   }
 
+  /* v7.9.0：给选中的 clip / 编组段开关循环填充。
+     组整体优先：组外选中编组段时开关组循环，内部成员按同一组周期重复；
+     进组后不单独给成员开循环，避免组循环与成员循环叠加。 */
+  function toggleClipLoop() {
+    const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+    if (G && G.getEditingGroupId()) {
+      api.toast(T('track.loopInGroup', '编组循环请在组外选中编组段设置'));
+      return;
+    }
+    const clip = selClip || (selClips.length ? selClips[0] : null);
+    if (!clip) return needClip();
+    const on = !isLoopClip(clip.id, clip.a, clip.b);
+    const label = on ? T('track.loopEnable', '开启段落循环') : T('track.loopDisable', '关闭段落循环');
+    const ids = [clip.id];
+    withTx(label, () => {
+      setLoopAt(clip.id, clip.a, clip.b, on);
+      /* 组载体：成员轨按组周期一起标记；这样拖动组两端时它们会按同一周期重复 */
+      groupMemberIdsOf(clip.id).forEach((mid) => {
+        setLoopAt(mid, clip.a, clip.b, on);
+        if (ids.indexOf(mid) < 0) ids.push(mid);
+      });
+      /* 普通元件的绑定配饰：按各自与主体重叠的段标记，主体循环时一起重复 */
+      boundIdsOf(clip.id).forEach((bid) => {
+        const spans = computeSpans((tracksMap()[bid] || {}).frames || [])
+          .filter(x => x.b >= clip.a && x.a <= clip.b);
+        spans.forEach((sp) => setLoopAt(bid, sp.a, sp.b, on));
+        if (spans.length && ids.indexOf(bid) < 0) ids.push(bid);
+      });
+      commit(ids, label);
+    });
+    render();
+    api.toast(on ? T('track.loopOn', '已开启循环：拉长时会重复原段内容') : T('track.loopOff', '已关闭循环：拉长复制边缘帧'));
+  }
+
   /* 分割：在播放头把当前段切成左右两段（剪映式），两边都还在，只是各自成段 */
   function split() {
     const clip = selClip;
@@ -979,6 +1246,7 @@
     setCut(src, true);
     ensureLen(arr, Math.max(clip.b, i) + 1);
     arr[i] = src;
+    /* v7.9.2：分割不裁循环周期；两半只要仍落在原周期内就都按原周期继续循环 */
     commit(clip.id, T('track.splitLabel', '分割'));
     setClipSel([{ id: clip.id, a: i, b: clip.b }]);   /* 分割后选中右半段 */
     render();
@@ -990,6 +1258,20 @@
     const list = selClips.slice();
     if (!list.length && selClip) list.push(selClip);
     if (!list.length) return needClip();
+    /* v7.9.0：删到编组载体 = 删除整组（成员轨一起删），不能只清载体留下成员残留 */
+    const groupIds = [];
+    list.forEach((c) => {
+      if (isGroupCarrierTrack(c.id) && groupIds.indexOf(String(c.id)) < 0) groupIds.push(String(c.id));
+    });
+    if (groupIds.length) {
+      let done = 0;
+      groupIds.forEach((gid) => { if (api && api.deleteGroup && api.deleteGroup(gid)) done++; });
+      clearClipSel();
+      lastPickedId = null;
+      render();
+      api.toast(T('track.groupDelDone', '已删除编组及其内部元件').replace('%n', done));
+      return;
+    }
     const ids = [];
     const n = list.length;
     withTx(T('track.delLabel', '删除这一段的帧'), () => {
@@ -999,6 +1281,7 @@
         if (!t) return;
         ensureLen(t.frames, Math.max(totalFrames(), t.frames.length));
         vacate(clip.id, t.frames, clip.a, clip.b);
+        clearLoopsIn(clip.id, clip.a, clip.b);
         if (ids.indexOf(clip.id) < 0) ids.push(clip.id);
       });
       if (ids.length) commit(ids, T('track.delLabel', '删除这一段的帧'));
@@ -1149,10 +1432,20 @@
   let press = null;   /* 待判定的长按：{ sx, sy, timer, tap } */
   let pan = null;     /* 长按没等到就划走了 → 平移轨道 */
 
-  /* v7.8.1：轨道区双指捏合缩放（仅轨道模式），与单指拖拽互斥 */
+  /* v7.8.1：轨道区双指捏合缩放（仅轨道模式），与单指拖拽互斥。
+     v7.9.2：手机端作用范围从顶部刻度尺扩大到整个下方面板 #trackStrip。 */
   const pinchPointers = new Map();
   let pinching = false;
   let pinch0 = null;
+
+  function inTrackPanel(target) {
+    return !!(target && target.closest && target.closest('#trackStrip'));
+  }
+  function clearDragVisual(st) {
+    if (!st) return;
+    if (st.els) st.els.forEach(x => x.el && x.el.classList.remove('dragging'));
+    if (st.el) st.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m');
+  }
 
   function clearPress() {
     if (!press) return;
@@ -1222,11 +1515,13 @@
     cv.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-      /* v7.8.1：双指落下即进入缩放 —— 仅限刻度尺行（蓝色范围）；长条区域留给上下滚动 */
-      if (e.pointerType !== 'mouse' && inRuler(e.target)) {
+      /* v7.9.2：手机端双指缩放覆盖整个下方面板（长条 / 空白 / 刻度尺都行）。
+         PC 滚轮仍只在蓝色刻度尺行生效，两套手势互不干扰。 */
+      if (e.pointerType !== 'mouse' && inTrackPanel(e.target)) {
         pinchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
         if (pinchPointers.size >= 2) {
           clearPress();
+          clearDragVisual(drag);
           drag = null; pan = null;
           pinching = true;
           const pts = Array.from(pinchPointers.values());
@@ -1239,6 +1534,7 @@
           return;
         }
       }
+      if (pinching) { e.preventDefault(); return; }
 
       /* 眼睛是「按一下」的动作，交给 click 处理；捏合中不启动任何拖拽 */
       if (e.target.closest('[data-eye]') || pinching) return;
@@ -1388,16 +1684,32 @@
          一加延时反而把滚动抢走了。 */
       const rowEl = e.target.closest('.ts-row[data-id]');
       const lr = laneRef().getBoundingClientRect();
-      paintMarquee();   /* v7.4.6：每次起手重新按当前主题上色 */
-      drag = {
-        kind: 'marquee',
-        i: Math.floor((e.clientX - lr.left) / colW),
-        rowId: rowEl ? rowEl.dataset.id : null,
-        sx: e.clientX,
-        sy: e.clientY,
-        rect: null,
-        moved: false
-      };
+      const startFrame = Math.floor((e.clientX - lr.left) / colW);
+      if (e.pointerType !== 'mouse') {
+        /* v7.9.2：手机空白区左右拖 = 逐帧读取画面；上下拖 = 滚动轨道。
+           PC 仍保留框选。 */
+        drag = {
+          kind: 'blankTouch',
+          i: startFrame,
+          startFrame: startFrame,
+          rowId: rowEl ? rowEl.dataset.id : null,
+          sx: e.clientX,
+          sy: e.clientY,
+          mode: null,
+          moved: false
+        };
+      } else {
+        paintMarquee();   /* v7.4.6：每次起手重新按当前主题上色 */
+        drag = {
+          kind: 'marquee',
+          i: startFrame,
+          rowId: rowEl ? rowEl.dataset.id : null,
+          sx: e.clientX,
+          sy: e.clientY,
+          rect: null,
+          moved: false
+        };
+      }
       try { cv.setPointerCapture(e.pointerId); } catch (_) {}
       return;
     });
@@ -1432,6 +1744,25 @@
         e.preventDefault();
         return;
       }
+      /* v7.9.2：手机空白区左右拖 = 读取画面，上下拖 = 滚动轨道 */
+      if (drag && drag.kind === 'blankTouch') {
+        const vx = e.clientX - drag.sx, vy = e.clientY - drag.sy;
+        if (!drag.mode && (Math.abs(vx) > PAN_SLOP || Math.abs(vy) > PAN_SLOP)) {
+          drag.mode = Math.abs(vx) > Math.abs(vy) ? 'scrub' : 'pan';
+        }
+        if (drag.mode === 'scrub') {
+          const i = Math.max(0, Math.min(totalFrames() - 1, drag.startFrame + Math.round(vx / colW)));
+          drag.moved = true;
+          if (i !== drag.last) { drag.last = i; api.goToFrame(i); }
+        } else if (drag.mode === 'pan') {
+          const sc = $('tsScroll');
+          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop };
+          drag = null;
+        }
+        e.preventDefault();
+        return;
+      }
+
       /* 长按还没到就划走了：不是拖长条，是想滚轨道 —— 改成平移 */
       if (press && !drag) {
         const dx = e.clientX - press.sx, dy = e.clientY - press.sy;
@@ -1594,6 +1925,11 @@
 
       /* 刷时间线：一路上已经跳过去了，松手什么都不用做，也不进历史 */
       if (st.kind === 'scrub') return;
+      if (st.kind === 'blankTouch') {
+        if (!st.moved && !isCancel) tapFrameAt(st.i, st.rowId);
+        else if (st.moved) render();
+        return;
+      }
 
       if (st.kind === 'marquee') {
         if (!st.moved) {
@@ -1652,13 +1988,23 @@
           });
       } else {
         withTx(T('track.dragLabel', '调整轨道'), () => applyDrag(st, st.d));
+        /* v7.9.0：单条拖完也把选区更新到新范围，循环按钮才能继续保持正确激活态 */
+        setClipSel([st.mode === 'm'
+          ? { id: st.id, a: st.a + st.d, b: st.b + st.d }
+          : (st.mode === 'r'
+            ? { id: st.id, a: st.a, b: st.b + st.d }
+            : { id: st.id, a: st.a + st.d, b: st.b })]);
       }
       render();
     };
     /* v7.8.1：抬手释放捏合指针，双指结束后不残留单指拖拽状态 */
     const releasePinch = (e) => {
       pinchPointers.delete(e.pointerId);
-      if (pinchPointers.size < 2) { pinching = false; pinch0 = null; }
+      if (pinching && pinchPointers.size < 2) {
+        pinching = false; pinch0 = null;
+        drag = null; pan = null;
+        render();
+      }
     };
     cv.addEventListener('pointerup', releasePinch);
     cv.addEventListener('pointercancel', releasePinch);
@@ -1778,6 +2124,31 @@
     tl.dataset.tsTools = '1';
     tl.addEventListener('click', (e) => {
       if (!enabled) return;
+      /* v7.9.0：轨道上的进入编组按钮 —— 只在选中组载体 / 已在组内时可见 */
+      if (e.target.closest('#btnTrackEnterGroup')) {
+        e.stopPropagation();
+        e.preventDefault();
+        const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+        if (!G) return;
+        const editing = G.getEditingGroupId();
+        if (editing) G.exitGroup();
+        else {
+          const selectedGid = api && api.selectedGroupId ? api.selectedGroupId() : null;
+          const id = (selClip && selClip.id) || lastPickedId || selectedGid;
+          let gid = selectedGid || null;
+          const t = id ? tracksMap()[id] : null;
+          if (!gid && t && t.frames) {
+            for (const d of t.frames) {
+              if (d && d.type === 'group') { gid = String(d.gid || d.id); break; }
+            }
+          }
+          if (gid) G.enterGroup(gid);
+          else api.toast(T('track.needPick', '先在轨道上点一条长条，选中要操作的段'));
+        }
+        clearClipSel();
+        render();
+        return;
+      }
       if (e.target.closest('#btnKeyframe')) {
         e.stopPropagation();
         e.preventDefault();
@@ -1794,6 +2165,12 @@
         e.stopPropagation();
         e.preventDefault();
         pasteKeys();
+        return;
+      }
+      if (e.target.closest('#btnTrackLoop')) {
+        e.stopPropagation();
+        e.preventDefault();
+        toggleClipLoop();
       }
     }, true);
   }
@@ -1883,6 +2260,32 @@
       const delBtn = $('btnTrackDel');
       if (delBtn) delBtn.addEventListener('click', deleteClip);
 
+      /* v7.9.0 编组：把框选的多条轨道编组 / 解散选中的组（与元件列表按钮效果一致）。
+         轨道本身只产出「要编组的轨 id 列表」，真正的数据写入由 SKFE.systems.group 完成。 */
+      const grpBtn = $('btnTrackGroup');
+      if (grpBtn) grpBtn.addEventListener('click', () => {
+        const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+        if (!G) return;
+        const ids = (selClips.length ? selClips : (keyClip ? keyClip.items : [])).map(c => String(c.id));
+        if (ids.length < 2) { if (root.alert) root.alert('请先框选多条轨道（Ctrl/⌘ 点选或框选）再编组'); return; }
+        G.createGroup(ids);
+        clearClipSel();
+      });
+      const ungrpBtn = $('btnTrackUngroup');
+      if (ungrpBtn) ungrpBtn.addEventListener('click', () => {
+        const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
+        if (!G) return;
+        const ids = (selClips.length ? selClips : (keyClip ? keyClip.items : [])).map(c => String(c.id));
+        let gid = null;
+        for (const id of ids) {
+          const fr = api.getTrackFrame(id, api.currentFrame());
+          if (fr && G.isGroup(fr)) { gid = String(fr.gid || fr.id); break; }
+        }
+        if (!gid) { if (root.alert) root.alert('请先选中一个组轨道'); return; }
+        G.ungroup(gid);
+        clearClipSel();
+      });
+
       /* 恢复上次的模式；手机屏幕矮，默认不给开 */
       let restore = false;
       try { restore = localStorage.getItem(MODE_KEY) === '1'; } catch (_) {}
@@ -1915,6 +2318,21 @@
     copyKeys,
     pasteKeys,
     deleteSelKeys,
+    /* v7.9.0：编组长条伸缩的无头回归入口（内部 applyDrag 保持私有） */
+    debugApplyDrag(st, d) {
+      applyDrag(st, d);
+      setClipSel([st.mode === 'm'
+        ? { id: st.id, a: st.a + d, b: st.b + d }
+        : (st.mode === 'r'
+          ? { id: st.id, a: st.a, b: st.b + d }
+          : { id: st.id, a: st.a + d, b: st.b })]);
+      if (enabled) render();
+    },
+    /* v7.9.0：段落循环的无头回归入口 */
+    toggleClipLoop,
+    isLoopClip,
+    debugSetClipSel(list) { setClipSel(list || []); if (enabled) render(); },
+    debugLoops(id) { return loopsOf(id).map(l => ({ a: l.a, b: l.b })); },
     /* 长条选择（框选 / 多选）的调试入口 */
     selectedClips() { return selClips.slice(); },
     clearClipSel() { clearClipSel(); if (enabled) render(); },

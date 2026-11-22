@@ -345,7 +345,10 @@ function initCameraUI() {
     const cam = makeCamera(sp.x, sp.y);
     D.generateName(cam);
     D.addObjectToFrames(cam);
-    D.syncMainLengthFromTracks();
+    /* v7.8.3：摄像机默认铺满总轨道长度（镜头贯穿全片）。
+       之后要分段就用轨道上的「添加关键帧」把某几帧固定，其余帧靠整体调节/补间。 */
+    if (typeof D.fillCameraToFullLength === 'function') D.fillCameraToFullLength(cam);
+    else D.syncMainLengthFromTracks();
     if (D.isCameraTrackId(D.AppState.activeTrackId) || !D.isSubTrackMode()) {
       D.AppState.activeTrackId = String(cam.id);
     }

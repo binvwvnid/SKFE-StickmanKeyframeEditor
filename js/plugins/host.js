@@ -246,6 +246,7 @@
       files: files,
       readFile: readFile,
       assetURL: assetURL,
+      api: SKFE.api || null,
       onDisable: function (fn) {
         (disableHandlers[manifest.id] = disableHandlers[manifest.id] || []).push(fn);
       }
@@ -253,9 +254,9 @@
     SKFE.plugin = SKFE.plugin || {};
     SKFE.plugin.current = runtime;
 
-    /* 插件能力：window.SKFE.__skfe（内部接口）+ SKFE.core/features/systems + DOM + 网络，全部可达 */
-    var runner = new Function('SKFE', 'plugin', '"use strict";\n' + code);
-    runner(SKFE, runtime);
+    /* 插件能力：第三参数 api 是 v2 全开放入口；旧插件只用前两个参数，完全兼容。 */
+    var runner = new Function('SKFE', 'plugin', 'api', '"use strict";\n' + code);
+    runner(SKFE, runtime, SKFE.api || null);
   }
 
   function runRecord(record) {
@@ -364,7 +365,35 @@
     });
   }
 
+  /* v7.8.4c：安卓原生 WebView 不处理 <a download>。
+     插件作者工具包这类静态 ZIP 在原生壳里必须先 fetch 成 Blob，
+     再交给 platform.save() 写文件 + 系统分享。网页 / 桌面仍走原链接。 */
+  function bindKitDownload() {
+    var link = document.querySelector('.plugin-kit-download[href]');
+    if (!link) return;
+    link.addEventListener('click', function (e) {
+      var P = SKFE.platform;
+      if (!P || typeof P.isNative !== 'function' || !P.isNative()) return;
+      e.preventDefault();
+      var href = link.getAttribute('href');
+      var filename = link.getAttribute('download') ||
+        decodeURIComponent((href || '').split('/').pop() || 'SKFE-plugin-kit.zip');
+      var oldText = link.textContent;
+      link.textContent = T('plugin.kitDownloading');
+      Promise.resolve(P.saveURL ? P.saveURL(href, filename) : P.save(href, filename))
+        .then(function (ok) {
+          link.textContent = oldText;
+          if (ok === false) alert(T('plugin.kitDownloadFail', { msg: filename }));
+        })
+        .catch(function (err) {
+          link.textContent = oldText;
+          alert(T('plugin.kitDownloadFail', { msg: (err && err.message) || err }));
+        });
+    });
+  }
+
   function bindUI() {
+    bindKitDownload();
     var fileInput = document.getElementById('pluginFileInput');
     var importBtn = document.getElementById('btnImportPlugin');
     if (importBtn && fileInput) {
@@ -438,7 +467,8 @@
   SKFE.plugin = SKFE.plugin || {};
   SKFE.plugin.importFile = importFile;
   SKFE.plugin.list = dbGetAll;
-  SKFE.plugin.version = '1.0.0';
+  SKFE.plugin.api = SKFE.api || null;
+  SKFE.plugin.version = '2.0.0';
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);

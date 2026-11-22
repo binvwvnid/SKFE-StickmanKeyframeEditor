@@ -1047,6 +1047,21 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .strip-lock-btn:hover { background: var(--btn-hover); }
   .strip-lock-btn.danger { color: #ef4444; border-color: rgba(239, 68, 68, .45); background: rgba(239, 68, 68, .08); }
   .strip-lock-btn.danger:hover { background: rgba(239, 68, 68, .16); }
+
+  /* v7.9.0 编组工具按钮（底部栏「元件」展开信息栏）+ 多选高亮 */
+  .lp-group-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0 0 6px; }
+  .lp-group-tools button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    min-height: 26px; padding: 4px 8px; border-radius: var(--radius-chip);
+    border: 1px solid var(--border-color); background: var(--btn-bg);
+    color: var(--text-main); font-size: 11px; line-height: 1; cursor: pointer;
+  }
+  .lp-group-tools button:hover { background: var(--btn-hover); }
+  .lp-group-tools button:disabled { opacity: .4; cursor: not-allowed; }
+  .lp-group-tools button.active { background: var(--color-primary-soft-hover); border-color: var(--color-primary); color: var(--color-primary); }
+  .lp-group-tools button i { width: 14px; height: 14px; }
+  .layer-btn.multi-selected { box-shadow: 0 0 0 2px var(--color-primary); }
+  .lp-item.multi-selected { box-shadow: 0 0 0 2px var(--color-primary); border-color: var(--color-primary); }
   .layer-list { /* 图层列表容器 */
     display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 6px; flex: 1; /* 弹性布局，禁止换行，横向滚动，间距 6px，占满剩余空间 */
     margin-top: 0; padding-bottom: 4px; scrollbar-width: none; /* 外边距，底部内边距，Firefox 隐藏滚动条 */
@@ -1497,6 +1512,65 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     margin-top: 8px; font-size: 11.5px; /* 上边距，字号 */
     color: var(--text-sub); line-height: 1.8; /* 次要文字色，行高 */
   } /* 帮助内容基础样式结束 */
+
+  .inline-help-link { /* 全局属性说明右侧的简易帮助入口 */
+    display: inline-flex; align-items: center; gap: 3px; /* 图标与文字同行 */
+    font-size: 11px; color: var(--color-primary); /* 字号与主题色 */
+    text-decoration: underline; cursor: pointer; user-select: none; /* 链接手感 */
+    padding: 0 2px; /* 与相邻“说明”保持间距 */
+  } /* 入口基础样式结束 */
+  .inline-help-link i { width: 12px; height: 12px; } /* 入口图标尺寸 */
+
+  .help-float { /* 使用说明浮窗：屏幕正中、占视口 70%，不透明白底，其余沿用上一版样式 */
+    position: fixed; z-index: 80; /* 压在时间轴与控制面板之上 */
+    left: 15vw; top: 15vh; /* 屏幕正中：宽高各 70% → 四周各留 15% */
+    width: 70vw; height: 70vh; /* 占据屏幕 70% */
+    max-width: 70vw; max-height: 70vh; overflow: auto; /* 内容过长时内部滚动 */
+    background: #ffffff; color: var(--text-main); /* 不透明白底 */
+    border: 1px solid var(--border-color); border-radius: 12px; /* 与面板一致的圆角边框 */
+    box-shadow: var(--shadow-pop); /* 与弹窗一致的阴影 */
+  } /* 浮窗基础样式结束 */
+  .help-float[hidden] { display: none; } /* 隐藏时不占空间 */
+  .help-float-head { /* 浮窗标题栏 */
+    position: sticky; top: 0; z-index: 1; /* 滚动时标题保持可见 */
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; /* 两端布局 */
+    padding: 10px 12px; background: #ffffff; /* 内边距与不透明白底 */
+    border-bottom: 1px solid var(--border-color); /* 与正文分隔 */
+  } /* 标题栏基础样式结束 */
+  .help-float-head strong { font-size: 13px; color: var(--text-main); } /* 标题文字 */
+  .help-float-close { /* 右上角关闭按钮 */
+    width: 24px; height: 24px; padding: 0; /* 固定尺寸 */
+    display: inline-flex; align-items: center; justify-content: center; /* 图标居中 */
+    border: none; border-radius: 6px; /* 无边框，小圆角 */
+    background: var(--btn-bg); color: var(--text-sub); /* 跟随按钮配色 */
+    cursor: pointer; /* 指针 */
+  } /* 关闭按钮基础样式结束 */
+  .help-float-close:hover { background: var(--btn-hover); color: var(--text-main); } /* 悬浮反馈 */
+  .help-float-body { /* README 渲染区 */
+    padding: 10px 12px 14px; /* 内边距 */
+    font-size: 11.5px; color: var(--text-sub); line-height: 1.75; /* 与属性面板说明一致 */
+  } /* 正文基础样式结束 */
+  .help-float-body h2 { margin: 12px 0 6px; font-size: 15px; color: var(--text-main); } /* README 一级标题 */
+  .help-float-body h3 { margin: 10px 0 4px; font-size: 14px; color: var(--text-main); } /* 一级小节 */
+  .help-float-body h4 { margin: 8px 0 4px; font-size: 12.5px; color: var(--color-primary); } /* 二级小节 */
+  .help-float-body ul, .help-float-body ol { margin: 4px 0 8px 18px; padding: 0; } /* 列表缩进 */
+  .help-float-body li { margin: 2px 0; } /* 列表项间距 */
+  .help-float-body code { background: var(--bg-input); border-radius: 4px; padding: 1px 4px; } /* 行内代码 */
+  .help-float-body pre { /* README 代码块 */
+    margin: 8px 0; padding: 8px 10px; /* 外边距与内边距 */
+    background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 8px; /* 浅底圆角边框 */
+    overflow: auto; /* 长代码横向滚动 */
+  } /* 代码块结束 */
+  .help-float-body pre code { background: transparent; padding: 0; } /* 代码块内去掉行内底色 */
+  .help-float-body table { width: 100%; margin: 8px 0; border-collapse: collapse; } /* README 表格 */
+  .help-float-body th, .help-float-body td { border: 1px solid var(--border-color); padding: 4px 6px; text-align: left; vertical-align: top; } /* 表格单元格 */
+  .help-float-body th { background: var(--bg-input); color: var(--text-main); } /* 表头 */
+  .help-float-body hr { border: none; border-top: 1px solid var(--border-color); margin: 10px 0; } /* 分隔线 */
+  .help-float-body a { color: var(--color-primary); } /* 链接配色 */
+  .help-float-body .skfe-help-quote { /* README 引用块 */
+    margin: 6px 0; padding: 6px 8px; /* 内边距 */
+    background: var(--bg-input); border-radius: 8px; /* 浅底圆角 */
+  } /* 引用块结束 */
 
   .color-enhance { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; } /* 颜色输入框增强包裹层：行内弹性布局，居中，间距 4px，垂直居中对齐 */
   .color-tool-btn { /* 颜色工具按钮（吸管、色板） */
@@ -2012,12 +2086,17 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #trackStrip { display: none; flex: 1 1 auto; min-height: 0; margin: 2px -10px -4px; --ts-gutter: 108px; }
   #trackStrip[hidden] { display: none !important; }
 
-  /* 轨道模式下控制栏只留「播放组 + 分割 / 删除 / 关键帧 / 插 N 帧 / 曲线」 */
-  #btnSplit, #btnTrackDel, #btnTrackKeyCopy, #btnTrackKeyPaste { display: none; }
+  /* 轨道模式下控制栏只留「播放组 + 分割 / 删除 / 关键帧 / 循环 / 插 N 帧 / 曲线」 */
+  #btnSplit, #btnTrackDel, #btnTrackKeyCopy, #btnTrackKeyPaste, #btnTrackLoop { display: none; }
+  /* v7.9.0：进入编组按钮由 JS 按「是否选中组载体 / 是否正在组内」控制显隐 */
+  #btnTrackEnterGroup { display: none; }
   #timeline.track-mode #btnSplit,
   #timeline.track-mode #btnTrackDel,
   #timeline.track-mode #btnTrackKeyCopy,
-  #timeline.track-mode #btnTrackKeyPaste { display: inline-flex; }
+  #timeline.track-mode #btnTrackKeyPaste,
+  #timeline.track-mode #btnTrackLoop { display: inline-flex; }
+  /* 循环开关：和底部栏的激活态一致，选中段开了循环就高亮 */
+  #btnTrackLoop.active { background: var(--color-primary); color: var(--color-primary-text); }
   #timeline.track-mode .timeline-controls > #btnAddFrame,
   #timeline.track-mode .timeline-controls > #btnDupFrame,
   #timeline.track-mode .timeline-controls > #btnDelFrame,
@@ -2035,7 +2114,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   }
   .ts-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
   .ts-scroll::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 999px; }
-  .ts-canvas { position: relative; }
+  .ts-canvas { position: relative; min-height: 100%; }
 
   .ts-row { display: flex; align-items: stretch; height: 32px; }
   .ts-ruler-row {
@@ -2099,6 +2178,9 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .ts-clip.dragging { cursor: grabbing; filter: brightness(1.12); z-index: 3; }
   .ts-clip.drag-l, .ts-clip.drag-r { cursor: ew-resize; }
   .ts-clip.sel { box-shadow: 0 0 0 2px var(--text-main) inset; }
+  /* v7.9.0：循环段在长条上留虚线内描边，⟳ 直接嵌在标签里 */
+  .ts-clip.loop { box-shadow: 0 0 0 2px rgba(255, 255, 255, .72) inset; }
+  .ts-clip.loop.sel { box-shadow: 0 0 0 2px var(--text-main) inset, 0 0 0 4px rgba(255, 255, 255, .36) inset; }
   /* 高级设置打开「帧缩略图」时，长条铺成一格一格的小图（像 AM 的胶片条） */
   .ts-clip.has-thumb {
     background-repeat: repeat-x;
@@ -2180,8 +2262,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     #trackStrip { --ts-gutter: 84px; }
     .ts-gutter { padding: 0 6px; }
     #btnTrackMode { padding: 4px 10px; font-size: 11px; }
-    /* 手机上控制栏本来就横向滚动，复制/粘贴只留图标，把位置让给播放组 */
-    #btnTrackKeyCopy span, #btnTrackKeyPaste span { display: none; }
+    /* 手机上控制栏横向滚动，复制/粘贴关键帧保留文字，便于和帧面板的「复制帧」区分 */
     #btnTrackKeyCopy, #btnTrackKeyPaste { padding: 4px 8px; }
   }
 

@@ -449,20 +449,6 @@
       return obj;
     }
 
-    if (obj.type === 'image') {
-      obj.x = lerp(o1.x, o2.x, prog('x'));
-      obj.y = lerp(o1.y, o2.y, prog('y'));
-      obj.scale = lerpScale(o1.scale, o2.scale, prog('scale'));
-      obj.alpha = lerp(o1.alpha == null ? 1 : o1.alpha, o2.alpha == null ? 1 : o2.alpha, tt);
-      obj.rot = lerp(o1.rot || 0, o2.rot || 0, prog('rot'));
-      obj.ax = lerp(o1.ax || 0, o2.ax || 0, tt);
-      obj.ay = lerp(o1.ay || 0, o2.ay || 0, tt);
-      if (o1.w !== undefined && o2.w !== undefined) obj.w = lerp(o1.w, o2.w, prog('width'));
-      if (o1.h !== undefined && o2.h !== undefined) obj.h = lerp(o1.h, o2.h, prog('height'));
-      interpDistort(obj, o1, o2, prog);
-      return obj;
-    }
-
     if (obj.type === 'shape' || obj.type === 'bubble') {
       obj.x = lerp(o1.x, o2.x, prog('x'));
       obj.y = lerp(o1.y, o2.y, prog('y'));

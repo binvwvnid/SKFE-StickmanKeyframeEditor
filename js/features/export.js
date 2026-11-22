@@ -559,6 +559,163 @@ SKFE.features.export = (function () {
     }
   }
 
+  /* ==================== v7.8.4：导出音轨 ====================
+     音频元件 / 视频元件都在轨道上按段落出场。这里先按真实帧时长把整段时间线
+     离线混成一条 PCM，再分别喂给 MediaRecorder 的音频轨或 WebCodecs 的 AAC 编码器。
+     没有音频事件时全部跳过，导出行为与旧版完全一致。 */
+  const EXPORT_AUDIO_RATE = 48000;
+  const exportAudioDecodeCache = new Map();
+
+  function audioCacheKey(url) {
+    return url.length + '|' + url.slice(0, 80) + '|' + url.slice(-40);
+  }
+
+  async function decodeExportAudio(url) {
+    if (!url) return null;
+    const key = audioCacheKey(url);
+    if (exportAudioDecodeCache.has(key)) return exportAudioDecodeCache.get(key);
+    const task = (async () => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const arr = await res.arrayBuffer();
+        const Ctor = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+        const probe = new Ctor(2, 1, EXPORT_AUDIO_RATE);
+        const buf = await probe.decodeAudioData(arr);
+        return buf || null;
+      } catch (_) {
+        /* 视频容器里的音轨在部分浏览器上 decodeAudioData 不支持 —— 跳过，不影响画面导出 */
+        return null;
+      }
+    })();
+    exportAudioDecodeCache.set(key, task);
+    return task;
+  }
+
+  async function renderExportAudio(n, tid) {
+    let events = [];
+    try { events = D.collectAudioTimeline ? (D.collectAudioTimeline(n, tid) || []) : []; }
+    catch (_) { return null; }
+    if (!events.length) return null;
+    const Ctor = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!Ctor) return null;
+    let totalMs = 0;
+    for (let i = 0; i < n; i++) totalMs += (D.AppState.frames[i] && D.AppState.frames[i].duration) || 83;
+    const totalSec = Math.max(totalMs / 1000, events.reduce((m, e) => Math.max(m, e.startSec + e.durationSec), 0));
+    if (!(totalSec > 0)) return null;
+    const offline = new Ctor(2, Math.max(1, Math.ceil(totalSec * EXPORT_AUDIO_RATE)), EXPORT_AUDIO_RATE);
+    let mixed = false;
+    for (const ev of events) {
+      const buf = await decodeExportAudio(ev.url);
+      if (!buf || !buf.duration) continue;
+      const off = Math.max(0, Math.min(buf.duration - 0.001, ev.offsetSec || 0));
+      const dur = Math.min(ev.durationSec || 0, buf.duration - off);
+      if (!(dur > 0.001)) continue;
+      const src = offline.createBufferSource();
+      const gain = offline.createGain();
+      src.buffer = buf;
+      gain.gain.value = typeof ev.volume === 'number' ? Math.max(0, Math.min(1, ev.volume)) : 1;
+      src.connect(gain).connect(offline.destination);
+      src.start(Math.max(0, ev.startSec || 0), off, dur);
+      mixed = true;
+    }
+    if (!mixed) return null;
+    return await offline.startRendering();
+  }
+
+  async function attachExportAudioToStream(stream, buffer) {
+    if (!buffer) return null;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx || !stream) return null;
+    let ctx = null;
+    try {
+      ctx = new Ctx();
+      const dest = ctx.createMediaStreamDestination();
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(dest);
+      try { await ctx.resume(); } catch (_) {}
+      src.start(0);
+      stream.getAudioTracks().forEach(t => stream.removeTrack(t));
+      const audioTrack = dest.stream.getAudioTracks()[0] || null;
+      if (audioTrack) stream.addTrack(audioTrack);
+      return { ctx, src, audioTrack };
+    } catch (_) {
+      try { if (ctx) ctx.close(); } catch (_) {}
+      return null;
+    }
+  }
+
+  function stopExportAudio(audio) {
+    if (!audio) return;
+    try { if (audio.src) audio.src.stop(); } catch (_) {}
+    try { if (audio.audioTrack) audio.audioTrack.stop(); } catch (_) {}
+    try { if (audio.ctx) audio.ctx.close(); } catch (_) {}
+  }
+
+  /* WebCodecs MP4：把 PCM 切成 1024 帧一块，编码成 AAC-LC 后交给 mp4-muxer */
+  async function encodeAudioForMuxer(buffer, addChunk) {
+    const AE = window.AudioEncoder;
+    const AD = window.AudioData;
+    if (!AE || !AD || !buffer) return false;
+    const cfg = {
+      codec: 'mp4a.40.2',
+      sampleRate: buffer.sampleRate,
+      numberOfChannels: buffer.numberOfChannels,
+      bitrate: 128000
+    };
+    let probe = null;
+    try {
+      probe = new AE({ output() {}, error() {} });
+      probe.configure(cfg);
+    } catch (_) {
+      try { if (probe) probe.close(); } catch (_) {}
+      return false;
+    }
+    try { probe.close(); } catch (_) {}
+
+    let encError = null;
+    const encoder = new AE({
+      output: (chunk, meta) => { try { addChunk(chunk, meta); } catch (e) { encError = e; } },
+      error: (e) => { encError = e; }
+    });
+    try { encoder.configure(cfg); }
+    catch (_) { try { encoder.close(); } catch (_) {} return false; }
+
+    const chans = [];
+    for (let c = 0; c < buffer.numberOfChannels; c++) chans.push(buffer.getChannelData(c));
+    const block = 1024;
+    try {
+      for (let off = 0; off < buffer.length; off += block) {
+        if (encError) throw encError;
+        const count = Math.min(block, buffer.length - off);
+        const data = new Float32Array(count * buffer.numberOfChannels);
+        for (let c = 0; c < buffer.numberOfChannels; c++) {
+          data.set(chans[c].subarray(off, off + count), c * count);
+        }
+        const ad = new AD({
+          format: 'f32-planar',
+          sampleRate: buffer.sampleRate,
+          numberOfFrames: count,
+          numberOfChannels: buffer.numberOfChannels,
+          timestamp: Math.round(off / buffer.sampleRate * 1e6),
+          data
+        });
+        encoder.encode(ad);
+        ad.close();
+        if (encoder.encodeQueueSize > 16) await new Promise(r => setTimeout(r, 0));
+      }
+      await encoder.flush();
+      if (encError) throw encError;
+      return true;
+    } catch (e) {
+      try { console.warn('[MP4] 音轨编码失败，改为只导出画面：' + (e && e.message ? e.message : e)); } catch (_) {}
+      return false;
+    } finally {
+      try { encoder.close(); } catch (_) {}
+    }
+  }
+
   /* ==================== WebM 视频 ==================== */
   async function exportVideo() {
     if (D.AppState.frames.length === 0) return;
@@ -572,6 +729,10 @@ SKFE.features.export = (function () {
     const recCtx = recCanvas.getContext('2d', { alpha: true });
     const stream = recCanvas.captureStream(0);
     const track = stream.getVideoTracks()[0];
+    /* v7.8.4：先离线混音，再把音频轨塞进同一个 MediaStream，WebM 才会带声音 */
+    const vN = contentFrameCount(tid);
+    const audioBuffer = await renderExportAudio(vN, tid);
+    const exportAudio = await attachExportAudioToStream(stream, audioBuffer);
     let mimeType = 'video/webm';
     if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) mimeType = 'video/webm;codecs=vp9';
     else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) mimeType = 'video/webm;codecs=vp8';
@@ -583,7 +744,6 @@ SKFE.features.export = (function () {
     const savedCtx = D.getCtx();
     D.setCtx(recCtx);
     /* v7.4.6：只录到「最后一个有内容的帧」，时间轴尾巴上的空白帧不要 */
-    const vN = contentFrameCount(tid);
     try {
       for (let i = 0; i < vN; i++) {
         await D.prepareVideoClipsForFrame(i); /* v7.7.1：视频元件定格到该帧 */
@@ -615,6 +775,7 @@ SKFE.features.export = (function () {
     } finally {
       D.setCtx(savedCtx);
       recorder.stop();
+      stopExportAudio(exportAudio);
       D.EventBus.emit('need:render');
     }
     const blob = await blobPromise;
@@ -868,6 +1029,9 @@ SKFE.features.export = (function () {
     const mux = window.Mp4Muxer;
     const n = contentFrameCount(tid);
     if (!n) throw new Error('没有可导出的帧');
+    /* v7.8.4：WebCodecs 路先把整段音轨混好；设备没有 AAC 编码器就只导出画面 */
+    const audioBuffer = await renderExportAudio(n, tid);
+    const hasAudioTrack = !!(audioBuffer && window.AudioEncoder && window.AudioData);
     const tried = Array.isArray(triedKeys) ? triedKeys : [];
     /* 每次回退都从用户最初选的尺寸重新算阶梯，避免越退越偏 */
     const reqW = plan.outW, reqH = plan.outH;
@@ -907,12 +1071,20 @@ SKFE.features.export = (function () {
       const recCanvas = document.createElement('canvas');
       recCanvas.width = outW; recCanvas.height = outH;
       const recCtx = recCanvas.getContext('2d', { alpha: false });
-      muxer = new mux.Muxer({
+      const muxOptions = {
         target: new mux.ArrayBufferTarget(),
         video: { codec: 'avc', width: outW, height: outH, frameRate: fps },
         fastStart: 'in-memory',
         firstTimestampBehavior: 'offset'
-      });
+      };
+      if (hasAudioTrack) {
+        muxOptions.audio = {
+          codec: 'aac',
+          numberOfChannels: audioBuffer.numberOfChannels,
+          sampleRate: audioBuffer.sampleRate
+        };
+      }
+      muxer = new mux.Muxer(muxOptions);
 
       /* v7.6.2：构造 + configure 一起重试，等安卓异步释放硬件编码器。
          v7.6.4：这里再失败不再直接报错，而是交给外层换下一个候选配置。 */
@@ -959,6 +1131,9 @@ SKFE.features.export = (function () {
       }
       await encoder.flush();
       if (encError) throw encError;
+      if (hasAudioTrack) {
+        await encodeAudioForMuxer(audioBuffer, (chunk, meta) => muxer.addAudioChunk(chunk, meta));
+      }
       muxer.finalize();
       buf = muxer.target.buffer;
       if (!buf || !buf.byteLength) throw new Error('没有生成视频数据');
@@ -1005,6 +1180,9 @@ SKFE.features.export = (function () {
     const recCtx = recCanvas.getContext('2d', { alpha: false });
     const stream = recCanvas.captureStream(30);
     const track = stream.getVideoTracks()[0];
+    /* v7.8.4：桌面录制路也把离线混好的音频挂到同一个 stream */
+    const audioBuffer = await renderExportAudio(n, tid);
+    const exportAudio = await attachExportAudioToStream(stream, audioBuffer);
     let recorder;
     try { recorder = new MediaRecorder(stream, { mimeType: mimeType }); }
     catch (e) { throw new Error('创建 MP4 录制器失败：' + e.message); }
@@ -1028,6 +1206,7 @@ SKFE.features.export = (function () {
     } finally {
       D.setCtx(savedCtx);
       recorder.stop();
+      stopExportAudio(exportAudio);
       if (btn) { btn.textContent = oldText; btn.disabled = false; }
       D.EventBus.emit('need:render');
     }
@@ -1064,11 +1243,16 @@ SKFE.features.export = (function () {
       return;
     }
     const plan = mp4Setup(tid);
-    /* 选路（v7.4.6）：
+    /* 选路（v7.4.6 + v7.8.4）：
        移动端 / 根本没有 mp4 录制能力 → 先走 WebCodecs 编码；
        桌面且能录 mp4 → 先走 MediaRecorder（老路径，行为不变）。
-       两条路都留着，前一条抛错就自动换另一条再试一次，最后才报错。 */
-    const preferEncoder = encOk && (!mimeType || looksMobile());
+       有音轨但设备没有 AAC 编码器时，优先用 MediaRecorder 录，避免导出一条静音视频。 */
+    let hasAudioEvents = false;
+    try {
+      hasAudioEvents = !!(D.collectAudioTimeline && D.collectAudioTimeline(contentFrameCount(tid), tid).length);
+    } catch (_) {}
+    const canEncodeAudio = !!(window.AudioEncoder && window.AudioData);
+    const preferEncoder = encOk && (!mimeType || looksMobile()) && !(hasAudioEvents && !canEncodeAudio && !!mimeType);
     const steps = [];
     if (preferEncoder) {
       steps.push(() => exportMP4WithEncoder(plan, tid));

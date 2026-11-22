@@ -42,7 +42,7 @@ function hasEraserStrokes(o) {
 
 function getEraserScale(o) {
   if (!o) return 1;
-  if (o.type === 'figure' || o.type === 'image') return Math.max(0.0001, o.scale || 1);
+  if (o.type === 'figure') return Math.max(0.0001, o.scale || 1);
   if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink') {
     const tr = D.getBindTransform(o);
     return Math.max(0.0001, (o.scale || 1) * (tr.syncScale || 1));
@@ -90,11 +90,6 @@ function objectEraserMatrix(o) {
     if (o.rot) m = affMul(m, affRotateDeg(o.rot));
     m = affMul(m, affScale(o.mirror ? -s : s, s));
     m = affMul(m, affTranslate(-o.x, -o.y));
-  } else if (o.type === 'image') {
-    const { ax, ay } = D.getAnchorOffset(o, o.scale || 1);
-    m = affMul(m, affTranslate(o.x + ax, o.y + ay));
-    if (o.rot) m = affMul(m, affRotateDeg(o.rot));
-    m = affMul(m, affScale(s, s));
   } else if (o.type === 'acc' || o.type === 'videoClip') {
     const tr = D.getBindTransform(o);
     const figTr = D.getBoundFigureTransform(o);
@@ -156,16 +151,6 @@ function eraserHitObject(o, p) {
     const j = D.jointData(o);
     if (D.segments(j, o).some(([a, b]) => D.distToSeg(pL, a, b) < hitR)) return true;
     return Math.hypot(pL.x - j.headC.x, pL.y - j.headC.y) < j.headR + hitR;
-  }
-  if (o.type === 'image') {
-    const b = D.imageBounds(o);
-    const { ax, ay } = D.getAnchorOffset(o, o.scale || 1);
-    const dx = p.x - (o.x + ax), dy = p.y - (o.y + ay);
-    const rot = (o.rot || 0) * Math.PI / 180;
-    const c = Math.cos(-rot), s = Math.sin(-rot);
-    const rx = dx * c - dy * s;
-    const ry = dx * s + dy * c;
-    return Math.abs(rx + ax) <= b.w / 2 + hitR && Math.abs(ry + ay) <= b.h / 2 + hitR;
   }
   return D.hitObj(o, p);
 }

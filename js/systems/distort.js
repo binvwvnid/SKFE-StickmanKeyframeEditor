@@ -21,7 +21,7 @@ SKFE.systems.distort = (function () {
   /* ==========================================================================
    * 0. 常量 / 外部钩子
    * ========================================================================== */
-  const SUPPORTED = { figure: 1, image: 1, acc: 1, shape: 1, bubble: 1, ink: 1, videoClip: 1 };
+  const SUPPORTED = { figure: 1, acc: 1, shape: 1, bubble: 1, ink: 1, videoClip: 1, group: 1 };
   const WARP_GRID = 16;       // 位图切片网格（16 x 16 = 256 格）
   const WARP_GRID_FAST = 8;   // 拖拽过程中的降级网格（8 x 8 = 64 格）
   const EDGE_PAIRS = [[0, 1], [1, 2], [2, 3], [3, 0]]; // 上 右 下 左 对应的两条角点
@@ -638,7 +638,8 @@ SKFE.systems.distort = (function () {
       const tr = ctx.getTransform();
       pxScale = Math.hypot(tr.a, tr.b) || 1;
     } catch (_) {}
-    const eps = 2.2 / pxScale;
+    const eps = (opts.eps != null ? opts.eps : 2.2) / pxScale;
+    const srcExpand = opts.srcExpand != null ? opts.srcExpand : 1;
 
     /* 17 x 17 个交点：盒空间均匀取点 → 单应性 → 世界坐标 */
     const cols = N + 1;
@@ -677,8 +678,8 @@ SKFE.systems.distort = (function () {
 
         /* 每个小格拆成 2 个三角形：仿射在 3 个顶点上严格成立，
            所以相邻格的公共边完全对齐，不会出现错位撕裂。 */
-        drawMeshTriangle(ctx, source, s00, s10, s11, d00, d10, d11, sx0, sy0, cellW, cellH, eps, srcW, srcH);
-        drawMeshTriangle(ctx, source, s00, s11, s01, d00, d11, d01, sx0, sy0, cellW, cellH, eps, srcW, srcH);
+        drawMeshTriangle(ctx, source, s00, s10, s11, d00, d10, d11, sx0, sy0, cellW, cellH, eps, srcW, srcH, srcExpand);
+        drawMeshTriangle(ctx, source, s00, s11, s01, d00, d11, d01, sx0, sy0, cellW, cellH, eps, srcW, srcH, srcExpand);
       }
     }
   }
@@ -692,7 +693,8 @@ SKFE.systems.distort = (function () {
    * 所以这里把源矩形也向四周各放 1 个像素，让接缝处两边都是**真实像素**互相重叠，
    * 亮缝就彻底消失了（重叠的实心像素叠在一起还是实心）。
    */
-  function drawMeshTriangle(ctx, source, s0, s1, s2, d0, d1, d2, sx, sy, sw, sh, eps, srcW, srcH) {
+  function drawMeshTriangle(ctx, source, s0, s1, s2, d0, d1, d2, sx, sy, sw, sh, eps, srcW, srcH, srcExpand) {
+    if (srcExpand == null) srcExpand = 1;
     const area = Math.abs((d1.x - d0.x) * (d2.y - d0.y) - (d2.x - d0.x) * (d1.y - d0.y));
     if (!isFinite(area) || area < 1e-7) return;  // 退化（角点重叠）直接跳过
     const M = affineFromTri(s0, s1, s2, d0, d1, d2);
@@ -712,10 +714,10 @@ SKFE.systems.distort = (function () {
     const c = { x: cx + (d2.x - cx) * k, y: cy + (d2.y - cy) * k };
 
     /* 源矩形向四周放 1px（真实像素重叠），并夹在图片范围内 */
-    const gx0 = Math.max(0, sx - 1);
-    const gy0 = Math.max(0, sy - 1);
-    const gx1 = Math.min(srcW || (sx + sw), sx + sw + 1);
-    const gy1 = Math.min(srcH || (sy + sh), sy + sh + 1);
+    const gx0 = Math.max(0, sx - srcExpand);
+    const gy0 = Math.max(0, sy - srcExpand);
+    const gx1 = Math.min(srcW || (sx + sw), sx + sw + srcExpand);
+    const gy1 = Math.min(srcH || (sy + sh), sy + sh + srcExpand);
     const gw = gx1 - gx0, gh = gy1 - gy0;
     if (!(gw > 0 && gh > 0)) return;
 

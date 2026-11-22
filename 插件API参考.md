@@ -1,11 +1,11 @@
 # SKFE 插件 API 参考
 
-> 适用版本：SKFE v7.8.1　│　核实日期：2026-11-20
+> 适用版本：SKFE v7.9.0　│　核实日期：2026-11-22
 > 源码仓库：https://github.com/binvwvnid/SKFE-StickmanKeyframeEditor
 >
 > **这份文档给谁**：插件作者，以及被托付写插件的 AI。
 >
-> **和《插件接口设计文档》的区别**：那份讲"为什么这么设计"，这份讲"照着抄就能跑"。
+> **这份文档的用法**：只讲"照着抄就能跑"的公开接口；内部设计背景与取舍不随仓库发布。
 > 这里所有签名、字段名、DOM id、事件名都逐条对着 SKFE v7.8.1 源码核实过，**没有一处是猜的**。
 >
 > **关于行号**：文中所有 `文件:行号` 基于 v7.8.0 快照，仅供快速定位；源码后续改动会让行号漂移。
@@ -70,7 +70,9 @@ window
 │   │   ├── keyframes       KEY, DERIVED, markKey, locate, interpolateObject, ...
 │   │   └── spatial         defaultLines, drawZVariedLimb, ...
 │   ├── platform            isNative, save, saveBlob, saveDataURL, ...
-│   └── __skfe              ← P0 后新增：内部接口（见第 2 节）
+│   ├── __skfe              ← 内部接口全量常驻（见第 2 节）
+│   ├── api                 ← v2.0.0 全开放入口（见第 2.9 节）
+│   └── plugin              importFile / list / api / current
 ├── SKFE_LOCALES            多语言词条
 ├── SKFE_I18N / t           多语言框架
 ├── SKFEIcon / SKFEApplyIcons   图标库
@@ -89,15 +91,18 @@ window
 
 ### 1.3 事件系统
 
-`EventBus` 定义在 js/core/event-bus.js:8–20，只有两个方法：
+`EventBus` 定义在 js/core/event-bus.js，v7.8.4 起方法完整：
 
 | 方法 | 签名 | 说明 |
 |---|---|---|
 | `on` | `on(event, callback)` | 注册回调 |
+| `off` | `off(event, callback)` | 退订指定回调，返回是否删掉 |
+| `once` | `once(event, callback)` | 只触发一次，返回包装后的回调 |
+| `clear` | `clear(event?)` | 清一个事件或全部事件 |
 | `emit` | `emit(event, ...args)` | 派发；每个回调被 try/catch 包裹，出错只打日志 |
 
-**没有 `off()`**。订阅后无法退订，禁用/删除插件后必须刷新页面才清得掉。
-`Bus.on()` 只登记回调，不返回结果句柄；想临时停用自己的监听，就在回调开头用标志位 return。
+旧插件依赖「没有 off」的假设仍然安全：`off` 是新增方法，不改 `on/emit` 语义。
+新插件建议在 `plugin.onDisable()` 里退订监听。
 
 四个事件的真实语义：
 
@@ -260,9 +265,106 @@ S.core.eventBus.EventBus.emit('need:render');
 | `applyBasicMaskToCanvas` | `(c, W, H, M, obb, cfg)` | `void`；底层绘制，参数复杂 |
 | `applyChromaMaskToCanvas` | `(c, W, H, M, obb, cfg)` | `void`；同上 |
 
-> **音频元件注意**：`makeAudioClip` / `playAudioClips` / `pauseAudioClips` / `disposeAudioClipSource`
-> 当前仍是 app.js 内部函数，**没有**暴露到 `__skfe`；插件不要直接调它们。
-> 如需创建音频元件，走 UI 导入或构造合法 `audioClip` 对象后交给轨道数据层。
+> **v7.8.4 更新**：`makeAudioClip` / `playAudioClips` / `pauseAudioClips` /
+> `disposeAudioClipSource` / `audioClipSources` / `collectAudioTimeline` 已全部暴露到 `__skfe`。
+> 更推荐直接用第 2.9 节的 `api.media.addAudio()`，它会创建媒体元素、加入轨道并按帧区间铺好段落。
+
+### 2.9 全开放 API `window.SKFE.api`（v2.0.0，MCP 插件首选）
+
+`js/plugins/api.js` 在 `app.js` 之后、`host.js` 之前加载，提供一个稳定、结构化、可 JSON 调用的全开放入口。
+**完全信任，没有沙箱**：`api.raw` 与主程序共享同一份 `window / document / SKFE / AppState` 引用。
+
+代码型插件的入口函数现在收到第三个参数 `api`，旧的两参数插件不受影响：
+
+```js
+new Function('SKFE', 'plugin', 'api', code)(SKFE, runtime, SKFE.api);
+```
+
+#### 2.9.1 命名空间
+
+| 路径 | 用途 |
+|---|---|
+| `api.raw` | 原始引用：`window / document / SKFE / App / Bus / Group / TrackStrip` |
+| `api.get(path)` / `api.set(path, value)` | 对 `SKFE` 下任意路径读写；支持 `window.` / `document.` / `SKFE.` 前缀 |
+| `api.call(path, ...args)` / `api.invoke(path, argsArray)` | 调 `SKFE` 下任意函数，例如 `api.call('features.export.exportMP4')` |
+| `api.evaluate(expr)` / `api.execute(code)` | 在当前页面上下文求值 / 执行代码 |
+| `api.state` | 实时状态读写、跳帧、补丁式修改 |
+| `api.data` | 工程快照、轨道 / 帧读写、媒体源信息、导出音轨事件 |
+| `api.object` | 元件构造、加入、选中、包围盒 |
+| `api.media` | 加音频 / 视频元件，播放控制 |
+| `api.frame` / `api.keyframe` | 帧与关键帧操作 |
+| `api.group` / `api.loop` | 编组、循环填充 |
+| `api.ui` | DOM 查询、点击、改值、改面板、工具切换、轨道模式 |
+| `api.events` | `on / once / off / clear / emit / list` |
+| `api.history` | `undo / redo / save / run` |
+| `api.export` | PNG / JPG / GIF / SVG / MP4 / WebM / 工程 |
+| `api.render` | 底层绘制入口 |
+| `api.mcp` | JSON-RPC 风格调用入口，见下 |
+
+#### 2.9.2 MCP / JSON-RPC 调用
+
+```js
+// 列出全部 48 个稳定方法
+api.mcp.methods();
+
+// 直接调用
+api.mcp.call('project.get');
+api.mcp.call('ui.setValue', { selector: '#projectNameInput', value: '我的工程' });
+api.mcp.call('media.addAudio', { dataUrl, start: 0, end: 11, volume: 0.8 });
+
+// JSON-RPC 2.0 信封（适合 MCP Server / Bridge 转发）
+api.mcp.dispatch({
+  jsonrpc: '2.0',
+  id: 1,
+  method: 'skfe.state.frame.set',
+  params: { index: 12 }
+});
+// → { jsonrpc: '2.0', id: 1, result: 12 }
+```
+
+`method` 支持可选 `skfe.` 前缀。未知方法返回 `error.code = -32603`。
+批量操作用 `history.run`：
+
+```js
+api.mcp.call('history.run', {
+  label: 'MCP 批量改帧',
+  ops: [
+    { method: 'state.frame.set', params: { index: 3 } },
+    { method: 'track.setFrame', params: { id: '2', index: 3, object: obj } }
+  ]
+});
+```
+
+#### 2.9.3 UI 操作要点
+
+- `api.ui.click('#btnPlay')` 直接触发真实按钮点击，走完整应用逻辑。
+- `api.ui.setValue('#projectNameInput', 'X')` 会派发 `input` + `change`。
+- `api.ui.anchors()` 返回所有带 id 的按钮 / 输入框 / 选择器，适合 AI 先「看界面」再操作。
+- `api.ui.openSheet('export')` 打开底部栏导出分区；`api.ui.trackMode(true)` 进入轨道模式。
+- 直接改 DOM 也可以，`api.raw.document` 就是页面真实 document。
+
+#### 2.9.4 新增媒体快捷入口
+
+```js
+const audioId = api.media.addAudio({
+  dataUrl: 'data:audio/wav;base64,...',
+  durationMs: 1000,
+  fps: 12,
+  start: 0,
+  end: 11,
+  volume: 0.8,
+  name: '背景音'
+});
+
+const videoId = api.media.addVideo({
+  dataUrl: 'data:video/mp4;base64,...',
+  w: 640, h: 360, x: 0, y: 0,
+  durationMs: 1000, fps: 12,
+  start: 0, end: 11
+});
+```
+
+`start / end` 是帧区间（含端点），不传则只创建轨道对象，由 `addObjectToFrames` 决定出场。
 
 ---
 
@@ -294,7 +396,6 @@ S.core.eventBus.EventBus.emit('need:render');
 | type | 构造入口 | 说明 |
 |---|---|---|
 | `'figure'` | `makeFigure(x,y,color,lw)` app.js:2869 | 火柴人 |
-| `'image'` | `makeImage()` app.js:2985 | 图片 |
 | `'shape'` | `makeShape(shapeType,x,y)` app.js:2990 | 形状；shape 值 `circle/rect/tri` |
 | `'acc'` | `makeAccessory()` app.js:3005 | 配件 |
 | `'videoClip'` | `makeVideoClip(...)` app.js:3030 | 独立视频元件 |
@@ -337,8 +438,6 @@ S.core.eventBus.EventBus.emit('need:render');
 ```
 
 ### 3.4 其他类型关键字段
-
-**image**（app.js:2985）：`{id,type:'image',name:'Image',img,x,y,w,h,alpha,scale,layer,locked,rot,mirror,ax,ay,distort,mask}`
 
 **shape**（app.js:2990）：上面公共字段 + `shape, fillColor, strokeColor, strokeWidth, bindTo, targetId, offX, offY`
 
@@ -465,7 +564,11 @@ AppState.tracks = {
 
 ### 5.6 `SKFE.platform`
 `isNative()`、`save(data, filename)`、`saveBlob(blob, filename)`、
-`saveDataURL(dataUrl, filename)`（后三个 async）、`dataUrlToBlob(dataUrl)`、`diag()`。
+`saveDataURL(dataUrl, filename)`、`saveURL(url, filename)`（后四个 async）、
+`dataUrlToBlob(dataUrl)`、`diag()`。
+
+`saveURL()` 用于静态资源下载（例如插件作者工具包 ZIP）：原生壳里会先 `fetch` 成 Blob，
+再走原生写文件 + 系统分享；网页 / 桌面仍可直接使用 `<a download>`。
 
 ### 5.7 `SKFE.systems.brush`
 `setOn(bool)`、`isOn()`、`getPresets()` → `{id,name,bindTo,offX,offY}[]`、
@@ -637,13 +740,12 @@ plugin.onDisable(function () { installed = false; Bus.emit('need:render'); });
 - [ ] 所有 `S.__skfe.xxx(...)` 调用的参数个数、顺序和本参考一致
 - [ ] 没有用 `#toolbar` 这类不存在的 DOM 选择器
 - [ ] 改完状态后 emit 了 `need:render` 或 `app:update`
-- [ ] 没有用 `EventBus.off()`（不存在）
+- [ ] 如果注册了事件监听，已在 `plugin.onDisable()` 里用 `api.events.off()` 退订
 - [ ] 没有假设 `renderFrameToDataURL()` 返回字符串（返回 canvas）
 - [ ] 没有把 `objects` 当数据源写（数据源是 `tracks`）
 - [ ] 多步修改用 `txRun()` 包起来，避免产生一堆历史记录
-- [ ] 没有调用未暴露的 `makeAudioClip` / `playAudioClips`（v7.8.1 仍为内部函数）
-- [ ] 没有把 audioClip 塞进元件列表；它只在轨道里显示并置底
-- [ ] 没有用 `EventBus.off()` 或假设 `on()` 返回退订句柄
+- [ ] 音频元件优先走 `api.media.addAudio()`，不要把 audioClip 塞进元件列表
+- [ ] MCP 插件优先用 `api.mcp.call()` / `api.mcp.dispatch()`，不要在协议层手写 DOM 选择逻辑
 
 ---
 
@@ -657,7 +759,9 @@ plugin.onDisable(function () { installed = false; Bus.emit('need:render'); });
 | 关键帧系统 | js/systems/keyframes.js |
 | 事件总线 | js/core/event-bus.js:8–20 |
 | 事件订阅与初始化 | js/app.js:16958–17021 |
+| 全开放插件 / MCP API（`window.SKFE.api`） | js/plugins/api.js |
 | 插件宿主运行时（导入 / 执行 / 列表） | js/plugins/host.js |
+| 事件总线（含 off / once / clear） | js/core/event-bus.js |
 | DOM 结构 | index.html:10–1226 |
 | 子系统导出 | 各 js/core、js/features、js/systems 文件导出块 |
 | 工程格式 | js/app.js:1001–1065、804–853 |

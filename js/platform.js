@@ -237,6 +237,20 @@ SKFE.platform = (function () {
     return true;
   }
 
+  /** 保存一个 URL 指向的静态资源（如插件作者工具包 ZIP）。
+      原生壳里 <a download> 无效，必须先 fetch 成 Blob 再走 saveBlob。 */
+  async function saveURL(url, filename) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      return await saveBlob(blob, filename);
+    } catch (err) {
+      console.error('[platform] URL 保存失败:', err);
+      return false;
+    }
+  }
+
   /** 统一入口：自动识别 Blob / dataURL。 */
   async function save(data, filename) {
     try {
@@ -341,6 +355,7 @@ SKFE.platform = (function () {
     save,
     saveBlob,
     saveDataURL,
+    saveURL,
     dataUrlToBlob,
     blobToBase64,
     healSW,

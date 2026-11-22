@@ -63,14 +63,16 @@ contributes  数据型必填  要覆写的数据，键为 SKFE.* 路径
 
 ## 四、可用的内部接口（代码型）
 
-插件运行时拿到 `window.SKFE`：
+插件入口函数现在收到三个参数：`(SKFE, plugin, api)`。旧的两参数插件仍然可用。
 
-- `SKFE.__skfe` —— 主程序内部接口（帧、元件、轨道、关键帧、撤销、导出等几十个函数）
-- `SKFE.core.eventBus.EventBus` —— 事件总线，只有 `on` / `emit`，**没有 `off`**
+- `api`（推荐）—— v2 全开放入口：状态 / 数据 / DOM / 事件 / 媒体 / 编组 / 循环 / 撤销 / 导出，另有 `api.mcp.call()` 给 MCP 插件用
+- `SKFE.api` —— 与第三参数同一个对象
+- `SKFE.__skfe` —— 主程序内部接口（帧、元件、轨道、关键帧、撤销、导出等）
+- `SKFE.core.eventBus.EventBus` —— 事件总线，含 `on / off / once / clear / emit`
   - 事件：`app:update` / `history:save` / `need:render` / `need:syncUI`
 - `SKFE.core` / `SKFE.features` / `SKFE.systems` —— 各子系统公开方法
 
-改完数据后要 `SKFE.core.eventBus.EventBus.emit('need:render')` 才会刷新界面。
+改完数据后要 `api.refresh()` 或 `SKFE.core.eventBus.EventBus.emit('need:render')` 才会刷新界面。
 
 > 页面里**没有** `#toolbar`，真实工具容器是 `#toolChips`。
 > 完整函数签名、数据结构和端到端示例见本包内的 `插件API参考.md`（GitHub 仓库地址见文首）。

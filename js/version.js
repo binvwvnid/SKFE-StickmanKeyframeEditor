@@ -4,4 +4,4 @@
  * 加载顺序：必须在 i18n.js 之前，这样首次 applyTranslations 就能拿到版本号。
  */
 window.SKFE = window.SKFE || {};
-window.SKFE.version = '7.8.1';
+window.SKFE.version = '7.9.0';

@@ -425,6 +425,26 @@ function syncDistortToAllFrames(obj) {
     updateFrameBar();
   }
 
+  /* v7.8.3：新建摄像机默认铺满总轨道长度 —— 镜头贯穿全片，和主时间轴一样长。
+     这样轨道上一条摄像机长条从 0 覆盖到最后一帧；改任意一帧的位置/取景，
+     由 syncUniformClipEdits 整体同步（整段同画面、无关键帧时），要分段就打关键帧。 */
+  function fillCameraToFullLength(obj) {
+    if (!obj || obj.type !== 'camera') return;
+    const id = String(obj.id);
+    const total = Math.max(1, AppState.frames.length);
+    let t = AppState.tracks[id];
+    if (!t) { t = { name: obj.name || ('camera' + id), frames: new Array(total).fill(null) }; AppState.tracks[id] = t; }
+    while (t.frames.length < total) t.frames.push(null);
+    for (let i = 0; i < total; i++) {
+      if (i === AppState.currentFrameIndex && t.frames[i] && String(t.frames[i].id) === id) continue;
+      const c = cloneObjectKeepImg(obj);
+      if (!c) continue;
+      c.id = obj.id;
+      t.frames[i] = c;
+    }
+    AppState.objects = getCombinedObjectsForRender();
+  }
+
   /* v7.8.1：音频元件铺满原长（与视频同构，但只承载声音） */
   function fillAudioClipToLength(obj, frameCount, frameMs) {
     if (!obj || obj.type !== 'audioClip') return;
@@ -790,6 +810,67 @@ function syncDistortToAllFrames(obj) {
     if (keepId) AppState.selected = AppState.objects.find(o => o && String(o.id) === keepId) || null;
   }
 
+  /* v7.8.3：无关键帧 clip 的「整体调节」——让轨道长条像视频剪辑软件里的片段：
+     一段没有关键帧的连续帧，本质是一张画面占据不同时长（拉长时复制出来的）。
+     这种 clip 里改任意一帧的位置/属性，就等同于改整个片段，要同步到整段所有帧，
+     且不落关键帧。只有用户主动打了关键帧，才回到逐帧/补间的烘焙语义。
+
+     两条保护线，避免误伤：
+       ① 全局属性开关开启时整体同步跳过 —— 全局属性优先级最高，已由 setGlobalProp
+          把改动写到全工程所有帧，这里再做一遍是重复且会缩小范围。
+       ② 除当前帧外的其余帧若彼此不同（典型：导入动作铺出的逐帧动画），说明这不是
+          "一张图占据不同时长"，而是逐帧动画，保持原样、绝不抹平。当前帧刚改过，
+          不能当基准。用 poseSignature 判定，它与 landAutoKey 判断"姿势是否变了"
+          用的是同一套签名。 */
+  function syncUniformClipEdits() {
+    if (globalEditEnabled) return;                    /* ① 全局属性优先 */
+    const idx = AppState.currentFrameIndex;
+    const seen = Object.create(null);
+    const syncOne = (oid) => {
+      if (oid == null) return;
+      const k = String(oid);
+      if (seen[k]) return;
+      seen[k] = 1;
+      const t = AppState.tracks[k];
+      if (!t || !t.frames) return;
+      /* 整轨有任意关键帧 → 交给 landAutoKey 自动落帧，这里绝不碰 */
+      if (t.frames.some(x => x && KF.isKey(x))) return;
+      const live = getTrackFrame(k, idx);
+      if (!live || KF.isDerived(live)) return;
+      /* 以当前帧为中心，向两边找连续非空区间 = 这条长条(clip) */
+      let a = idx, b = idx;
+      while (a > 0 && t.frames[a - 1]) a--;
+      while (b < t.frames.length - 1 && t.frames[b + 1]) b++;
+      if (a === b) return;                            /* 单帧：没有可同步的段 */
+      /* ② 判定这段原本是不是「一张图占据不同时长」：
+         当前帧刚被改过，不能拿它当基准（它和别的帧必然不同）。改看其余帧——
+         它们还保持着改动前的画面。若其余帧彼此全相同 → 均匀 clip → 整体同步；
+         若彼此不同 → 逐帧动画（典型：导入动作），原样保留，绝不抹平。 */
+      let ref = -1;
+      for (let i = a; i <= b; i++) { if (i !== idx) { ref = i; break; } }
+      if (ref < 0) return;
+      const refSig = poseSignature(t.frames[ref]);
+      for (let i = a; i <= b; i++) {
+        if (i === idx || i === ref) continue;
+        if (poseSignature(t.frames[i]) !== refSig) return;   /* 逐帧动画：不碰 */
+      }
+      /* 整体同步：把当前帧的新姿势克隆到整段其余帧，不写 __k、不落关键帧 */
+      let changed = false;
+      for (let i = a; i <= b; i++) {
+        if (i === idx) continue;
+        const c = cloneObjectKeepImg(live);
+        if (!c) continue;
+        c.id = live.id;
+        t.frames[i] = c;
+        changed = true;
+      }
+      if (changed) invalidateAllFrameThumbs();
+    };
+    for (const o of AppState.objects) { if (o && o.type !== 'video') syncOne(o.id); }
+    if (AppState.selected) syncOne(AppState.selected.id);
+    if (isSubTrackMode()) syncOne(AppState.activeTrackId);
+  }
+
   function markCurrentFrameModified() {
     if (AppState.frames[AppState.currentFrameIndex] && AppState.frames[AppState.currentFrameIndex].isTween) {
       AppState.frames[AppState.currentFrameIndex].isTween = false;
@@ -818,6 +899,9 @@ function syncDistortToAllFrames(obj) {
       updateFrameBar();
       showHistoryToast('已自动生成关键帧（⌘Z 可撤销）', 'ink', 1800);
     }
+    /* v7.8.3：无关键帧 clip 的整体调节（在落帧判定之后 —— 若刚落了关键帧，
+       同步函数自己会因「整轨有关键帧」而跳过，不会冲突）。 */
+    syncUniformClipEdits();
     /* v7.4.5：不管有没有新落菱形，这一帧的姿势都变了 —— 段内派生帧必须重算，
        否则「接着改第二个肢体」时中间帧还是上一轮算出来的值（只动第一个肢体）。 */
     bumpKfEval();
@@ -955,27 +1039,32 @@ function syncDistortToAllFrames(obj) {
       if (o.type === 'videoClip' && !videoClipSources.has(o.id)) {
         if (o.videoSrc) {
           const v = document.createElement('video');
-          v.src = o.videoSrc; v.muted = true; v.playsInline = true; v.preload = 'auto'; v.loop = false;
+          v.muted = true; v.playsInline = true; v.preload = 'auto'; v.loop = false;
           const src = {
-            id: o.id, video: v, dataUrl: o.videoSrc, w: o.videoW || 640, h: o.videoH || 360,
+            id: o.id, video: v, dataUrl: o.videoSrc, blobUrl: null,
+            w: o.videoW || 640, h: o.videoH || 360,
             durMs: o.videoDurMs || 0, fps: o.videoFps || 12, frameCache: new Map()
           };
           videoClipSources.set(o.id, src);
-          promises.push(new Promise((resolve) => {
-            let settled = false;
-            const done = () => {
-              if (settled) return; settled = true;
-              if (!o.img) o.img = v;
-              resolve();
-            };
-            v.addEventListener('loadedmetadata', () => {
-              if (v.videoWidth) { src.w = v.videoWidth; src.h = v.videoHeight; }
-              if (v.duration && isFinite(v.duration)) src.durMs = Math.round(v.duration * 1000);
-              done();
-            }, { once: true });
-            v.addEventListener('error', done, { once: true });
-            setTimeout(done, 3000);
-            v.load();
+          promises.push(dataUrlToPlayableSrc(o.videoSrc).then(({ src: playable, blobUrl }) => {
+            src.blobUrl = blobUrl;
+            v.src = playable;
+            return new Promise((resolve) => {
+              let settled = false;
+              const done = () => {
+                if (settled) return; settled = true;
+                if (!o.img) o.img = v;
+                resolve();
+              };
+              v.addEventListener('loadedmetadata', () => {
+                if (v.videoWidth) { src.w = v.videoWidth; src.h = v.videoHeight; }
+                if (v.duration && isFinite(v.duration)) src.durMs = Math.round(v.duration * 1000);
+                done();
+              }, { once: true });
+              v.addEventListener('error', done, { once: true });
+              setTimeout(done, 3000);
+              v.load();
+            });
           }));
           delete o.videoSrc;
         } else if (Array.isArray(o.videoFrames) && o.videoFrames.length) {
@@ -1008,23 +1097,27 @@ function syncDistortToAllFrames(obj) {
       /* v7.8.1：重建音频元件音源（dataURL → <video>，只播声音） */
       if (o.type === 'audioClip' && o.audioSrc && !audioClipSources.has(o.id)) {
         const v = document.createElement('video');
-        v.src = o.audioSrc; v.muted = true; v.playsInline = true; v.preload = 'auto'; v.loop = false;
+        v.muted = true; v.playsInline = true; v.preload = 'auto'; v.loop = false;
         const src = {
-          id: o.id, video: v, dataUrl: o.audioSrc,
+          id: o.id, video: v, dataUrl: o.audioSrc, blobUrl: null,
           durMs: o.audioDurMs || 0, fps: o.audioFps || 12
         };
         audioClipSources.set(o.id, src);
-        promises.push(new Promise((resolve) => {
-          let settled = false;
-          const done = () => {
-            if (settled) return; settled = true;
-            if (v.duration && isFinite(v.duration)) src.durMs = Math.round(v.duration * 1000);
-            resolve();
-          };
-          v.addEventListener('loadedmetadata', done, { once: true });
-          v.addEventListener('error', done, { once: true });
-          setTimeout(done, 3000);
-          v.load();
+        promises.push(dataUrlToPlayableSrc(o.audioSrc).then(({ src: playable, blobUrl }) => {
+          src.blobUrl = blobUrl;
+          v.src = playable;
+          return new Promise((resolve) => {
+            let settled = false;
+            const done = () => {
+              if (settled) return; settled = true;
+              if (v.duration && isFinite(v.duration)) src.durMs = Math.round(v.duration * 1000);
+              resolve();
+            };
+            v.addEventListener('loadedmetadata', done, { once: true });
+            v.addEventListener('error', done, { once: true });
+            setTimeout(done, 3000);
+            v.load();
+          });
         }));
         delete o.audioSrc;
       }
@@ -1092,6 +1185,10 @@ function syncDistortToAllFrames(obj) {
   }
 
   function applyLoadedProject(data) {
+    /* v7.8.3：换工程先释放上一份的媒体源。必须在 deserializeProject 之前——
+       否则新工程里同 id 的音轨会被当成「已存在」直接复用旧 <video>，
+       旧 27MB dataURL 也永远留在内存里。 */
+    disposeAllMediaClipSources();
     const { newFrames, newTracks, promises } = deserializeProject(data);
     return Promise.all(promises).then(() => {
       AppState.frames = newFrames;
@@ -1165,11 +1262,23 @@ function syncDistortToAllFrames(obj) {
     return projectLibOpenPromise;
   }
 
+  /* v7.8.2：导入 JSON 后 applyLoadedProject 会把 dataURL 字段换成运行时对象并 delete 原字段，
+     所以自动入库存一份独立快照，避免项目库里的副本丢失图片 / 视频 / 音频。 */
+  function cloneProjectDataForLibrary(data) {
+    try {
+      if (typeof structuredClone === 'function') return structuredClone(data);
+    } catch (_) {}
+    try { return JSON.parse(JSON.stringify(data)); }
+    catch (_) { return data; }
+  }
+
   function saveProjectToLibrary(data, name) {
     const rec = {
       id: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
       name: String(name || tr2('project.unnamed', '未命名项目')),
       frameCount: Array.isArray(data && data.frames) ? data.frames.length : 0,
+      /* v7.8.2：项目列表直接显示 FPS，不必把整份 data 解包出来 */
+      fps: Number((data && data.defaultFPS) || 12) || 12,
       savedAt: Date.now(),
       version: (data && data.version) || PROJECT_VERSION,
       data: data
@@ -1239,25 +1348,33 @@ function syncDistortToAllFrames(obj) {
         meta.className = 'preset-meta';
         let dateText = '';
         try { dateText = new Date(p.savedAt).toLocaleString(); } catch (_) {}
-        meta.textContent = (p.frameCount || 0) + tr2('timeline.frameSuffix', ' 帧') + (dateText ? ' · ' + dateText : '');
+        const fpsText = Number(p.fps) > 0
+          ? tr2('project.fpsMeta', ' · %n FPS').replace('%n', String(Math.round(Number(p.fps))))
+          : '';
+        meta.textContent = (p.frameCount || 0) + tr2('timeline.frameSuffix', ' 帧') + fpsText + (dateText ? ' · ' + dateText : '');
         info.appendChild(name);
         info.appendChild(meta);
 
         const actions = document.createElement('div');
         actions.className = 'preset-actions';
         const openBtn = document.createElement('button');
+        openBtn.type = 'button';
         openBtn.className = 'btn-soft btn-xs';
         openBtn.textContent = tr2('project.libOpen', '打开');
-        openBtn.onclick = (e) => {
-          e.stopPropagation();
-          getProjectFromLibrary(p.id).then(data => {
-            if (!data) return;
-            applyLoadedProject(data).then(() => {
+        /* v7.8.2：整行和「打开」按钮共用同一打开逻辑；只跳过删除按钮，避免误触。 */
+        const openProject = (e) => {
+          if (e) e.stopPropagation();
+          getProjectFromLibrary(p.id).then(rec => {
+            if (!rec || !rec.data || !Array.isArray(rec.data.frames)) {
+              throw new Error(tr2('project.libCorrupt', '项目记录缺少工程数据'));
+            }
+            return applyLoadedProject(rec.data).then(() => {
               EventBus.emit('history:save', '打开项目库项目');
               alert(tr2('project.libLoadOk', '项目库项目已打开'));
             });
-          }).catch(err => alert(tr2('project.libLoadFail', '打开失败: ') + err.message));
+          }).catch(err => alert(tr2('project.libLoadFail', '打开失败: ') + (err && err.message ? err.message : err)));
         };
+        openBtn.onclick = openProject;
         const delBtn = document.createElement('div');
         delBtn.className = 'preset-del';
         delBtn.innerHTML = ic('close');
@@ -1273,6 +1390,10 @@ function syncDistortToAllFrames(obj) {
 
         div.appendChild(info);
         div.appendChild(actions);
+        div.onclick = (e) => {
+          if (e.target.closest('button') || e.target.closest('.preset-del')) return;
+          openProject(e);
+        };
         listEl.appendChild(div);
       });
     }).catch(err => {
@@ -1283,33 +1404,45 @@ function syncDistortToAllFrames(obj) {
     });
   }
 
+  /* v7.8.2：项目导入主体拆成 importProjectData(data, nameHint)，拖放导入嗅探出项目后
+     直接把已解析对象传进来，避免 30MB+ 的工程文件被读两遍。 */
+  function importProjectData(data, nameHint) {
+    try {
+      if (!data || !Array.isArray(data.frames)) throw new Error('Invalid project file');
+      /* v7.0.0：版本校验。minVersion 高于本版本说明文件里有本版本读不懂的插值数据，
+         硬读会把关键帧段读成一堆空白帧，所以宁可拒绝。 */
+      const need = Number(data.minVersion || data.version || 1);
+      if (need > PROJECT_VERSION) {
+        alert(tr2('project.tooNewHead', '这个工程由更新版本的 SKFE 创建（需要 v') + need + tr2('project.tooNewTail', '），当前版本是 v') + PROJECT_VERSION +
+          '。\n请升级后再打开，否则动画的关键帧数据会显示不出来。');
+        return;
+      }
+      /* v7.8.2：applyLoadedProject 会就地处理 dataURL 字段，先留一份完整快照给项目库。 */
+      const libraryData = cloneProjectDataForLibrary(data);
+      applyLoadedProject(data).then(() => {
+        EventBus.emit('history:save', '导入项目');
+        const n = data.version || 1;
+        alert(n >= 3 ? tr2('project.importOk', '项目导入成功') : tr2('project.importOkOld', '项目导入成功（旧格式 v') + n + tr2('project.importOkOldTail', '，已按普通帧加载）'));
+        /* v7.5.2：导入即自动进项目库（IndexedDB），列表显示帧数，可打开/删除。
+           写库失败不影响导入结果，只记录到控制台。 */
+        saveProjectToLibrary(libraryData, (nameHint || 'project').replace(/\.json$/i, ''))
+          .then(updateProjectListUI)
+          .catch(err => console.warn('[ProjectLibrary] 自动保存导入项目失败', err));
+      }).catch(err => {
+        alert(tr2('project.importFail', '导入失败: ') + (err && err.message ? err.message : err));
+      });
+    } catch (err) {
+      alert(tr2('project.importFail', '导入失败: ') + err.message);
+    }
+  }
+
   function importProjectJSON(file) {
     const reader = new FileReader();
     reader.onload = (e) => {
-      try {
-        const data = JSON.parse(e.target.result);
-        if (!data || !Array.isArray(data.frames)) throw new Error('Invalid project file');
-        /* v7.0.0：版本校验。minVersion 高于本版本说明文件里有本版本读不懂的插值数据，
-           硬读会把关键帧段读成一堆空白帧，所以宁可拒绝。 */
-        const need = Number(data.minVersion || data.version || 1);
-        if (need > PROJECT_VERSION) {
-          alert(tr2('project.tooNewHead', '这个工程由更新版本的 SKFE 创建（需要 v') + need + tr2('project.tooNewTail', '），当前版本是 v') + PROJECT_VERSION +
-            '。\n请升级后再打开，否则动画的关键帧数据会显示不出来。');
-          return;
-        }
-        applyLoadedProject(data).then(() => {
-          EventBus.emit('history:save', '导入项目');
-          const n = data.version || 1;
-          alert(n >= 3 ? tr2('project.importOk', '项目导入成功') : tr2('project.importOkOld', '项目导入成功（旧格式 v') + n + tr2('project.importOkOldTail', '，已按普通帧加载）'));
-          /* v7.5.2：导入即自动进项目库（IndexedDB），列表显示帧数，可打开/删除。
-             写库失败不影响导入结果，只记录到控制台。 */
-          saveProjectToLibrary(data, (file && file.name ? file.name : 'project').replace(/\.json$/i, ''))
-            .then(updateProjectListUI)
-            .catch(err => console.warn('[ProjectLibrary] 自动保存导入项目失败', err));
-        });
-      } catch (err) {
-        alert(tr2('project.importFail', '导入失败: ') + err.message);
-      }
+      let data;
+      try { data = JSON.parse(e.target.result); }
+      catch (err) { alert(tr2('project.importFail', '导入失败: ') + err.message); return; }
+      importProjectData(data, file && file.name ? file.name : 'project');
     };
     reader.readAsText(file);
   }
@@ -1959,7 +2092,10 @@ function syncDistortToAllFrames(obj) {
     };
     const infoDiv = document.createElement('div');
     infoDiv.className = 'preset-info';
-    const metaText = p.frames.length + tr2('timeline.frameSuffix', ' 帧') + (isSelected ? ' · 已选中' : ' · 点击选中');
+    const fpsText = Number(p.fps) > 0
+      ? tr2('action.fpsMeta', ' · %n FPS').replace('%n', String(Math.round(Number(p.fps))))
+      : '';
+    const metaText = p.frames.length + tr2('timeline.frameSuffix', ' 帧') + fpsText + (isSelected ? ' · 已选中' : ' · 点击选中');
     infoDiv.innerHTML = `<div class="preset-name">${p.name || tr2('action.unnamed', '未命名动作')}</div><div class="preset-meta">${metaText}</div>`;
     const btns = document.createElement('div');
     btns.className = 'preset-actions';
@@ -1994,6 +2130,7 @@ function syncDistortToAllFrames(obj) {
   const payload = {
     name: preset.name || tr2('action.unnamed', '未命名动作'),
     version: preset.version || 2,
+    fps: Number(preset.fps) || 12,
     savedBase: preset.savedBase || null,
     frames: preset.frames
   };
@@ -2120,6 +2257,7 @@ function syncDistortToAllFrames(obj) {
     actionPresets.push({
       name,
       version: 2,                        /* 20A */
+      fps: Number(defaultFPS) || 12,     /* v7.8.2：动作保存时记下 FPS，仅用于显示/兼容 */
       savedBase,
       frames: extractedFrames
     });
@@ -2478,36 +2616,63 @@ function syncDistortToAllFrames(obj) {
   SKFE.platform.save(blob, 'tco_actions.json');
 }
 
+/* v7.8.2：动作导入主体拆成 applyActionImport(imported)，拖放导入嗅探出动作后
+     直接把已解析对象传进来。silentUnmatched=true 时内容不是动作不弹错。 */
+function applyActionImport(imported, silentUnmatched) {
+  try {
+    const isValidAction = (p) => p && p.name && Array.isArray(p.frames);
+    /* v7.8.2：动作文件里的 fps 只做元数据校验，老动作没有就保持没有。 */
+    const normalizeActionFps = (p) => {
+      const q = Object.assign({}, p);
+      const f = Number(q.fps);
+      if (isFinite(f) && f >= 1 && f <= 30) q.fps = Math.round(f);
+      else delete q.fps;
+      return q;
+    };
+    let valid = [];
+    if (Array.isArray(imported)) {
+      valid = imported.filter(isValidAction).map(normalizeActionFps);
+    } else if (isValidAction(imported)) {
+      valid = [normalizeActionFps(imported)];
+    }
+    if (valid.length > 0) {
+      const wasEmpty = (actionPresets.length === 0);
+      actionPresets.push(...valid);
+      if (wasEmpty && valid.length === 1) selectedActionIndex = 0;
+      saveActionPresets();
+      updateActionListUI();
+      alert(tr2('action.importedHead', '成功导入 ') + valid.length + tr2('action.importedTail', ' 个动作'));
+      return true;
+    }
+    if (!silentUnmatched) alert(tr2('action.importFail', '导入失败，格式不正确'));
+    return false;
+  } catch (err) {
+    if (!silentUnmatched) alert(tr2('action.importFail', '导入失败，格式不正确'));
+    return false;
+  }
+}
+
+function handleActionFile(file, silentUnmatched) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    let imported;
+    try { imported = JSON.parse(ev.target.result); }
+    catch (err) {
+      if (!silentUnmatched) alert(tr2('action.importFail', '导入失败，格式不正确'));
+      return;
+    }
+    applyActionImport(imported, silentUnmatched);
+  };
+  reader.readAsText(file);
+}
+
 function importActionPresets() {
   const input = document.createElement('input');
   input.type = 'file'; input.accept = '.json';
   input.onchange = (e) => {
     const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const imported = JSON.parse(ev.target.result);
-        const isValidAction = (p) => p && p.name && Array.isArray(p.frames);
-        let valid = [];
-        if (Array.isArray(imported)) {
-          valid = imported.filter(isValidAction);
-        } else if (isValidAction(imported)) {
-          valid = [imported];
-        }
-        if (valid.length > 0) {
-          const wasEmpty = (actionPresets.length === 0);
-          actionPresets.push(...valid);
-          if (wasEmpty && valid.length === 1) selectedActionIndex = 0;
-          saveActionPresets();
-          updateActionListUI();
-          alert(tr2('action.importedHead', '成功导入 ') + valid.length + tr2('action.importedTail', ' 个动作'));
-        } else {
-          alert(tr2('action.importFail', '导入失败，格式不正确'));
-        }
-      } catch (err) { alert(tr2('action.importFail', '导入失败，格式不正确')); }
-    };
-    reader.readAsText(file);
+    handleActionFile(file, false);
   };
   input.click();
 }
@@ -2953,7 +3118,7 @@ function importActionPresets() {
   /* ==================== 对象工厂 ==================== */
   function makeFigure(x, y, color, lw) {
     return {
-      /* v5.7：透视 = 每条线（躯干/双臂/双腿）独立的头、尾粗细倍率。
+      /* v5.7：伪透视（粗细变化） = 每条线（躯干/双臂/双腿）独立的头、尾粗细倍率。
          骨盆端（body.start + 双腿 start）与脖子端（body.end + 双臂 start）在 UI 层自动同步。
          旧版 11 关节 z 模型已废弃。 */
       spatial: {
@@ -3014,9 +3179,9 @@ function importActionPresets() {
        · chroma ：在离屏画布上按颜色逐像素键控，带色相/饱和/明度容差、
                    平滑度、溢出抑制、边缘羽化等参数。
      这里只放数据默认值与判定；真正的绘制包装在 renderScene 外层完成，
-     这样 acc / image / shape / bubble / ink / videoClip 全部自动生效。 */
+     这样 acc / shape / bubble / ink / videoClip 全部自动生效。 */
   function isMaskableObject(o) {
-    return !!(o && (o.type === 'image' || o.type === 'acc' || o.type === 'shape' ||
+    return !!(o && (o.type === 'acc' || o.type === 'shape' ||
       o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip'));
   }
 
@@ -3061,15 +3226,6 @@ function importActionPresets() {
     return o.mask;
   }
 
-  function makeImage(img, x, y) {
-    const maxW = 360;
-    let w = img.naturalWidth || img.width;
-    let h = img.naturalHeight || img.height;
-    const r = Math.min(1, maxW / w);
-    w *= r; h *= r;
-    return { id: ++uid, type: 'image', name: 'Image', img, x, y, w, h, alpha: 1, scale: 1, layer: 1, locked: false, rot: 0, mirror: false, ax: 0, ay: 0, distort: makeDistortField(), mask: makeMaskField() };
-  }
-
   function makeShape(shapeType, x, y) {
     return {
       id: ++uid, type: 'shape', shape: shapeType, name: 'Shape',
@@ -3107,8 +3263,37 @@ function importActionPresets() {
      第一版不做真转码：导入音频/视频都用 <video> 元素承载音轨，只播声音不画画面。
      与视频元件共用「按轨道段落换算时间」的机制，因此移动/分割后只播所在帧区间。
      不进元件列表、不参与画布渲染、不导出画面。 */
-  const audioClipSources = new Map(); // id -> { video, dataUrl, durMs, fps }
+  const audioClipSources = new Map(); // id -> { video, dataUrl, blobUrl, durMs, fps }
   let audioClipRaf = null;
+
+  /* v7.8.3：27MB 的 dataURL 音源每次 seek 都要重新解析整串 base64，
+     循环播放几遍后解码器和内存压力上来，声音先开始卡。
+     转成 Blob URL 后浏览器直接读二进制，seek 成本大幅下降。
+     原 dataURL 仍保存在 src.dataUrl，工程保存/导出完全不受影响。
+     fetch 失败（老 WebView 不支持 data: fetch）时原样退回 dataURL。 */
+  function dataUrlToPlayableSrc(dataUrl) {
+    return new Promise((resolve) => {
+      if (!dataUrl || typeof dataUrl !== 'string' || dataUrl.indexOf('data:') !== 0) {
+        resolve({ src: dataUrl || '', blobUrl: null });
+        return;
+      }
+      try {
+        fetch(dataUrl).then(r => r.blob()).then(b => {
+          const u = URL.createObjectURL(b);
+          resolve({ src: u, blobUrl: u });
+        }).catch(() => resolve({ src: dataUrl, blobUrl: null }));
+      } catch (_) {
+        resolve({ src: dataUrl, blobUrl: null });
+      }
+    });
+  }
+
+  /* 换工程时把上一份工程的媒体源全部释放，避免 27MB 音源在 Map 里越攒越多。
+     不这么做的话：旧 <video> 一直持有 dataURL，且同 id 还会被误复用成旧音源。 */
+  function disposeAllMediaClipSources() {
+    Array.from(audioClipSources.keys()).forEach(id => disposeAudioClipSource(id));
+    Array.from(videoClipSources.keys()).forEach(id => disposeVideoClipSource(id));
+  }
 
   function audioClipObjectAt(id, idx) {
     const tid = String(id);
@@ -3145,8 +3330,9 @@ function importActionPresets() {
     const id = ++uid;
     videoEl.loop = false;
     videoEl.muted = true;
+    const blobUrl = (videoEl.src && videoEl.src.indexOf('blob:') === 0) ? videoEl.src : null;
     audioClipSources.set(id, {
-      id, video: videoEl, dataUrl: dataUrl || '',
+      id, video: videoEl, dataUrl: dataUrl || '', blobUrl,
       durMs: durMs || 0, fps: fps || 12
     });
     const r = Math.min(1, 360 / 640);
@@ -3168,13 +3354,101 @@ function importActionPresets() {
     v.muted = true;
   }
 
+  /* v7.8.4：工程刚打开时 27MB 音频可能还没解码完，playAudioClips 首帧会因
+     readyState<1 直接跳过；若这一段只有几帧，后面不一定再触发，表现就是「有音轨但没声音」。
+     这里挂一次就绪回调，解码完成后若仍在播放就补一次播放。 */
+  function armAudioReadyRetry(src) {
+    const v = src && src.video;
+    if (!v || src.audioReadyRetry) return;
+    const done = () => {
+      v.removeEventListener('loadeddata', done);
+      v.removeEventListener('canplay', done);
+      src.audioReadyRetry = false;
+      if (isPlaying && src.pendingPlayIdx != null) {
+        const idx = src.pendingPlayIdx;
+        src.pendingPlayIdx = null;
+        playAudioClips(idx);
+      }
+    };
+    src.audioReadyRetry = true;
+    v.addEventListener('loadeddata', done);
+    v.addEventListener('canplay', done);
+  }
+
+  /* v7.8.4：导出混音用的音轨事件表。
+     只扫描本次导出的帧范围，按轨道上的连续出场段切成事件；时间用真实帧时长累加，
+     不用 fps 反推，所以可变帧时长也准。音频元件按自己的 volume，视频元件按自身音轨原音量。 */
+  function mediaSourceById(map, id) {
+    if (!map) return null;
+    const key = String(id);
+    if (map.has(id)) return map.get(id);
+    if (map.has(key)) return map.get(key);
+    const num = Number(key);
+    if (Number.isFinite(num) && map.has(num)) return map.get(num);
+    for (const [k, v] of map) if (String(k) === key) return v;
+    return null;
+  }
+
+  function collectAudioTimeline(n, tid) {
+    const events = [];
+    if (!(n > 0)) return events;
+    const starts = [0];
+    for (let i = 0; i < n; i++) starts.push(starts[i] + ((AppState.frames[i] && AppState.frames[i].duration) || Math.round(1000 / defaultFPS)));
+    const totalSec = starts[n] / 1000;
+    const wantTrack = (id) => !tid || String(id) === String(tid);
+
+    for (const id in AppState.tracks) {
+      if (!wantTrack(id)) continue;
+      const key = String(id);
+      const aSrc = mediaSourceById(audioClipSources, key);
+      const vSrc = mediaSourceById(videoClipSources, key);
+      const src = aSrc || vSrc;
+      if (!src) continue;
+      const url = src.blobUrl || src.dataUrl || '';
+      if (!url) continue;
+      const wantedType = aSrc ? 'audioClip' : 'videoClip';
+      let i = 0;
+      while (i < n) {
+        const o = getTrackFrame(key, i);
+        if (!o || o.type !== wantedType) { i++; continue; }
+        let end = i;
+        while (end + 1 < n) {
+          const next = getTrackFrame(key, end + 1);
+          if (!next || next.type !== wantedType) break;
+          end++;
+        }
+        const startSec = starts[i] / 1000;
+        const endSec = starts[end + 1] / 1000;
+        const dur = endSec - startSec;
+        if (dur > 0.001 && startSec < totalSec) {
+          /* 复用播放时的段内时间算法：从段首按帧时长累加，且不超过媒体真实时长 */
+          const offsetSec = aSrc ? audioClipTimeAt(src, i, o) : 0;
+          const vol = aSrc && typeof o.volume === 'number'
+            ? Math.max(0, Math.min(1, o.volume))
+            : 1;
+          events.push({
+            id: key, url, kind: wantedType,
+            startSec, durationSec: dur, offsetSec, volume: vol
+          });
+        }
+        i = end + 1;
+      }
+    }
+    return events;
+  }
+
   /* v7.8.2：音频像「参考视频」那样连续播放 —— 只在进入段落那一刻 set 一次起点并 play()，
      段内不再逐帧 seek（逐帧按 fps 拽 currentTime 会把声音卡成碎块，声音本就不该受 fps 影响）。
      src.playSeg 记住当前正在播的段落起点，段内直接放行；换段/出段才重新定位或停音。 */
   function playAudioClips(idx) {
     audioClipSources.forEach((src, id) => {
       const v = src.video;
-      if (!v || v.readyState < 1) return;
+      if (!v || v.readyState < 1) {
+        src.pendingPlayIdx = idx;
+        armAudioReadyRetry(src);
+        return;
+      }
+      src.pendingPlayIdx = null;
       const o = audioClipObjectAt(id, idx);
       if (!o) {
         if (src.playSeg != null) { pauseSingleAudioClip(src); src.playSeg = null; }
@@ -3211,6 +3485,7 @@ function importActionPresets() {
       try { v.muted = true; } catch (_) {}
       try { v.removeAttribute('src'); v.load(); } catch (_) {}
     }
+    if (src.blobUrl) { try { URL.revokeObjectURL(src.blobUrl); } catch (_) {} }
     audioClipSources.delete(id);
   }
 
@@ -3231,8 +3506,9 @@ function importActionPresets() {
     const id = ++uid;
     /* v7.7.6：不循环。视频只在其轨道段落覆盖的帧区间播放画面与声音。 */
     videoEl.loop = false;
+    const blobUrl = (videoEl.src && videoEl.src.indexOf('blob:') === 0) ? videoEl.src : null;
     videoClipSources.set(id, {
-      id, video: videoEl, dataUrl: dataUrl || '', w, h,
+      id, video: videoEl, dataUrl: dataUrl || '', blobUrl, w, h,
       durMs: durMs || 0, fps: fps || 12, frameCache: new Map()
     });
     const r = Math.min(1, 360 / w);
@@ -3337,25 +3613,32 @@ function importActionPresets() {
     v.muted = true;
   }
 
+  /* v7.8.3：视频元件改成和音频完全相同的 playSeg 连续播放机制（昨天音频不卡的做法）。
+     原来视频在 playTick 每帧按 fps 算 target、差值大就 seek，等于把画面逐帧拽回，
+     第二遍循环回绕时 currentTime 异步生效又会连发 seek → 闪烁 + 卡顿。
+     现在：进入某一段才 set 一次起点并 play()，段内自然连续走、绝不碰 currentTime；
+     只有换段 / 循环回绕（playTick 会清 playSeg）才重新定位。声音同理，不再受 fps 拽。 */
   function playVideoClips(idx) {
     videoClipSources.forEach((src, id) => {
       const v = src.video;
       if (!v || v.readyState < 1) return;
       const o = videoClipObjectAt(id, idx);
-      if (!o) { pauseSingleVideoClip(src); return; }
+      if (!o) {
+        if (src.playSeg != null) { pauseSingleVideoClip(src); src.playSeg = null; }
+        return;
+      }
+      const seg = videoClipSegmentAt(id, idx);
+      const segStart = seg ? seg.start : idx;
+      /* 同一段内已经在播：不碰 currentTime，让画面自然连续走 */
+      if (src.playSeg === segStart && !v.paused && !v.muted) return;
+      /* 进入新段落 / 循环回绕：set 一次段内起点，然后连续播放 */
+      src.playSeg = segStart;
       const target = videoClipTimeAt(src, idx, o);
-      const frameMs = (AppState.frames[idx] && AppState.frames[idx].duration) || Math.round(1000 / (src.fps || 12));
-      const frameSec = frameMs / 1000;
       v.loop = false;
-      /* 只在明显跑偏时 seek，避免每帧 currentTime 反复跳导致卡顿。 */
-      if (Math.abs(v.currentTime - target) > Math.max(0.05, frameSec * 0.6)) {
-        try { v.currentTime = target; } catch (_) {}
-      }
-      if (v.muted || v.paused) {
-        v.muted = false;
-        const p = v.play();
-        if (p && typeof p.catch === 'function') p.catch(() => {});
-      }
+      try { v.currentTime = target; } catch (_) {}
+      v.muted = false;
+      const p = v.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
     });
     startVideoClipRaf();
   }
@@ -3406,6 +3689,7 @@ function importActionPresets() {
       try { v.removeAttribute('src'); v.load(); } catch (_) {}
     }
     if (src.frameCache) src.frameCache.clear();
+    if (src.blobUrl) { try { URL.revokeObjectURL(src.blobUrl); } catch (_) {} }
     videoClipSources.delete(id);
   }
 
@@ -4933,44 +5217,6 @@ function importActionPresets() {
     return { ax, ay };
   }
 
-  function queueImageObj(im, isSel, isExporting, opts) {
-    opts = opts || {};
-    const alphaMul = resolveAlphaMul(opts, im);
-    const b = imageBounds(im);
-    const { ax, ay } = getAnchorOffset(im, im.scale);
-    const rot = (im.rot || 0) * Math.PI / 180;
-    /* v5.2.0 四角扭曲：位图走 16x16 网格切片（Mesh Warping），绝不逐像素 CPU 插值 */
-    const distMap = SKFE.systems.distort.getMapping(im);
-    if (distMap) {
-      renderQueue.push({ level: im.layer, draw: () => {
-        ctx.save();
-        ctx.globalAlpha = im.alpha * alphaMul;
-        SKFE.systems.distort.drawWarpedBitmap(ctx, im.img, distMap);
-        ctx.restore();
-      }});
-      return;
-    }
-    renderQueue.push({ level: im.layer, draw: () => {
-      ctx.save();
-      ctx.globalAlpha = im.alpha * alphaMul;
-      ctx.translate(im.x + ax, im.y + ay);
-      if (rot) ctx.rotate(rot);
-      if (im.mirror) ctx.scale(-1, 1);
-      ctx.drawImage(im.img, -b.w / 2 - ax, -b.h / 2 - ay, b.w, b.h);
-      ctx.restore();
-      if (isSel && !isExporting && !transformBoxOn) {
-        ctx.save();
-        ctx.translate(im.x + ax, im.y + ay);
-        if (rot) ctx.rotate(rot);
-        if (im.mirror) ctx.scale(-1, 1);
-        ctx.strokeStyle = im.locked ? 'rgba(239, 68, 68, 0.95)' : 'rgba(74,144,255,.95)';
-        ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
-        ctx.strokeRect(-b.w / 2 - ax, -b.h / 2 - ay, b.w, b.h);
-        ctx.restore();
-      }
-    }});
-  }
-
   function getBoundFigureTransform(o) {
     if (!o || o.bindTo === 'none' || !o.targetId) return null;
     const list = _renderList || AppState.objects;
@@ -5662,11 +5908,6 @@ function importActionPresets() {
     }});
   }
 
-  function imageBounds(im) {
-    const w = im.w * im.scale, h = im.h * im.scale;
-    return { x: im.x - w / 2, y: im.y - h / 2, w, h };
-  }
-
   /* ==================== v7.7.3 蒙版绘制包装 ====================
      不逐个改 queueXxx：先把单个对象生成的绘制项收集起来，整体画到离屏画布，
      再做基础裁剪 / 色度键控，最后按原矩阵贴回。这样图片、图形、对话框、
@@ -5947,20 +6188,271 @@ function importActionPresets() {
     return wrapped;
   }
 
+  /* ==================== v7.9.1 编组：一等整体对象 / 父变换渲染 ====================
+     组载体是真正的父级变换节点，中心锚点就是它的局部坐标原点：
+       变换后世界 = Group 外层矩阵 × 成员原始世界坐标
+     成员的 x/y/关键帧数据保持原样，位移/旋转/缩放作用于整个组，不改写成员。
+     离屏合成只是渲染实现细节：成员先原样画进离屏，再整体套父变换贴回；
+     四角扭曲在父变换之后作用，所以扭曲盒跟随旋转后的组框。
+     进入组编辑时跳过父变换，成员按原样显示与编辑。 */
+  function groupOuterAffine(g) {
+    /* 把「建组时的原始中心 (bx,by)」映射到「当前中心 (x,y)」，其余成员世界坐标不动 */
+    const dx = (g.x || 0) - (g.bx != null ? g.bx : g.x || 0);
+    const dy = (g.y || 0) - (g.by != null ? g.by : g.y || 0);
+    const rot = (g.rot || 0) * Math.PI / 180;
+    const s = g.scale == null ? 1 : g.scale;
+    const cx = g.bx != null ? g.bx : g.x || 0, cy = g.by != null ? g.by : g.y || 0;
+    return { dx, dy, rot, s, mirror: !!g.mirror, cx, cy };
+  }
+
+  function applyGroupAffineCtx(g, targetCtx) {
+    const c = targetCtx || ctx;
+    const a = groupOuterAffine(g);
+    /* 以建组中心 (bx,by) 为局部原点（ax/ay=0），当前中心 (x,y) 为该原点在世界里的位置。
+       T(当前中心) · R · M · S · T(-原始中心) 就是把成员从组的局部空间搬到世界。 */
+    c.translate(a.cx + a.dx, a.cy + a.dy);
+    if (a.rot) c.rotate(a.rot);
+    if (a.mirror) c.scale(-1, 1);
+    c.scale(a.s, a.s);
+    c.translate(-a.cx, -a.cy);
+  }
+
+  /* 组选中轮廓单独画，避免被父变换重复作用 */
+  function drawGroupOutline(mainCtx, carrier, isExporting) {
+    if (isExporting || carrier !== AppState.selected || transformBoxOn) return;
+    if (mainCtx && mainCtx.__isSvgRecorder) return;
+    const obb = getObjectOBB(carrier);
+    if (!obb || !obb.corners || obb.corners.length < 4) return;
+    mainCtx.save();
+    try {
+      mainCtx.strokeStyle = 'rgba(255,165,0,.9)';
+      mainCtx.lineWidth = 2 / (mainCtx.getTransform().a || 1);
+      mainCtx.setLineDash([6, 4]);
+      mainCtx.beginPath();
+      mainCtx.moveTo(obb.corners[0].x, obb.corners[0].y);
+      for (let i = 1; i < obb.corners.length; i++) mainCtx.lineTo(obb.corners[i].x, obb.corners[i].y);
+      mainCtx.closePath();
+      mainCtx.stroke();
+    } finally { mainCtx.restore(); }
+  }
+
+  /* 当前帧处在「有效编组」里的成员轨 id → 载体。进入某组编辑时该组的成员不套外层。 */
+  function activeGroupCarriers(drawList) {
+    const map = Object.create(null);
+    const G = SKFE.systems.group;
+    if (!G) return map;
+    for (const o of drawList) {
+      if (!G.isGroup(o)) continue;
+      if (G.isEditing(o.gid || o.id)) continue;   // 正在编辑这个组 → 成员画原样
+      map[String(o.gid || o.id)] = o;
+    }
+    return map;
+  }
+
+  /* 退出组编辑时重算组框：成员在组内改过位置后，旧 w/h 可能已经包不住内容。
+     以建组中心 bx/by（ax/ay=0 的锚点）为固定原点，只放大、不缩小，宽高用同一个 k。
+     外层 affine 只看 bx/by 与 x/y，所以不会动；扭曲的 baseW/baseH 与四角同步乘 k，
+     归一化形变保持不变，原组效果不会被这次扩框抹掉。 */
+  function refitGroupBoundsOnExit(gid) {
+    const G = SKFE.systems.group;
+    if (!G) return false;
+    const id = String(gid);
+    const track = AppState.tracks[id];
+    const carrier = getTrackFrame(id, AppState.currentFrameIndex);
+    if (!track || !track.frames || !carrier || !G.isGroup(carrier)) return false;
+
+    const bx = carrier.bx != null ? carrier.bx : (carrier.x || 0);
+    const by = carrier.by != null ? carrier.by : (carrier.y || 0);
+    const baseW = carrier.w || 0, baseH = carrier.h || 0;
+    if (!(baseW > 0 && baseH > 0)) return false;
+
+    let maxAbsX = 0, maxAbsY = 0, found = false;
+    const total = Math.max(AppState.frames.length, track.frames.length);
+    for (let i = 0; i < total; i++) {
+      const members = G.membersOf(id, i);
+      if (!members || !members.length) continue;
+      for (const m of members) {
+        const obb = getObjectOBB(m);   /* 已含成员自身扭曲后的四角 */
+        if (!obb || !obb.corners) continue;
+        for (const p of obb.corners) {
+          if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
+          const dx = Math.abs(p.x - bx), dy = Math.abs(p.y - by);
+          if (dx > maxAbsX) maxAbsX = dx;
+          if (dy > maxAbsY) maxAbsY = dy;
+          found = true;
+        }
+      }
+    }
+    if (!found) return false;
+
+    const k = Math.max(1, maxAbsX / (baseW / 2), maxAbsY / (baseH / 2));
+    if (!(k > 1.0001)) return false;
+
+    for (const slot of track.frames) {
+      if (!slot || slot.__d || !G.isGroup(slot)) continue;
+      slot.w = (slot.w || baseW) * k;
+      slot.h = (slot.h || baseH) * k;
+      const d = slot.distort;
+      if (!d) continue;
+      /* baseW/baseH 与 corners 同倍缩放 → dstOwn/base 比例不变，扭曲外观不变 */
+      if (d.baseW > 0) d.baseW *= k;
+      if (d.baseH > 0) d.baseH *= k;
+      if (Array.isArray(d.corners)) {
+        for (const c of d.corners) { if (c && isFinite(c.x) && isFinite(c.y)) { c.x *= k; c.y *= k; } }
+      }
+      /* 兼容旧数据里可能残留的冻结框架 */
+      if (d.frame0) {
+        if (d.frame0.w > 0) d.frame0.w *= k;
+        if (d.frame0.h > 0) d.frame0.h *= k;
+        if (isFinite(d.frame0.dx)) d.frame0.dx *= k;
+        if (isFinite(d.frame0.dy)) d.frame0.dy *= k;
+      }
+    }
+    bumpKfEval();
+    invalidateAllFrameThumbs();
+    return true;
+  }
+
+  /* 把一组的内容先画到离屏（世界坐标），再整张套外层变换贴回主画布。
+     这样成员的真实数据一点不改，整组的位移/缩放/旋转/扭曲都是「外层」。 */
+  function queueGroupComposite(carrier, drawList, isExporting, opts) {
+    const G = SKFE.systems.group;
+    const gid = String(carrier.gid || carrier.id);
+    const members = G ? G.membersOf(gid, opts.frameIndex != null ? opts.frameIndex : AppState.currentFrameIndex) : [];
+    if (!members.length) return;
+
+    const alpha = carrier.alpha == null ? 1 : carrier.alpha;
+    if (!(alpha > 0)) return;
+
+    /* 成员世界包围盒（含自身扭曲后的四角） */
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const m of members) {
+      const obb = getObjectOBB(m);
+      if (!obb || !obb.corners) continue;
+      for (const p of obb.corners) {
+        if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+      }
+    }
+    if (!(maxX > minX && maxY > minY)) return;
+    /* 外层变换要用于所有成员；扩边避免缩放/旋转时裁切。
+       每张离屏画布只服务当前这一个 carrier，避免同帧多组互相覆盖。 */
+    const padX = (maxX - minX) * 0.5 + 200, padY = (maxY - minY) * 0.5 + 200;
+    minX -= padX; maxX += padX; minY -= padY; maxY += padY;
+
+    const W = Math.max(1, Math.ceil(maxX - minX)), H = Math.max(1, Math.ceil(maxY - minY));
+    if (W > 8192 || H > 8192) return;
+    const groupCv = document.createElement('canvas');
+    groupCv.width = W; groupCv.height = H;
+    const gctx = groupCv.getContext('2d');
+    gctx.setTransform(1, 0, 0, 1, -minX, -minY);
+    gctx.clearRect(minX, minY, W, H);
+    gctx.lineCap = 'round'; gctx.lineJoin = 'round';
+
+    /* 用 renderScene 把成员原样画进离屏（asGroupMembers 防止再次触发编组逻辑） */
+    const savedCtx = ctx, savedQueue = renderQueue, savedList = _renderList;
+    ctx = gctx; renderQueue = []; _renderList = drawList;
+    try {
+      renderScene(members, {
+        isExporting: true, isGhost: true, asGroupMembers: true,
+        refList: drawList, frameIndex: opts.frameIndex
+      });
+      for (const it of renderQueue) it.draw();
+    } catch (_) { /* 单个成员渲染失败不拖垮整组 */ }
+    finally { ctx = savedCtx; renderQueue = savedQueue; _renderList = savedList; }
+
+    const DZ = SKFE.systems.distort;
+    const rawMp = (DZ && DZ.isActive(carrier)) ? DZ.getMapping(carrier) : null;
+    let warpCv = null;
+    let warpMp = null;
+    if (rawMp && rawMp.frame && rawMp.frame.w > 0 && rawMp.frame.h > 0) {
+      const ww = Math.max(2, Math.ceil(rawMp.frame.w));
+      const wh = Math.max(2, Math.ceil(rawMp.frame.h));
+      /* 组的全帧并集范围可能很大；超过离屏画布上限就退回外层仿射，
+         避免超大 canvas 直接失败或把成员裁成碎片。 */
+      if (ww <= 8192 && wh <= 8192) {
+        warpMp = rawMp;
+        warpCv = document.createElement('canvas');
+        warpCv.width = ww; warpCv.height = wh;
+        const wctx = warpCv.getContext('2d');
+        wctx.setTransform(1, 0, 0, 1, 0, 0);
+        wctx.clearRect(0, 0, ww, wh);
+        const kx = ww / rawMp.frame.w, ky = wh / rawMp.frame.h;
+        /* canvas 矩阵按「行」写：x' = a*x + c*y + e，y' = b*x + d*y + f。
+           世界 → 盒空间要投影到 U、V 两条轴上：
+             local.x = ux*dx + uy*dy  →  a=kx*ux, c=kx*uy
+             local.y = vx*dx + vy*dy  →  b=ky*vx, d=ky*vy
+           之前写成 a=kx*ux, b=kx*uy, c=ky*vx, d=ky*vy（把 b/c 对调），
+           未旋转时恰好看不出来；组一旋转就把源图又转了一次并裁掉。 */
+        const ax = kx * rawMp.frame.ux, bx = ky * rawMp.frame.vx;
+        const cx2 = kx * rawMp.frame.uy, dy = ky * rawMp.frame.vy;
+        wctx.setTransform(ax, bx, cx2, dy,
+          ww / 2 - (ax * rawMp.frame.ox + cx2 * rawMp.frame.oy),
+          wh / 2 - (bx * rawMp.frame.ox + dy * rawMp.frame.oy));
+        /* groupCv 里是成员原始世界坐标；rawMp.frame 是「组父变换后的世界盒」。
+           先把源图经组父变换搬到变换后的世界，再投到盒空间，扭曲才会跟着旋转框走。 */
+        applyGroupAffineCtx(carrier, wctx);
+        wctx.drawImage(groupCv, minX, minY);
+      }
+    }
+
+    const level = carrier.layer || 0;
+    renderQueue.push({ level: level, draw: () => {
+      const mainCtx = ctx;
+      /* SVG 录制器只收矢量；编组是像素级合成，SVG 序列退回逐成员原样由导出侧处理 */
+      if (mainCtx && mainCtx.__isSvgRecorder) return;
+      mainCtx.save();
+      try {
+        mainCtx.globalAlpha *= alpha;
+        if (warpCv && warpMp && DZ) DZ.drawWarpedBitmap(mainCtx, warpCv, warpMp, {
+          srcW: warpCv.width, srcH: warpCv.height, grid: 4,
+          eps: 0.35, srcExpand: 0   /* 透明线稿不做 1px 重叠，否则相邻三角形会把半透明边缘叠成灰网格 */
+        });
+        else {
+          applyGroupAffineCtx(carrier, mainCtx);
+          mainCtx.drawImage(groupCv, minX, minY);
+        }
+      } finally { mainCtx.restore(); }
+      drawGroupOutline(mainCtx, carrier, isExporting);
+    }});
+  }
+
   function renderScene(list, opts) {
     opts = opts || {};
     const isExporting = !!opts.isExporting;
-    /* 渲染出口的绘制列表会剔除被小眼睛隐藏的元件，
-       但 _renderList 必须保留**完整**列表：绑定件的父级查找（getBindTransform / getBindBase /
-       getParentWarp / getMountedExtent）都依赖它。若把隐藏的 figure 摘掉，挂在它身上的画笔
-       会查不到父级、回退到自身 x/y，看起来就是「隐藏火柴人后元件四散」。 */
+    /* v7.9.0：导出/缩略图也按当前组的编辑状态走；导出时对所有组统一套外层（原样导出组合结果） */
     const prevList = _renderList;
-    _renderList = opts.refList || list;
-    const drawList = opts.includeHidden ? list : list.filter(o => o && !o.hidden);
+    /* v7.9.0：进入组后，画布只显示这一组的成员；其他元件保留在轨道/工程里但暂时不画。
+       导出、缩略图和组内部合成都不走这条过滤，保证导出仍是完整工程。 */
+    let sourceList = list;
+    const EG = SKFE.systems.group;
+    if (!isExporting && !opts.asGroupMembers && !opts.ignoreGroupEdit && EG) {
+      const editing = EG.getEditingGroupId();
+      if (editing) sourceList = EG.membersOf(editing, opts.frameIndex != null ? opts.frameIndex : AppState.currentFrameIndex);
+    }
+    _renderList = opts.refList || sourceList;
+    const drawList = opts.includeHidden ? sourceList : sourceList.filter(o => o && !o.hidden);
     const prevQueue = renderQueue;
     renderQueue = [];
 
+    const G = SKFE.systems.group;
+    const carriers = (G && !opts.asGroupMembers) ? activeGroupCarriers(drawList) : Object.create(null);
+    const groupedMemberIds = Object.create(null);
+    for (const gid in carriers) {
+      const kids = (G.membersOf(gid, opts.frameIndex != null ? opts.frameIndex : AppState.currentFrameIndex));
+      for (const m of kids) groupedMemberIds[String(m.id)] = gid;
+    }
+
     for (const o of drawList) {
+      /* 属于有效编组的成员：不在普通流程里单独画，交给下面的载体合成 */
+      if (groupedMemberIds[String(o.id)]) continue;
+      /* 载体自身不按普通类型绘制：它是一等父变换节点。
+         成员先原样合成到离屏，再整体套组父变换；扭曲时再在父变换之后 warp。 */
+      if (G && G.isGroup(o)) {
+        queueGroupComposite(o, drawList, isExporting, opts);
+        continue;
+      }
       const isSel = !isExporting && !opts.isGhost && o === AppState.selected;
       if (o.type === 'camera') { SKFE.systems.camera.queueCamera(o, isSel, isExporting, opts); continue; }
       // figure 的橡皮擦走 queueFigure 内部的肢体局部遮罩（drawMaskedLimb 等），
@@ -6086,6 +6578,18 @@ function importActionPresets() {
      所以绝不能做变形，否则 getMapping 会自己递归自己。展示用的版本在 getObjectOBB。 */
   function getSourceOBB(o, skipMounted) {
     if (!o) return null;
+    /* v7.9.0 编组载体：OBB = 成员并集盒（建组时算好 w/h/bx/by），再套外层变换，
+       让变换框/扭曲控制点能像操作一个普通元件一样操作整组。 */
+    if (o.type === 'group') {
+      const a = groupOuterAffine(o);
+      const hw = (o.w || 0) / 2, hh = (o.h || 0) / 2;
+      /* 顺序与 applyGroupAffineCtx 完全一致：T(cx+dx,cy+dy)·R·M·S·T(-cx,-cy) */
+      let m = tboxMatMul(tboxMatT(a.cx + a.dx, a.cy + a.dy), tboxMatR(a.rot));
+      if (a.mirror) m = tboxMatMul(m, tboxMatS(-1, 1));
+      m = tboxMatMul(m, tboxMatS(a.s, a.s));
+      m = tboxMatMul(m, tboxMatT(-a.cx, -a.cy));
+      return tboxObbFromCorners(tboxQuadFromMatrix(m, a.cx - hw, a.cy - hh, a.cx + hw, a.cy + hh));
+    }
     if (o === CANVAS_BOUNDS_TARGET) {
       const w = AppState.canvasBounds.w, h = AppState.canvasBounds.h;
       const cx = AppState.canvasBounds.x + w / 2, cy = AppState.canvasBounds.y + h / 2;
@@ -6112,13 +6616,6 @@ function importActionPresets() {
       if (o.mirror) m = tboxMatMul(m, tboxMatS(-1, 1));
       m = tboxMatMul(m, tboxMatT(-o.x, -o.y));
       return tboxObbFromCorners(tboxQuadFromMatrix(m, l, t, r, b));
-    }
-    if (o.type === 'image') {
-      const b = imageBounds(o);
-      const { ax, ay } = getAnchorOffset(o, o.scale);
-      let m = tboxMatMul(tboxMatT(o.x + ax, o.y + ay), tboxMatR((o.rot || 0) * Math.PI / 180));
-      if (o.mirror) m = tboxMatMul(m, tboxMatS(-1, 1));
-      return tboxObbFromCorners(tboxQuadFromMatrix(m, -b.w / 2 - ax, -b.h / 2 - ay, b.w / 2 - ax, b.h / 2 - ay));
     }
     if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'videoClip') {
       const trans = getBindTransform(o);
@@ -6419,7 +6916,7 @@ function importActionPresets() {
     place('tbBtnRotate', g.corners[3]);
     const mirrorBtn = document.getElementById('tbBtnMirror');
     const target = g.target;
-    const canMirror = target !== CANVAS_BOUNDS_TARGET && ['figure', 'image', 'acc', 'shape', 'ink'].includes(target.type); // brush-v5.1.0: §6.3.4
+    const canMirror = target !== CANVAS_BOUNDS_TARGET && ['figure', 'acc', 'shape', 'ink'].includes(target.type); // brush-v5.1.0: §6.3.4
     if (canMirror) place('tbBtnMirror', g.corners[0]);
     else if (mirrorBtn) mirrorBtn.style.display = 'none';
 
@@ -6437,7 +6934,7 @@ function importActionPresets() {
     if (!target) return false;
     if (target !== CANVAS_BOUNDS_TARGET && target.locked) return false;
     if (mode === 'mirror') {
-      return target !== CANVAS_BOUNDS_TARGET && ['figure', 'image', 'acc', 'shape', 'ink'].includes(target.type); // brush-v5.1.0: §6.3.4
+      return target !== CANVAS_BOUNDS_TARGET && ['figure', 'acc', 'shape', 'ink'].includes(target.type); // brush-v5.1.0: §6.3.4
     }
     if (target !== CANVAS_BOUNDS_TARGET && target.type === 'figure' && (mode === 'move' || mode === 'rotate')) {
       if (hasAnyPinInAllFrames(target)) {
@@ -6567,7 +7064,7 @@ function importActionPresets() {
 
   function applyTBoxScale(d, screen) {
     const target = d.target;
-    const isFreeType = target === CANVAS_BOUNDS_TARGET || ['image', 'shape', 'acc'].includes(target.type);
+    const isFreeType = target === CANVAS_BOUNDS_TARGET || ['shape', 'acc'].includes(target.type);
     if (freeStretchOn && isFreeType) {
       /* 自由拉伸：按框的 X/Y 轴分别计算 kx / ky（不依赖视觉框最小尺寸） */
       const cos = Math.cos(-d.angle), sin = Math.sin(-d.angle);
@@ -6708,7 +7205,7 @@ function importActionPresets() {
   /* 单击镜像 */
   function toggleTransformBoxMirror(target) {
     if (!target || target === CANVAS_BOUNDS_TARGET) return;
-    if (!['figure', 'image', 'acc', 'shape', 'ink'].includes(target.type) || target.locked) return; // brush-v5.1.0: §6.3.4
+    if (!['figure', 'acc', 'shape', 'ink', 'group'].includes(target.type) || target.locked) return; // brush-v5.1.0: §6.3.4 + v7.9.0 编组
     target.mirror = !target.mirror;
     if (isBoundObj(target)) setGlobalPropForBound(target, 'mirror', target.mirror);
     else setGlobalProp(target, 'mirror', target.mirror);
@@ -6810,6 +7307,53 @@ function importActionPresets() {
       syncGlobal: (o) => syncDistortToAllFrames(o),
       isBlocked: () => isPlaying || !!window.__isExporting || !!SKFE.systems.camera.getCameraViewObject()
     });
+
+    /* ==================== v7.9.0 编组系统 hooks ====================
+       成员外层变换：成员数据不变，整体变换只存在载体对象上；点进组则跳过载体直接画成员原样。 */
+    if (SKFE.systems.group) {
+      SKFE.systems.group.setHooks({
+        getTracks: () => AppState.tracks,
+        getFrame: (id, idx) => getTrackFrame(String(id), idx != null ? idx : AppState.currentFrameIndex),
+        getObjsAt: (idx) => getTrackObjectsAt(idx),
+        getObb: (o) => getObjectOBB(o),
+        getCtx: () => ctx,
+        getSelected: () => AppState.selected,
+        select: (o) => select(o),
+        getFrameIndex: () => AppState.currentFrameIndex,
+        getTotalFrames: () => AppState.frames.length,
+        nextUid: () => ++uid,
+        generateName: (o) => generateName(o),
+        cloneKeepImg: (o) => cloneObjectKeepImg(o),
+        setTracksDirty: () => {
+          refreshObjectsNow();
+          bumpKfEval();
+          invalidateAllFrameThumbs();
+          syncMainLengthFromTracks();
+          updateFrameBar();
+          updateLayerList();
+          EventBus.emit('need:syncUI');
+          EventBus.emit('need:render');
+          saveHistory('编组操作');
+        },
+        /* 进组后画面只留成员：清掉组载体的选中态与所有叠加框，
+           否则属性面板还显示编组、画布还挂着组扭曲后的虚线四边形。 */
+        onEnterGroup: () => {
+          AppState.selected = null;
+          AppState.canvasSelected = false;
+          if (SKFE.systems.distort) SKFE.systems.distort.cancelDrag();
+          distortEditOn = false;
+          if (transformBoxOn) {
+            transformBoxOn = false;
+            try { localStorage.setItem('skfe_transform_box_v1', '0'); } catch (_) {}
+            cancelTransformBoxDrag();
+          }
+          EventBus.emit('need:syncUI');
+        },
+        /* 退出组时按锚点等比扩框；扩框前后组外层 affine 与扭曲归一化形状都不变。 */
+        onExitGroup: (gid) => refitGroupBoundsOnExit(gid),
+        t: (k, fb) => tr2(k, fb)
+      });
+    }
 
     const btn = document.getElementById('btnDistort');
     if (btn) {
@@ -6921,8 +7465,11 @@ function importActionPresets() {
   /* 获取对象旋转轴心（世界坐标） */
   function getRotatePivot(o) {
     if (!o) return null;
-    if (o.type === 'image') {
-      return { x: o.x + (o.ax || 0) * o.scale, y: o.y + (o.ay || 0) * o.scale };
+    /* v7.9.0：组载体有独立锚点，建组时固定在组包围盒中心（ax/ay = 0）。
+       旋转识别优先用这个中心，不再借用成员自己的锚点。 */
+    if (o.type === 'group') {
+      const k = o.scale == null ? 1 : o.scale;
+      return { x: (o.x || 0) + (o.ax || 0) * k, y: (o.y || 0) + (o.ay || 0) * k };
     }
     if (o.type === 'acc' || o.type === 'shape' || o.type === 'bubble' || o.type === 'ink' || o.type === 'videoClip') {
       if (o.bindTo === 'none' || !o.targetId) {
@@ -6968,9 +7515,9 @@ function importActionPresets() {
         `X: ${Math.round(AppState.canvasBounds.x + AppState.canvasBounds.w / 2)}  Y: ${Math.round(displayY(AppState.canvasBounds.y + AppState.canvasBounds.h / 2))}`;
     } else if (AppState.selected && !isPlaying) {
       let x, y, typeIcon, typeName;
-      if (AppState.selected.type === 'figure' || AppState.selected.type === 'image' || AppState.selected.type === 'video') {
+      if (AppState.selected.type === 'figure' || AppState.selected.type === 'video') {
         x = AppState.selected.x; y = AppState.selected.y;
-        typeIcon = AppState.selected.type === 'figure' ? 'stickman' : AppState.selected.type === 'image' ? 'add-picture' : 'videocamera';
+        typeIcon = AppState.selected.type === 'figure' ? 'stickman' : 'videocamera';
         typeName = AppState.selected.name;
       } else if (AppState.selected.type === 'camera') {
         x = AppState.selected.x; y = AppState.selected.y;
@@ -7092,11 +7639,6 @@ function importActionPresets() {
         };
       }
       return b;
-    }
-    if (o.type === 'image') {
-      const bb = imageBounds(o);
-      const { ax, ay } = getAnchorOffset(o, o.scale);
-      return cornersBounds({ x: o.x + ax, y: o.y + ay }, ax, ay, bb.w, bb.h, (o.rot || 0) * Math.PI / 180);
     }
     if (o.type === 'video') {
       const w = o.w * o.scale, h = o.h * o.scale;
@@ -7345,7 +7887,7 @@ function importActionPresets() {
       anchorHandleEl.style.display = 'none'; 
       return; 
     }
-    if (!(AppState.selected.type === 'image' || AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip')) {
+    if (!(AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip')) {
       anchorHandleEl.style.display = 'none';
       return;
     }
@@ -7580,7 +8122,7 @@ function importActionPresets() {
       ctx.scale(AppState.viewScale, AppState.viewScale);
       drawCanvasBounds();
       if (anchorModeOn && AppState.selected && !AppState.selected.locked &&
-          (AppState.selected.type === 'image' || AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip')) {
+          (AppState.selected.type === 'acc' || AppState.selected.type === 'shape' || AppState.selected.type === 'bubble' || AppState.selected.type === 'videoClip')) {
         drawAnchorMarker();
       }
       drawMaskOutline(AppState.selected);
@@ -7858,6 +8400,7 @@ function importActionPresets() {
   const layerPopCountEl = document.getElementById('layerPopCount');
   const btnLayerPop = document.getElementById('btnLayerPop');
   let layerPopOpen = false;
+  let groupMultiSelectOn = false;   /* v7.9.0：底部元件栏多选开关（移动端也能跨行选） */
   let layerThumbCache = new Map();
   let layerThumbCacheV = -1;
   let layerDragState = null;
@@ -7874,15 +8417,26 @@ function importActionPresets() {
 
   /* 当前帧、可参与排序的元件（参考视频不参与，和图层列表保持一致） */
   function getLayerUIObjects() {
-    return AppState.objects
-      .filter(o => o && o.type !== 'video')
-      .sort((a, b) => layerSortVal(b) - layerSortVal(a));
+    /* 元件列表严格跟随当前帧：直接从当前帧轨道槽取对象，不再依赖可能被其它流程重建过的 AppState.objects。 */
+    const G = SKFE.systems.group;
+    const editingGid = G ? G.getEditingGroupId() : null;
+    return getTrackObjectsAt(AppState.currentFrameIndex)
+      .map((o, i) => ({ o, i }))
+      .filter(x => {
+        if (!x.o || x.o.type === 'video') return false;
+        const isGroup = !!(G && G.isGroup(x.o));
+        const gid = x.o.groupId != null ? String(x.o.groupId) : null;
+        /* 进组：只显示这一组的成员原样；组外：只显示组载体，成员不外露 */
+        if (editingGid) return !isGroup && gid === String(editingGid);
+        return !gid || isGroup;
+      })
+      .sort((a, b) => layerSortVal(b.o) - layerSortVal(a.o) || a.i - b.i)
+      .map(x => x.o);
   }
 
   /* 元件类型 → 图标 id（原来是 emoji，现在是 SVG，统一交给 ic() 渲染） */
   function layerItemIconId(o) {
     if (o.type === 'figure') return 'stickman';
-    if (o.type === 'image') return 'add-picture';
     if (o.type === 'acc') return 'add-picture';
     if (o.type === 'videoClip') return 'video-two';
     if (o.type === 'audioClip') return 'audio'; /* v7.8.1：音频元件 */
@@ -7891,6 +8445,7 @@ function importActionPresets() {
     if (o.type === 'bubble') return 'comment-one';
     if (o.type === 'ink') return 'pencil';
     if (o.type === 'camera') return 'videocamera';
+    if (o.type === 'group') return 'group';
     return 'help';
   }
 
@@ -7910,6 +8465,41 @@ function importActionPresets() {
     return url;
   }
 
+  /* 图层值写入：全局属性关闭时明确写当前帧轨道槽；
+     当前帧若是派生帧，先落成普通帧再写，否则排序只会改到临时求值对象、切帧即丢。 */
+  function writeLayerValue(o, path, value) {
+    if (!o) return;
+    const setPath = (obj, p, v) => {
+      const keys = p.split('.');
+      let cur = obj;
+      for (let i = 0; i < keys.length - 1; i++) {
+        if (cur[keys[i]] === undefined || cur[keys[i]] === null) cur[keys[i]] = {};
+        cur = cur[keys[i]];
+      }
+      cur[keys[keys.length - 1]] = v;
+    };
+    setPath(o, path, value);
+    if (globalEditEnabled) { setGlobalProp(o, path, value); return; }
+    const tid = String(o.id);
+    const t = AppState.tracks[tid];
+    if (!t || !t.frames) return;
+    const idx = AppState.currentFrameIndex;
+    let slot = t.frames[idx];
+    if (KF.isDerived(slot)) {
+      const live = getTrackFrame(tid, idx);
+      if (!live) return;
+      slot = cloneObjectKeepImg(live);
+      if (!slot) return;
+      delete slot.__d;
+      t.frames[idx] = slot;
+    } else if (!slot) {
+      const live = getTrackFrame(tid, idx) || o;
+      slot = cloneObjectKeepImg(live) || o;
+      t.frames[idx] = slot;
+    }
+    setPath(slot, path, value);
+  }
+
   /* 拖动排序：把整张列表重新编号，顶部最大 */
   function applyLayerOrder(ordered) {
     const n = ordered.length;
@@ -7920,13 +8510,11 @@ function importActionPresets() {
         const delta = target - cur;
         if (!delta) return;
         Object.keys(o.layer).forEach(k => {
-          o.layer[k] = (o.layer[k] || 0) + delta;
-          setGlobalProp(o, 'layer.' + k, o.layer[k]);
+          writeLayerValue(o, 'layer.' + k, (o.layer[k] || 0) + delta);
         });
       } else {
         if (cur === target) return;
-        o.layer = target;
-        setGlobalProp(o, 'layer', target);
+        writeLayerValue(o, 'layer', target);
       }
     });
     EventBus.emit('need:render');
@@ -8085,7 +8673,7 @@ function importActionPresets() {
       const handle = document.createElement('div');
       handle.className = 'lp-drag';
       handle.textContent = '≡';
-      handle.title = tr2('layerPop.dragTip', tr2('layerPop.dragTip', '长按 0.5 秒后左右拖动，调整图层上下顺序'));
+      handle.title = tr2('layerPop.dragTip', tr2('layerPop.dragTip', '拖动排序，按当前帧图层顺序写入（全局属性开启时同步所有帧）'));
       attachLayerDragHandle(handle, o, item);
       rail.appendChild(handle);
 
@@ -8100,6 +8688,15 @@ function importActionPresets() {
       item.title = (o.name || '') + (o.hidden ? tr2('layerPop.hiddenTag', '（已隐藏）') : '') + (o.locked ? tr2('layerPop.lockedTag', '（已锁定）') : '');
       item.addEventListener('click', (e) => {
         if (e.target.closest('.lp-eye') || e.target.closest('.lp-drag') || e.target.closest('.lp-lock') || e.target.closest('.lp-del')) return;
+        const additive = !!(groupMultiSelectOn || e.ctrlKey || e.metaKey);
+        if (additive) {
+          const id = String(o.id);
+          if (multiSelectedIds.has(id)) multiSelectedIds.delete(id);
+          else multiSelectedIds.add(id);
+          markLayerMultiSelectUI();
+          return;
+        }
+        multiSelectedIds.clear();
         select(o);
         EventBus.emit('need:render');
         renderLayerPop();
@@ -8107,6 +8704,7 @@ function importActionPresets() {
 
       layerPopListEl.appendChild(item);
     });
+    markLayerMultiSelectUI();
   }
 
   /* 长按 0.5 秒进入拖动；v6.3.1 起不画竖线指示器，改为「被拖行跟手 + 其余行实时让位」 */
@@ -8312,14 +8910,29 @@ function importActionPresets() {
       if (videoObj.locked === undefined) videoObj.locked = false;
       const btn = document.createElement('div');
       btn.className = 'layer-btn' + (videoObj === AppState.selected ? ' active' : '') + (videoObj.locked ? ' locked' : '');
+      btn.setAttribute('data-obj-id', String(videoObj.id));
       /* v7.8.1：只画一个矢量胶片图标 + 名字，不再叠加 🎥 emoji（此前两个图标重复） */
       btn.innerHTML = `<span>${ic('video')}</span>`;
       attachLayerName(btn, videoObj);
       btn.onclick = () => { select(videoObj); EventBus.emit('need:render'); };
       layerListEl.appendChild(btn);
     }
+    /* v7.9.0：组外只显示组载体；点进组后只显示该组成员（原样），外部元件与载体都不显示 */
+    const G = SKFE.systems.group;
+    const editingGid = G ? G.getEditingGroupId() : null;
+    let listSource = AppState.objects;
+    if (editingGid && G) {
+      const memberIds = new Set(G.membersOf(editingGid).map(m => String(m.id)));
+      listSource = AppState.objects.filter(o => memberIds.has(String(o && o.id)));
+    } else {
+      listSource = AppState.objects.filter(o => {
+        if (!o) return false;
+        if (G && G.isGroup(o)) return true;
+        return o.groupId == null;
+      });
+    }
     /* v7.8.1：按添加时间（id/uid 升序）排列，序号就是 name；不再按 layer 高低倒排 */
-    const sorted = [...AppState.objects].sort((a, b) => (a.id || 0) - (b.id || 0));
+    const sorted = [...listSource].sort((a, b) => (a.id || 0) - (b.id || 0));
     sorted.forEach(o => {
       /* v6.1.0：参考视频在 AppState.objects 里也会出现一份（渲染合并视图需要它），
          但列表顶部已经单独渲染了 🎥 那一行。这里必须跳过，否则会多出一个
@@ -8332,7 +8945,6 @@ function importActionPresets() {
       btn.className = 'layer-btn' + (o === AppState.selected ? ' active' : '') + (o.locked ? ' locked' : '');
       let icon = 'help';
       if (o.type === 'figure') icon = 'stickman';
-      else if (o.type === 'image') icon = 'add-picture';
       else if (o.type === 'acc') icon = 'add-picture';
       else if (o.type === 'videoClip') icon = 'video-two';
       else if (o.type === 'audioClip') icon = 'audio';
@@ -8340,7 +8952,9 @@ function importActionPresets() {
       else if (o.type === 'bubble') icon = 'comment-one';
       else if (o.type === 'ink') icon = 'pencil'; // brush-v5.1.0: §6.3.9
       else if (o.type === 'camera') icon = 'videocamera';
+      else if (o.type === 'group') icon = 'group'; /* v7.9.0：编组载体 */
       else if (o.type === 'video') icon = 'video'; /* 兜底：万一别处把视频带进来，也不要显示问号 */
+      btn.setAttribute('data-obj-id', String(o.id));
       btn.innerHTML = `<span>${ic(icon)}</span>`;
       attachLayerName(btn, o);
       if (o.hidden) { btn.classList.add('hidden-obj'); btn.title = (o.name || '') + tr2('layerPop.hiddenTag', '（已隐藏）'); }
@@ -8450,7 +9064,12 @@ function importActionPresets() {
       if (!t) continue;
       out[id] = {
         name: t.name,
-        frames: (t.frames || []).map(d => d ? cloneObjectKeepImg(d) : null)
+        frames: (t.frames || []).map(d => d ? cloneObjectKeepImg(d) : null),
+        /* v7.9.0：段落循环标记属于 clip，不属于某一帧；快照 / 存盘必须一起带走 */
+        loops: Array.isArray(t.loops) ? t.loops.map(l => l ? {
+          a: l.a, b: l.b,
+          srcs: Array.isArray(l.srcs) ? l.srcs.map(o => o ? cloneObjectKeepImg(o) : null) : []
+        } : null).filter(Boolean) : []
       };
     }
     return out;
@@ -9887,10 +10506,20 @@ function importActionPresets() {
     st.last = now;
     let changed = false;
     let guard = 0;
+    let wrapped = false;
     while (st.acc >= AppState.frames[st.idx].duration && guard++ < 100) {
       st.acc -= AppState.frames[st.idx].duration;
+      const prev = st.idx;
       st.idx = (st.idx + 1) % AppState.frames.length;
+      if (st.idx <= prev) wrapped = true;   /* 回到 0 = 新的一遍 */
       changed = true;
+    }
+    /* v7.8.3：循环回绕时清掉音轨/视频轨的「正在播这一段」状态，
+       否则 playSeg 还停在同一段起点，第二遍就不会重新定位到片头，
+       声音画面继续往下走、和帧对不上。清了之后首帧会重新 seek 一次到段起点。 */
+    if (wrapped) {
+      audioClipSources.forEach((src) => { src.playSeg = null; });
+      videoClipSources.forEach((src) => { src.playSeg = null; });
     }
     if (changed) {
       AppState.objects = getCombinedObjectsForRenderAt(st.idx);
@@ -11032,16 +11661,6 @@ function importActionPresets() {
             obj.pinnedPos = { footL: null, footR: null, handL: null, handR: null, pelvis: null };
           }
           enforcePins(obj);
-        } else if (obj.type === 'image') {
-          obj.x = lerp(o1.x, o2.x, partProgress(o1.id, 'x', tt));
-          obj.y = lerp(o1.y, o2.y, partProgress(o1.id, 'y', tt));
-          obj.scale = lerp(o1.scale || 1, o2.scale || 1, partProgress(o1.id, 'scale', tt));
-          obj.alpha = lerp(o1.alpha || 1, o2.alpha || 1, tt);
-          obj.rot = lerp(o1.rot || 0, o2.rot || 0, partProgress(o1.id, 'rot', tt));
-          obj.ax = lerp(o1.ax || 0, o2.ax || 0, tt);
-          obj.ay = lerp(o1.ay || 0, o2.ay || 0, tt);
-          if (o1.w !== undefined && o2.w !== undefined) obj.w = lerp(o1.w, o2.w, partProgress(o1.id, 'width', tt));
-          if (o1.h !== undefined && o2.h !== undefined) obj.h = lerp(o1.h, o2.h, partProgress(o1.id, 'height', tt));
         } else if (obj.type === 'shape' || obj.type === 'bubble') {
           obj.x = lerp(o1.x, o2.x, partProgress(o1.id, 'x', tt));
           obj.y = lerp(o1.y, o2.y, partProgress(o1.id, 'y', tt));
@@ -11248,6 +11867,8 @@ function importActionPresets() {
     renderScene,
     getObjectsForFrameAt,
     prepareVideoClipsForFrame,
+    getTrackFrame,
+    collectAudioTimeline,
     invalidateAllFrameThumbs,
     updateFrameBar,
     // 播放状态（导出前需暂停）
@@ -11989,9 +12610,6 @@ function importActionPresets() {
         }
         const m = o.lw * o.scale / 2 + 4;
         minX -= m; minY -= m; maxX += m; maxY += m;
-      } else if (o.type === 'image') {
-        const b = getObjectBounds(o);
-        extend(b.left, b.top); extend(b.right, b.bottom);
       } else if (o.type === 'video') {
         // 忽略
       } else {
@@ -12987,7 +13605,311 @@ function importActionPresets() {
       globalEditHelpBox.style.display = isOpen ? 'none' : 'block';
     });
   }
-  
+
+  /* README 生成的使用说明浮窗：入口在“全局属性修改 → 说明”右侧，可关闭、可点外关闭。 */
+  const quickHelpBtn = document.getElementById('quickHelpBtn');
+  const quickHelpFloat = document.getElementById('quickHelpFloat');
+  const quickHelpBody = document.getElementById('quickHelpBody');
+  const quickHelpClose = document.getElementById('quickHelpClose');
+  function positionQuickHelpFloat() {
+    if (!quickHelpFloat || quickHelpFloat.hidden) return;
+    /* 只改尺寸与位置：屏幕正中、占视口 70%；其余样式沿用上一版 */
+    const w = quickHelpFloat.offsetWidth || Math.round(window.innerWidth * 0.7);
+    const h = quickHelpFloat.offsetHeight || Math.round(window.innerHeight * 0.7);
+    quickHelpFloat.style.left = Math.round((window.innerWidth - w) / 2) + 'px';
+    quickHelpFloat.style.top = Math.round((window.innerHeight - h) / 2) + 'px';
+  }
+
+  function loadQuickHelpContent() {
+    if (!quickHelpBody) return;
+    /* 按当前界面语言取对应 README 全文；语言切换后会重取，不缓存成一次性内容 */
+    const I = window.SKFE_I18N;
+    const lang = (I && typeof I.getLang === 'function' ? I.getLang() : 'zh-CN') === 'en' ? 'en' : 'zh-CN';
+    const data = window.SKFE && window.SKFE.helpContent;
+    const item = lang === 'en' ? (data && data.en) : (data && data.zh);
+    if (item && item.html) {
+      if (quickHelpBody.dataset.lang !== lang) {
+        quickHelpBody.innerHTML = item.html;
+        quickHelpBody.dataset.lang = lang;
+      }
+    } else if (quickHelpBody.dataset.lang !== 'fail-' + lang) {
+      quickHelpBody.textContent = tr2('help.loadFail', '帮助内容暂不可用。请重新同步后刷新。');
+      quickHelpBody.dataset.lang = 'fail-' + lang;
+    }
+  }
+  /* 语言切换后强制按新语言重取内容，避免浮窗已打开时仍停留在旧语言 */
+  window.SKFE_RELOAD_HELP_CONTENT = loadQuickHelpContent;
+
+  if (quickHelpBtn && quickHelpFloat) {
+    quickHelpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      loadQuickHelpContent();
+      const clf = document.getElementById('changeLogFloat');
+      if (clf) clf.hidden = true;
+      quickHelpFloat.hidden = !quickHelpFloat.hidden;
+      if (!quickHelpFloat.hidden) positionQuickHelpFloat();
+    });
+    if (quickHelpClose) {
+      quickHelpClose.addEventListener('click', (e) => {
+        e.stopPropagation();
+        quickHelpFloat.hidden = true;
+      });
+    }
+    /* 目录里的 # 锚点：只在浮窗内部滚动到对应标题，不改页面 hash。
+       改 hash 会让编辑器跳帧/重渲染，表现为闪退或打开无用页面。 */
+    if (quickHelpBody) {
+      quickHelpBody.addEventListener('click', (e) => {
+        const a = e.target && e.target.closest ? e.target.closest('a.skfe-help-anchor') : null;
+        if (!a) return; /* 外部链接保留 target=_blank 的默认行为 */
+        e.preventDefault();
+        const id = (a.getAttribute('href') || '').slice(1);
+        if (!id) return;
+        const head = quickHelpFloat.querySelector('.help-float-head');
+        const headH = head ? head.offsetHeight : 0;
+        const nodes = quickHelpBody.querySelectorAll('[id]');
+        for (const node of nodes) {
+          if (node.id !== id) continue;
+          const box = quickHelpFloat.getBoundingClientRect();
+          const target = node.getBoundingClientRect();
+          quickHelpFloat.scrollTop += target.top - box.top - headH - 8;
+          break;
+        }
+      });
+    }
+    document.addEventListener('pointerdown', (e) => {
+      if (quickHelpFloat.hidden) return;
+      if (e.target.closest('#quickHelpFloat') || e.target.closest('#quickHelpBtn')) return;
+      quickHelpFloat.hidden = true;
+    }, true);
+    document.addEventListener('scroll', positionQuickHelpFloat, true);
+    window.addEventListener('resize', positionQuickHelpFloat);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !quickHelpFloat.hidden) quickHelpFloat.hidden = true;
+    });
+  }
+
+  /* 更新记录浮窗：与「使用说明」同款逻辑，内容来自 SKFE更新记录.md 生成的 js/changelog-content.js。
+     两个浮窗互斥——打开一个时关掉另一个，避免叠加遮挡。 */
+  const changeLogBtn = document.getElementById('changeLogBtn');
+  const changeLogFloat = document.getElementById('changeLogFloat');
+  const changeLogBody = document.getElementById('changeLogBody');
+  const changeLogClose = document.getElementById('changeLogClose');
+  function positionChangeLogFloat() {
+    if (!changeLogFloat || changeLogFloat.hidden) return;
+    const w = changeLogFloat.offsetWidth || Math.round(window.innerWidth * 0.7);
+    const h = changeLogFloat.offsetHeight || Math.round(window.innerHeight * 0.7);
+    changeLogFloat.style.left = Math.round((window.innerWidth - w) / 2) + 'px';
+    changeLogFloat.style.top = Math.round((window.innerHeight - h) / 2) + 'px';
+  }
+  function loadChangeLogContent() {
+    if (!changeLogBody) return;
+    const I = window.SKFE_I18N;
+    const lang = (I && typeof I.getLang === 'function' ? I.getLang() : 'zh-CN') === 'en' ? 'en' : 'zh-CN';
+    const data = window.SKFE && window.SKFE.changeLogContent;
+    const item = lang === 'en' ? (data && data.en) : (data && data.zh);
+    const html = (item && item.html) || (data && data.html);
+    if (html) {
+      if (changeLogBody.dataset.lang !== lang) {
+        changeLogBody.innerHTML = html;
+        changeLogBody.dataset.lang = lang;
+      }
+    } else if (changeLogBody.dataset.lang !== 'fail-' + lang) {
+      changeLogBody.textContent = tr2('help.loadFail', '更新记录暂不可用。请重新同步后刷新。');
+      changeLogBody.dataset.lang = 'fail-' + lang;
+    }
+  }
+  window.SKFE_RELOAD_CHANGELOG_CONTENT = loadChangeLogContent;
+
+  if (changeLogBtn && changeLogFloat) {
+    changeLogBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      loadChangeLogContent();
+      if (quickHelpFloat) quickHelpFloat.hidden = true;
+      changeLogFloat.hidden = !changeLogFloat.hidden;
+      if (!changeLogFloat.hidden) positionChangeLogFloat();
+    });
+    if (changeLogClose) {
+      changeLogClose.addEventListener('click', (e) => {
+        e.stopPropagation();
+        changeLogFloat.hidden = true;
+      });
+    }
+    if (changeLogBody) {
+      changeLogBody.addEventListener('click', (e) => {
+        const a = e.target && e.target.closest ? e.target.closest('a.skfe-help-anchor') : null;
+        if (!a) return;
+        e.preventDefault();
+        const id = (a.getAttribute('href') || '').slice(1);
+        if (!id) return;
+        const head = changeLogFloat.querySelector('.help-float-head');
+        const headH = head ? head.offsetHeight : 0;
+        const nodes = changeLogBody.querySelectorAll('[id]');
+        for (const node of nodes) {
+          if (node.id !== id) continue;
+          const box = changeLogFloat.getBoundingClientRect();
+          const target = node.getBoundingClientRect();
+          changeLogFloat.scrollTop += target.top - box.top - headH - 8;
+          break;
+        }
+      });
+    }
+    document.addEventListener('pointerdown', (e) => {
+      if (changeLogFloat.hidden) return;
+      if (e.target.closest('#changeLogFloat') || e.target.closest('#changeLogBtn')) return;
+      changeLogFloat.hidden = true;
+    }, true);
+    document.addEventListener('scroll', positionChangeLogFloat, true);
+    window.addEventListener('resize', positionChangeLogFloat);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !changeLogFloat.hidden) changeLogFloat.hidden = true;
+    });
+  }
+
+  /* ==================== v7.9.0 编组 UI ====================
+     元件列表：Ctrl/⌘ 点选多个 → 编组按钮；组元件双击或「进入组」→ 点进组内独立编辑。
+     轨道列表的编组入口由 track-strip 调用 SKFE.systems.group 的同名方法，效果一致。 */
+  const multiSelectedIds = new Set();
+
+  function refreshGroupButtons() {
+    const G = SKFE.systems.group;
+    if (!G) return;
+    const editing = G.getEditingGroupId();
+    const sel = AppState.selected;
+    const selIsGroup = sel && G.isGroup(sel);
+    const btnGroup = document.getElementById('btnGroup');
+    const btnUngroup = document.getElementById('btnUngroup');
+    const btnEnter = document.getElementById('btnEnterGroup');
+    const btnMulti = document.getElementById('btnGroupMulti');
+    if (btnGroup) btnGroup.disabled = !!editing || multiSelectedIds.size < 2;
+    if (btnUngroup) btnUngroup.disabled = !!editing || !selIsGroup;
+    if (btnMulti) {
+      btnMulti.classList.toggle('active', groupMultiSelectOn);
+      btnMulti.setAttribute('aria-pressed', groupMultiSelectOn ? 'true' : 'false');
+    }
+    if (btnEnter) {
+      btnEnter.disabled = !!editing && String(editing) === String(sel && (sel.gid || sel.id));
+      btnEnter.style.display = editing ? 'inline-flex' : (selIsGroup ? 'inline-flex' : 'none');
+    }
+    /* 退出组的按钮语义：正在编辑时点击 = 退出 */
+    if (btnEnter && editing) {
+      const icEl = btnEnter.querySelector('i[data-icon]');
+      if (icEl) {
+        icEl.setAttribute('data-icon', 'exit-group');
+        icEl.removeAttribute('data-icon-done');
+        SKFEApplyIcons && SKFEApplyIcons(icEl);
+      }
+      const label = btnEnter.querySelector('span');
+      if (label) label.textContent = tr2('group.exit', '退出编组');
+      btnEnter.title = tr2('group.exit', '退出编组');
+    } else if (btnEnter) {
+      const icEl = btnEnter.querySelector('i[data-icon]');
+      if (icEl) {
+        icEl.setAttribute('data-icon', 'enter-group');
+        icEl.removeAttribute('data-icon-done');
+        SKFEApplyIcons && SKFEApplyIcons(icEl);
+      }
+      const label = btnEnter.querySelector('span');
+      if (label) label.textContent = tr2('group.enter', '进入编组');
+      btnEnter.title = tr2('group.enter', '进入编组');
+    }
+  }
+
+  function markLayerMultiSelectUI() {
+    const nodes = (layerListEl ? layerListEl.querySelectorAll('.layer-btn') : []);
+    const popNodes = (layerPopListEl ? layerPopListEl.querySelectorAll('.lp-item') : []);
+    Array.prototype.slice.call(nodes).concat(Array.prototype.slice.call(popNodes)).forEach(n => {
+      const id = n.getAttribute('data-obj-id') || n.getAttribute('data-id');
+      n.classList.toggle('multi-selected', id != null && multiSelectedIds.has(String(id)));
+    });
+    refreshGroupButtons();
+  }
+
+  function doGroupFromSelection() {
+    const G = SKFE.systems.group;
+    if (!G || G.getEditingGroupId()) return;
+    const ids = multiSelectedIds.size >= 2
+      ? Array.from(multiSelectedIds)
+      : (AppState.selected ? [String(AppState.selected.id)] : []);
+    if (ids.length < 2) return;
+    const gid = G.createGroup(ids);
+    multiSelectedIds.clear();
+    if (gid) showHistoryToast(tr2('group.hint', '编组完成'), 'group', 1600);
+  }
+
+  function doUngroup() {
+    const G = SKFE.systems.group;
+    if (!G || G.getEditingGroupId() || !AppState.selected) return;
+    if (!G.isGroup(AppState.selected)) return;
+    G.ungroup(String(AppState.selected.gid || AppState.selected.id));
+    AppState.selected = null;
+  }
+
+  function doEnterExitGroup() {
+    const G = SKFE.systems.group;
+    if (!G) return;
+    const editing = G.getEditingGroupId();
+    if (editing) { G.exitGroup(); AppState.selected = null; return; }
+    if (AppState.selected && G.isGroup(AppState.selected)) {
+      G.enterGroup(String(AppState.selected.gid || AppState.selected.id));
+      AppState.selected = null;
+    }
+  }
+
+  const btnGroupEl = document.getElementById('btnGroup');
+  const btnUngroupEl = document.getElementById('btnUngroup');
+  const btnEnterGroupEl = document.getElementById('btnEnterGroup');
+  const btnGroupMultiEl = document.getElementById('btnGroupMulti');
+  if (btnGroupEl) btnGroupEl.addEventListener('click', (e) => { e.stopPropagation(); doGroupFromSelection(); });
+  if (btnUngroupEl) btnUngroupEl.addEventListener('click', (e) => { e.stopPropagation(); doUngroup(); });
+  if (btnEnterGroupEl) btnEnterGroupEl.addEventListener('click', (e) => { e.stopPropagation(); doEnterExitGroup(); });
+  if (btnGroupMultiEl) btnGroupMultiEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    groupMultiSelectOn = !groupMultiSelectOn;
+    if (!groupMultiSelectOn) multiSelectedIds.clear();
+    markLayerMultiSelectUI();
+  });
+
+  /* Ctrl/⌘ 点选元件加入/移出多选；普通点选清空多选并单选。
+     「多选」开关打开后，普通点击也累加，方便移动端跨行选元件。 */
+  if (layerListEl) {
+    layerListEl.addEventListener('click', (e) => {
+      const node = e.target.closest('.layer-btn');
+      if (!node) return;
+      const id = node.getAttribute('data-obj-id');
+      if (id == null) return;
+      if (e.ctrlKey || e.metaKey || groupMultiSelectOn) {
+        if (multiSelectedIds.has(String(id))) multiSelectedIds.delete(String(id));
+        else multiSelectedIds.add(String(id));
+        markLayerMultiSelectUI();
+      } else {
+        multiSelectedIds.clear();
+        markLayerMultiSelectUI();
+      }
+    }, true);
+    layerListEl.addEventListener('dblclick', (e) => {
+      const node = e.target.closest('.layer-btn');
+      if (!node) return;
+      const id = node.getAttribute('data-obj-id');
+      if (id == null) return;
+      const o = AppState.objects.find(x => x && String(x.id) === String(id));
+      if (o && SKFE.systems.group && SKFE.systems.group.isGroup(o)) {
+        SKFE.systems.group.enterGroup(String(o.gid || o.id));
+        AppState.selected = null;
+        EventBus.emit('need:render'); EventBus.emit('need:syncUI');
+      }
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+    if (e.key === 'Escape' && SKFE.systems.group && SKFE.systems.group.getEditingGroupId()) {
+      SKFE.systems.group.exitGroup();
+      AppState.selected = null;
+      EventBus.emit('need:render'); EventBus.emit('need:syncUI');
+    }
+  });
+  EventBus.on('need:syncUI', () => { refreshGroupButtons(); });
+  refreshGroupButtons();
+
   /* ==================== 对象重命名 ==================== */
   function syncObjNameInput() {
     if (!objNameInput) return;
@@ -13157,7 +14079,7 @@ function togglePin(part) {
 
   /* ==================== UI 同步 ==================== */
   function updateAnchorUI() {
-    if (!AppState.selected || (AppState.selected.type !== 'image' && AppState.selected.type !== 'acc' && AppState.selected.type !== 'shape' && AppState.selected.type !== 'bubble')) {
+    if (!AppState.selected || (AppState.selected.type !== 'acc' && AppState.selected.type !== 'shape' && AppState.selected.type !== 'bubble')) {
       btnAnchorToggle.style.display = 'none';
       objAnchorRow.style.display = 'none';
       anchorModeOn = false;
@@ -13561,7 +14483,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     }
     const btnFree = document.getElementById('btnFreeStretch');
     if (btnFree) {
-      const freeTargetOk = hasCanvasSel || (!!AppState.selected && !AppState.selected.locked && ['image', 'shape', 'acc'].includes(AppState.selected.type));
+      const freeTargetOk = hasCanvasSel || (!!AppState.selected && !AppState.selected.locked && ['shape', 'acc'].includes(AppState.selected.type));
       btnFree.disabled = !freeTargetOk;
       btnFree.classList.toggle('on', !!freeStretchOn);
       btnFree.setAttribute('aria-pressed', freeStretchOn ? 'true' : 'false');
@@ -13740,6 +14662,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   }
 
   function hitObj(o, p) {
+    /* v7.9.0 编组载体：命中区 = 外层变换后的组盒（四边形） */
+    if (o.type === 'group') {
+      const obb = getObjectOBB(o);
+      if (!obb || !obb.corners) return false;
+      return pointInQuad(p, obb.corners);
+    }
     /* v5.2.1 扭曲对象的命中区域 = 变形后的四边形（含挂载时继承父级的扭曲），而不是原始矩形 */
     /* 火柴人的盒子会并进配饰（为了让整张图一起变形），但命中区不能跟着变大，
        否则点配饰会误选到火柴人 —— 这里单独用「不含配饰」的盒子。 */
@@ -14053,8 +14981,18 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       }
     }
 
-    /* v6.3.0：画布上点不到被小眼睛隐藏的元件（否则隐藏了还能拖出来） */
-    const hitObjects = subTrackMode ? [subTrackObj] : AppState.objects.filter(o => o && !o.hidden);
+    /* v6.3.0：画布上点不到被小眼睛隐藏的元件（否则隐藏了还能拖出来）
+       v7.9.0：画布命中与列表/轨道保持一致 —— 组外只能点到组载体，进组后只能点到该组成员。 */
+    const G = SKFE.systems.group;
+    const editingGid = G ? G.getEditingGroupId() : null;
+    const hitObjects = (subTrackMode ? [subTrackObj] : AppState.objects.filter(o => o && !o.hidden)).filter((o) => {
+      if (!o) return false;
+      if (G && G.isGroup(o)) return !(editingGid && String(o.gid || o.id) === String(editingGid));
+      if (G && o.groupId != null) {
+        if (!editingGid || String(o.groupId) !== String(editingGid)) return false;
+      }
+      return true;
+    });
     for (let i = hitObjects.length - 1; i >= 0; i--) {
       const o = hitObjects[i];
       if (!o || o.locked) continue;
@@ -14126,19 +15064,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
           if (o !== AppState.selected) { select(o); EventBus.emit('need:render'); }
           return;
         }
-      } else if (o.type === 'image') {
-        const b = imageBounds(o);
-        const { ax, ay } = getAnchorOffset(o, o.scale);
-        const dxr = p.x - (o.x + ax), dyr = p.y - (o.y + ay);
-        const rot = (o.rot || 0) * Math.PI / 180;
-        const c = Math.cos(-rot), s = Math.sin(-rot);
-        const rx = dxr * c - dyr * s;
-        const ry = dxr * s + dyr * c;
-        const hit = Math.abs(rx + ax) <= b.w / 2 && Math.abs(ry + ay) <= b.h / 2;
-        if (hit) {
+      } else if (o.type === 'group') {
+        /* v7.9.0：编组载体像普通元件一样在画布上点选/拖动，移动只改载体，不动成员真实数据 */
+        if (hitObj(o, p)) {
           if (o === AppState.selected) {
             clickedObj = true;
-            drag = { o, part: 'move', dx: o.x - p.x, dy: o.y - p.y, startWorldPos: getObjectWorldPos(o) }; // global-v5.1.1: 记录起始世界位置，松手后同步其它帧
+            drag = { o, part: 'move', dx: o.x - p.x, dy: o.y - p.y, startWorldPos: getObjectWorldPos(o) };
             canvas.setPointerCapture(e.pointerId);
             EventBus.emit('need:render'); return;
           } else {
@@ -14237,7 +15168,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     for (const o of AppState.objects) {
       if (o === AppState.selected) continue;
       if (o.type === 'camera' || o.type === 'video') continue;
-      if (o.type !== 'figure' && o.type !== 'image' && o.type !== 'acc' && o.type !== 'shape' && o.type !== 'bubble') continue;
+      if (o.type !== 'figure' && o.type !== 'acc' && o.type !== 'shape' && o.type !== 'bubble') continue;
       
       /* 其他轨道：隐藏的跳过，50% 的允许 */
       if (isSubTrackMode() && String(o.id) !== AppState.activeTrackId) {
@@ -14573,12 +15504,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         }
       }
       enforcePins(o);
-    } else if (o.type === 'image') {
-      if (drag.part === 'move') { 
+    } else if (o.type === 'group') {
+      if (drag.part === 'move') {
         let tx = p.x + drag.dx;
         let ty = p.y + drag.dy;
         const snap = calcSnap(tx, ty);
-        o.x = tx + snap.dx; 
+        o.x = tx + snap.dx;
         o.y = ty + snap.dy;
         snapLines.x = snap.lineX;
         snapLines.y = snap.lineY;
@@ -15137,19 +16068,134 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     EventBus.emit('history:save', '添加对话框');
   }
 
+  /* v7.8.3：clip 段 = 轨道面板那一条长条的真实范围，跟 track-strip 的
+     computeSpans 用同一套判定——连续的「在场」帧，遇到 __k.cut 断开；
+     派生帧看它所在关键帧段起点的 hidden。元件列表的删除/复制都以这个
+     范围为单位，而不是当前一帧（当前一帧只是长条里的一格）。 */
+  function clipSpanAt(trackId, idx) {
+    const t = AppState.tracks[String(trackId)];
+    if (!t || !t.frames || !t.frames.length) return null;
+    const arr = t.frames;
+    const segs = KF.segments(arr);
+    const n = Math.max(AppState.frames.length, arr.length);
+    const present = (i) => {
+      const slot = arr[i];
+      if (slot == null) return false;
+      if (KF.isDerived(slot)) {
+        for (const s of segs) {
+          if (i >= s.a && i <= s.b) {
+            const head = arr[s.a];
+            return !(head && head.hidden);
+          }
+        }
+        return false;
+      }
+      return !slot.hidden;
+    };
+    if (idx < 0 || idx >= n || !present(idx)) return null;
+    const cutAt = (i) => {
+      const slot = arr[i];
+      return i > 0 && present(i) && !KF.isDerived(slot) && !!(slot.__k && slot.__k.cut);
+    };
+    let a = idx, b = idx;
+    while (a > 0 && present(a - 1) && !cutAt(a)) a--;
+    while (b < n - 1 && present(b + 1) && !cutAt(b + 1)) b++;
+    return { a: a, b: b };
+  }
+
+  /* 整段无损复制：源段每一格原样克隆，关键帧标记 __k、曲线、cut、
+     派生哨兵全部保留；只有 id 和 name 换成新的。时间区间沿用 [a,b]，
+     不改坐标、不改层级，保证「相似度 100% 除了名字」。 */
+  function cloneWholeClip(srcObj) {
+    const srcId = String(srcObj.id);
+    const src = AppState.tracks[srcId];
+    const span = clipSpanAt(srcId, AppState.currentFrameIndex);
+    if (!src || !span) return null;
+    const head = cloneObjectKeepImg(getTrackFrame(srcId, AppState.currentFrameIndex));
+    if (!head) return null;
+    head.id = ++uid;
+    generateName(head);
+    const newId = String(head.id);
+    const total = Math.max(AppState.frames.length, src.frames.length, span.b + 1);
+    const arr = new Array(total).fill(null);
+    for (let i = span.a; i <= span.b; i++) {
+      const slot = src.frames[i];
+      if (slot == null) { arr[i] = null; continue; }
+      if (KF.isDerived(slot)) { arr[i] = KF.DERIVED_SLOT; continue; }
+      const c = cloneObjectKeepImg(slot);
+      c.id = head.id;
+      c.name = head.name;
+      arr[i] = c;
+    }
+    /* v7.9.0：循环段整段复制时，循环标记也要跟着复制（相似度 100%，只换名字 / ID） */
+    const copiedLoops = Array.isArray(src.loops)
+      ? src.loops
+        .filter(l => l && l.a <= span.b && l.b >= span.a)
+        .map(l => ({
+          a: l.a, b: l.b,
+          srcs: Array.isArray(l.srcs) ? l.srcs.map(o => o ? cloneObjectKeepImg(o) : null) : []
+        }))
+      : [];
+    AppState.tracks[newId] = { name: head.name, frames: arr, loops: copiedLoops };
+    bumpKfEval();
+    return newId;
+  }
+
   function cloneSelected() {
     if (!AppState.selected || AppState.selected.type === 'video') return;
     if (AppState.selected.type === 'camera') { alert(tr2('alert.cameraSingle', '摄像机只能存在一个。')); return; }
-    const copy = JSON.parse(JSON.stringify(AppState.selected, (k, v) => (k === 'img' ? undefined : v)));
-    copy.id = ++uid; generateName(copy);
-    if (AppState.selected.img) copy.img = AppState.selected.img;
-    if (copy.type === 'figure') Object.keys(copy.layer).forEach(k => copy.layer[k] += 1);
-    else copy.layer += 1;
-    if (copy.type === 'figure' || copy.type === 'image') { copy.x += 46; copy.y += 34; }
-    if (copy.ax === undefined) copy.ax = 0;
-    if (copy.ay === undefined) copy.ay = 0;
-    addObjectToFrames(copy); select(copy); EventBus.emit('need:render');
+    const newId = cloneWholeClip(AppState.selected);
+    if (!newId) {
+      /* 播放头不在该元件出场的帧上：没有可复制的长条，退回旧的「复制单帧」行为，
+         免得元件列表里点复制毫无反应。 */
+      const copy = cloneObjectKeepImg(AppState.selected);
+      if (!copy) return;
+      copy.id = ++uid; generateName(copy);
+      if (copy.type === 'figure') Object.keys(copy.layer).forEach(k => copy.layer[k] += 1);
+      else copy.layer += 1;
+      if (copy.type === 'figure') { copy.x += 46; copy.y += 34; }
+      if (copy.ax === undefined) copy.ax = 0;
+      if (copy.ay === undefined) copy.ay = 0;
+      addObjectToFrames(copy); select(copy);
+      EventBus.emit('need:render');
+      EventBus.emit('history:save', '复制对象');
+      return;
+    }
+    AppState.objects = getCombinedObjectsForRender();
+    select(AppState.objects.find(o => o && String(o.id) === newId) || null);
+    EventBus.emit('need:render');
     EventBus.emit('history:save', '复制对象');
+  }
+
+  /* v7.9.0：删除编组必须连带成员一起删，否则解组后的成员轨还在，
+     画布 / 播放时会出现「组没了但里面的人还在」的残留画面。 */
+  function deleteGroupById(gid) {
+    const G = SKFE.systems.group;
+    if (!G) return false;
+    const g = String(gid);
+    if (!AppState.tracks[g]) return false;
+    const memberIds = (G.deleteGroup(g) || []).map(String);
+    memberIds.concat([g]).forEach((id) => {
+      try { disposeVideoClipSource(id); } catch (_) {}
+      try { disposeAudioClipSource(id); } catch (_) {}
+    });
+    const removed = memberIds.concat([g]);
+    if (removed.indexOf(String(AppState.activeTrackId)) >= 0) {
+      AppState.activeTrackId = TRACK_ALL_ID;
+    }
+    AppState.selected = null;
+    AppState.canvasSelected = false;
+    syncMainLengthFromTracks();
+    trimTrailingEmptyFrames();
+    AppState.objects = getCombinedObjectsForRender();
+    refreshSubTrackOptions();
+    invalidateAllFrameThumbs();
+    updateFrameBar();
+    bumpKfEval();
+    EventBus.emit('need:render');
+    EventBus.emit('app:update', '删除编组');
+    EventBus.emit('history:save', '删除编组');
+    return true;
   }
 
   function deleteSelected() {
@@ -15157,6 +16203,11 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (AppState.selected.type === 'video') {
       /* v6.1.0：选中参考视频时删除 = 移除参考视频（以前是直接 return，删不掉） */
       removeReferenceVideo();
+      return;
+    }
+    /* v7.9.0：删除编组 = 连成员一起删，不能只解组留下残留画面 */
+    if (AppState.selected.type === 'group' && SKFE.systems.group) {
+      deleteGroupById(String(AppState.selected.gid || AppState.selected.id));
       return;
     }
     const id = AppState.selected.id;
@@ -15168,10 +16219,17 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       return false;
     };
     if (isSubTrackMode()) {
-      /* 子轨道删除：只清空当前轨道当前帧，绝不触碰其他 track */
-      const t = AppState.tracks[AppState.activeTrackId];
-      if (t && t.frames) {
-        if (shouldRemove(getTrackFrame(AppState.activeTrackId, AppState.currentFrameIndex))) t.frames[AppState.currentFrameIndex] = null;
+      /* 子轨道删除：只清空当前轨道当前帧所在的整段 clip，绝不触碰其他 track */
+      const tid = String(AppState.activeTrackId);
+      const t = AppState.tracks[tid];
+      if (t && t.frames && shouldRemove(getTrackFrame(tid, AppState.currentFrameIndex))) {
+        const span = clipSpanAt(tid, AppState.currentFrameIndex);
+        if (span) {
+          for (let i = span.a; i <= span.b; i++) t.frames[i] = null;
+          bumpKfEval();
+        } else {
+          t.frames[AppState.currentFrameIndex] = null;
+        }
       }
     } else if (globalEditEnabled) {
       /* 全局删除：从所有 track 的所有帧中移除该元件及其挂件 */
@@ -15183,9 +16241,16 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         }
       }
     } else {
-      /* 全局模式但未开启全局编辑：只清当前帧合并视图 */
+      /* v7.8.3：全局模式未开全局属性时，元件列表的删除也按 clip 心智——
+         清掉当前帧所在的那一条长条，而不是只挖掉当前一格。
+         全局属性开启时走上面的全工程删除，优先级仍然最高。 */
       for (const tid in AppState.tracks) {
-        if (shouldRemove(getTrackFrame(tid, AppState.currentFrameIndex))) setTrackFrame(tid, AppState.currentFrameIndex, null);
+        if (!shouldRemove(getTrackFrame(tid, AppState.currentFrameIndex))) continue;
+        const span = clipSpanAt(tid, AppState.currentFrameIndex);
+        if (!span) { setTrackFrame(tid, AppState.currentFrameIndex, null); continue; }
+        const t = AppState.tracks[tid];
+        for (let i = span.a; i <= span.b; i++) t.frames[i] = null;
+        bumpKfEval();
       }
     }
     /* 清空后移除整条轨道，避免残留空轨道 */
@@ -15276,8 +16341,6 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         AppState.selected.w = 180; AppState.selected.h = 90;
         AppState.selected.customSize = false; AppState.selected.customW = 180; AppState.selected.customH = 90;
       }
-    } else if (AppState.selected.type === 'image') {
-      AppState.selected.scale = 1; AppState.selected.rot = 0; AppState.selected.ax = 0; AppState.selected.ay = 0;
     } else {
       AppState.selected.scale = 1;
     }
@@ -15498,114 +16561,129 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   fileInputEl.style.display = 'none';
   document.body.appendChild(fileInputEl);
 
-  /* v7.7.0：删除「插入图片」按钮，入口统一到 btnAcc（makeAccessory）。
-     image 类型与 makeImage 全部保留，仅用于兼容旧工程里已有的 image 元件。 */
+  /* 位图导入入口统一到 btnAcc（makeAccessory）。 */
   document.getElementById('btnAcc').onclick = () => { fileInputEl.accept = 'image/*'; fileInputEl.dataset.mode = 'acc'; fileInputEl.click(); };
 
   /* v7.7.1：视频元件导入 —— 与「导入参考视频」完全独立。
      不再抽帧：保留完整 <video>（含音轨），导入瞬间完成；播放时有声音、不卡顿。
-     视频元件以 videoClip 类型进轨道，具备图片元件的全部能力。 */
+     视频元件以 videoClip 类型进轨道，具备图片元件的全部能力。
+     v7.8.2：逻辑抽成顶层函数 handleVideoClipFile，按钮选择与拖放导入共用。 */
   const videoClipInput = document.createElement('input');
   videoClipInput.type = 'file';
   videoClipInput.accept = 'video/*';
   videoClipInput.style.display = 'none';
   document.body.appendChild(videoClipInput);
+
+  async function handleVideoClipFile(file) {
+    if (!file) return;
+    try {
+      /* 读成 dataURL 随工程保存：这样导出的项目文件自带视频与音轨 */
+      const dataUrl = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(new Error('视频读取失败'));
+        fr.readAsDataURL(file);
+      });
+      const vid = document.createElement('video');
+      vid.muted = true; vid.playsInline = true; vid.preload = 'auto';
+      const playable = await dataUrlToPlayableSrc(dataUrl);
+      vid.src = playable.src;
+      await new Promise((resolve, reject) => {
+        vid.addEventListener('loadedmetadata', resolve, { once: true });
+        vid.addEventListener('error', () => reject(new Error('视频解码失败')), { once: true });
+        setTimeout(() => reject(new Error('视频读取超时')), 15000);
+      });
+      const frameMs0 = (AppState.frames[0] && AppState.frames[0].duration) || 83;
+      const fps = Math.max(1, Math.min(30, Math.round(1000 / frameMs0)));
+      const frameMs = Math.round(1000 / fps);
+      const vw = vid.videoWidth || 640, vh = vid.videoHeight || 360;
+      const durMs = Math.round((vid.duration || 0) * 1000);
+      const frameCount = Math.max(1, Math.round(durMs / frameMs));
+      const sp = getSpawnPoint();
+      const obj = makeVideoClip(vid, dataUrl, vw, vh, sp.x, sp.y, durMs, fps);
+      obj.layer = 1;
+      generateName(obj); addObjectToFrames(obj);
+      /* v7.7.6：默认铺满视频原长；播放/声音只在这一段帧区间生效。 */
+      fillVideoClipToLength(obj, frameCount, frameMs);
+      select(obj);
+      seekVideoClipsToFrame(AppState.currentFrameIndex);
+      EventBus.emit('need:render'); EventBus.emit('need:syncUI');
+      EventBus.emit('history:save', '插入视频元件');
+      alert('已插入视频元件：默认铺满视频原长（约 ' + frameCount + ' 帧）。\n播放时只在这段帧区间显示画面并出声；它仍可像图片一样调整大小、扭曲、关键帧、位移，也可挂载到火柴人。');
+    } catch (err) {
+      alert('插入视频失败：' + (err && err.message ? err.message : err));
+    }
+  }
+
   const btnInsertVideo = document.getElementById('btnInsertVideo');
   if (btnInsertVideo) {
     btnInsertVideo.onclick = () => videoClipInput.click();
-    videoClipInput.addEventListener('change', async e => {
+    videoClipInput.addEventListener('change', e => {
       const file = e.target.files && e.target.files[0];
       videoClipInput.value = '';
-      if (!file) return;
-      try {
-        /* 读成 dataURL 随工程保存：这样导出的项目文件自带视频与音轨 */
-        const dataUrl = await new Promise((resolve, reject) => {
-          const fr = new FileReader();
-          fr.onload = () => resolve(fr.result);
-          fr.onerror = () => reject(new Error('视频读取失败'));
-          fr.readAsDataURL(file);
-        });
-        const vid = document.createElement('video');
-        vid.src = dataUrl; vid.muted = true; vid.playsInline = true; vid.preload = 'auto';
-        await new Promise((resolve, reject) => {
-          vid.addEventListener('loadedmetadata', resolve, { once: true });
-          vid.addEventListener('error', () => reject(new Error('视频解码失败')), { once: true });
-          setTimeout(() => reject(new Error('视频读取超时')), 15000);
-        });
-        const frameMs0 = (AppState.frames[0] && AppState.frames[0].duration) || 83;
-        const fps = Math.max(1, Math.min(30, Math.round(1000 / frameMs0)));
-        const frameMs = Math.round(1000 / fps);
-        const vw = vid.videoWidth || 640, vh = vid.videoHeight || 360;
-        const durMs = Math.round((vid.duration || 0) * 1000);
-        const frameCount = Math.max(1, Math.round(durMs / frameMs));
-        const sp = getSpawnPoint();
-        const obj = makeVideoClip(vid, dataUrl, vw, vh, sp.x, sp.y, durMs, fps);
-        obj.layer = 1;
-        generateName(obj); addObjectToFrames(obj);
-        /* v7.7.6：默认铺满视频原长；播放/声音只在这一段帧区间生效。 */
-        fillVideoClipToLength(obj, frameCount, frameMs);
-        select(obj);
-        seekVideoClipsToFrame(AppState.currentFrameIndex);
-        EventBus.emit('need:render'); EventBus.emit('need:syncUI');
-        EventBus.emit('history:save', '插入视频元件');
-        alert('已插入视频元件：默认铺满视频原长（约 ' + frameCount + ' 帧）。\n播放时只在这段帧区间显示画面并出声；它仍可像图片一样调整大小、扭曲、关键帧、位移，也可挂载到火柴人。');
-      } catch (err) {
-        alert('插入视频失败：' + (err && err.message ? err.message : err));
-      }
+      if (file) handleVideoClipFile(file);
     });
   }
 
   /* v7.8.1：音频元件导入 —— 音频与视频都用 <video> 承载音轨，只播声音不画画面。
-     接受 audio/* 与 video/*，因此「视频转音频」= 直接导入视频当音频用。 */
+     接受 audio/* 与 video/*，因此「视频转音频」= 直接导入视频当音频用。
+     v7.8.2：逻辑抽成顶层函数 handleAudioClipFile，按钮选择与拖放导入共用。 */
   const audioClipInput = document.createElement('input');
   audioClipInput.type = 'file';
   audioClipInput.accept = 'audio/*,video/*';
   audioClipInput.style.display = 'none';
   document.body.appendChild(audioClipInput);
+
+  async function handleAudioClipFile(file) {
+    if (!file) return;
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(new Error('音频读取失败'));
+        fr.readAsDataURL(file);
+      });
+      const media = document.createElement('video');
+      media.muted = true; media.playsInline = true; media.preload = 'auto';
+      const playable = await dataUrlToPlayableSrc(dataUrl);
+      media.src = playable.src;
+      await new Promise((resolve, reject) => {
+        media.addEventListener('loadedmetadata', resolve, { once: true });
+        media.addEventListener('error', () => reject(new Error('音频解码失败')), { once: true });
+        setTimeout(() => reject(new Error('音频读取超时')), 15000);
+      });
+      const frameMs0 = (AppState.frames[0] && AppState.frames[0].duration) || 83;
+      const fps = Math.max(1, Math.min(30, Math.round(1000 / frameMs0)));
+      const frameMs = Math.round(1000 / fps);
+      const durMs = Math.round((media.duration || 0) * 1000);
+      const frameCount = Math.max(1, Math.round(durMs / frameMs));
+      const sp = getSpawnPoint();
+      const obj = makeAudioClip(media, dataUrl, durMs, fps);
+      generateName(obj); addObjectToFrames(obj);
+      fillAudioClipToLength(obj, frameCount, frameMs);
+      select(obj);
+      EventBus.emit('need:render'); EventBus.emit('need:syncUI');
+      EventBus.emit('history:save', '导入音频元件');
+      alert('已导入音频元件：默认铺满音频原长（约 ' + frameCount + ' 帧）。\n播放时只在这段帧区间出声，可在轨道里移动、分割；属性里只能调音量。');
+    } catch (err) {
+      alert('导入音频失败：' + (err && err.message ? err.message : err));
+    }
+  }
+
   const btnInsertAudio = document.getElementById('btnInsertAudio');
   if (btnInsertAudio) {
     btnInsertAudio.onclick = () => audioClipInput.click();
-    audioClipInput.addEventListener('change', async e => {
+    audioClipInput.addEventListener('change', e => {
       const file = e.target.files && e.target.files[0];
       audioClipInput.value = '';
-      if (!file) return;
-      try {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const fr = new FileReader();
-          fr.onload = () => resolve(fr.result);
-          fr.onerror = () => reject(new Error('音频读取失败'));
-          fr.readAsDataURL(file);
-        });
-        const media = document.createElement('video');
-        media.src = dataUrl; media.muted = true; media.playsInline = true; media.preload = 'auto';
-        await new Promise((resolve, reject) => {
-          media.addEventListener('loadedmetadata', resolve, { once: true });
-          media.addEventListener('error', () => reject(new Error('音频解码失败')), { once: true });
-          setTimeout(() => reject(new Error('音频读取超时')), 15000);
-        });
-        const frameMs0 = (AppState.frames[0] && AppState.frames[0].duration) || 83;
-        const fps = Math.max(1, Math.min(30, Math.round(1000 / frameMs0)));
-        const frameMs = Math.round(1000 / fps);
-        const durMs = Math.round((media.duration || 0) * 1000);
-        const frameCount = Math.max(1, Math.round(durMs / frameMs));
-        const sp = getSpawnPoint();
-        const obj = makeAudioClip(media, dataUrl, durMs, fps);
-        generateName(obj); addObjectToFrames(obj);
-        fillAudioClipToLength(obj, frameCount, frameMs);
-        select(obj);
-        EventBus.emit('need:render'); EventBus.emit('need:syncUI');
-        EventBus.emit('history:save', '导入音频元件');
-        alert('已导入音频元件：默认铺满音频原长（约 ' + frameCount + ' 帧）。\n播放时只在这段帧区间出声，可在轨道里移动、分割；属性里只能调音量。');
-      } catch (err) {
-        alert('导入音频失败：' + (err && err.message ? err.message : err));
-      }
+      if (file) handleAudioClipFile(file);
     });
   }
 
-  fileInputEl.addEventListener('change', e => {
-    const file = e.target.files && e.target.files[0];
+  /* v7.8.2：抽成命名函数 handleImageFile，按钮选择与拖放导入共用。
+     mode='replace' 替换当前选中图片；否则添加新配饰（拖放走这条）。 */
+  function handleImageFile(file, mode) {
     if (!file) return;
-    const mode = fileInputEl.dataset.mode;
     const reader = new FileReader();
     reader.onload = ev => {
       const img = new Image();
@@ -15615,7 +16693,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
           if (!AppState.selected) return;
           const targetId = String(AppState.selected.id);
           const pre = getSnapshot();
-          
+
           // 1. 替换所有轨道中的图片引用
           for (const id in AppState.tracks) {
             const t = AppState.tracks[id];
@@ -15630,11 +16708,11 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
               }
             }
           }
-          
+
           // 2. 重新获取渲染列表并恢复选中状态
           AppState.objects = getCombinedObjectsForRender();
           AppState.selected = AppState.objects.find(o => String(o.id) === targetId) || null;
-          
+
           if (AppState.selected) {
             AppState.selected.img = img; // 确保当前选中对象被更新
             // 如果新图片的宽高比与旧图片不同，可以考虑按原宽高中心缩放
@@ -15659,13 +16737,17 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       img.src = ev.target.result;
     };
     reader.readAsDataURL(file);
+  }
+  fileInputEl.addEventListener('change', e => {
+    const file = e.target.files && e.target.files[0];
+    handleImageFile(file, fileInputEl.dataset.mode);
     fileInputEl.value = '';
   });
 
   const btnReplace = document.getElementById('btnReplace');
   if (btnReplace) {
     btnReplace.onclick = () => {
-      if (!AppState.selected || (AppState.selected.type !== 'image' && AppState.selected.type !== 'acc')) {
+      if (!AppState.selected || (AppState.selected.type !== 'acc')) {
         alert(tr2('alert.replaceNeedImage', '请先在画布中选中一个图片或配饰，再进行替换。'));
         return;
       }
@@ -17080,7 +18162,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     getCombinedObjectsForRender,
     getTrackObjectsAt,
     getTrackFrame,
-    getSpawnPoint, addObjectToFrames, generateName,
+    getSpawnPoint, addObjectToFrames, generateName, fillCameraToFullLength,
     syncMainLengthFromTracks, refreshSubTrackOptions, setGlobalProp,
     isSubTrackMode,
     nextUid: () => ++uid,
@@ -17166,7 +18248,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     invalidateAllFrameThumbs, setGlobalProp, hideHandles,
     isGlobalEdit: () => globalEditEnabled,
     getBindTransform, getBoundFigureTransform, getAnchorOffset,
-    jointData, segments, imageBounds, hitObj,
+    jointData, segments, hitObj,
     distToSeg, worldToFigureLocal,
     getInkLocalMatrix, // brush-v5.1.1: 画笔遮罩裁剪需要 ink 的局部→世界矩阵
     getCameraViewObject: () => SKFE.systems.camera.getCameraViewObject(),
@@ -17272,7 +18354,6 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
 
   function queueObjectByType(o, isSel, isExporting, opts) {
     if (o.type === 'figure') queueFigure(o, isSel, isExporting, opts);
-    else if (o.type === 'image') queueImageObj(o, isSel, isExporting, opts);
     else if (o.type === 'acc') queueAcc(o, isSel, isExporting, opts);
     else if (o.type === 'videoClip') queueVideoClip(o, isSel, isExporting, opts);
     /* v7.8.1：音频元件只在轨道里出声，不参与画布/导出画面绘制 */
@@ -17333,6 +18414,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (typeof syncSnapBtn === 'function') syncSnapBtn();
     /* v7.1.0：元件列表每行的眼睛/锁/删除按钮 title 是渲染时用 t() 取词的，换语言要重画一次 */
     scheduleRenderLayerPop();
+    /* 使用说明浮窗内容来自 README，按语言区分；切换语言后按新语言重取 */
+    if (typeof window.SKFE_RELOAD_HELP_CONTENT === 'function') window.SKFE_RELOAD_HELP_CONTENT();
   };
 
   /* ==================== 初始化 ==================== */
@@ -17462,6 +18545,37 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         return out;
       },
 
+      /* v7.9.0：当前选中的组载体 id（轨道工具栏据此显示「进入编组」） */
+      selectedGroupId() {
+        const G = SKFE.systems.group;
+        const o = AppState.selected;
+        if (!G || !o || !G.isGroup(o)) return null;
+        return String(o.gid || o.id);
+      },
+
+      /* v7.9.0：轨道删除按钮删到组载体时，连带成员一起删 */
+      deleteGroup: (gid) => deleteGroupById(gid),
+
+      /* v7.9.0：某条轨道若是组载体，返回它的成员轨 id（组轨道长条伸缩时成员一起伸缩） */
+      groupMemberIds(id) {
+        const G = SKFE.systems.group;
+        if (!G) return [];
+        const tid = String(id);
+        /* v7.9.0：轨道条可能不在当前帧上（播放头停在别处）；先在任一帧里找载体对象，
+           否则拖一条已经滚出当前帧视野的编组段时，成员不会跟着循环 / 伸缩。 */
+        let o = getTrackFrame(tid, AppState.currentFrameIndex);
+        if (!o || !G.isGroup(o)) {
+          const t = AppState.tracks[tid];
+          const frames = t && t.frames ? t.frames : [];
+          for (let i = 0; i < frames.length; i++) {
+            const f = frames[i];
+            if (f && !KF.isDerived(f) && G.isGroup(f)) { o = f; break; }
+          }
+        }
+        if (!o || !G.isGroup(o)) return [];
+        return G.membersOf(String(o.gid || o.id)).map(m => String(m.id));
+      },
+
       /* 高级设置里的「帧缩略图」开关：开着时轨道长条也铺小图（像 AM 那样） */
       thumbMode: () => !!frameThumbMode,
       thumbRev: () => thumbVersion,
@@ -17558,8 +18672,9 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
      内部逻辑不变；window.__SKFE_DBG 兼容别名保留给无头回归脚本。 */
     window.__skfe = {
       AppState, KF, EventBus, TRACK_ALL_ID,
+      audioClipSources, videoClipSources,
       getTrackFrame, getTrackSlot, getObjectsForFrameAt, getCombinedObjectsForRender,
-      goToFrame, updateFrameBar, syncFrameRef, bumpKfEval, reconcileAllTracks,
+      goToFrame, updateFrameBar, syncFrameRef, refreshObjectsNow, bumpKfEval, reconcileAllTracks,
       renderFrameToDataURL, renderScene, markCurrentFrameModified,
       toggleKeyframe: () => toggleKeyframeAtCurrent(),
       insertFrames: (n) => insertFramesInSegment(n),
@@ -17569,6 +18684,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       applyEase: (k) => applyEaseToCurrentSegments(k),
       applyChannelEase: (objId, part, k) => pushChannelEaseToSegments(objId, part, k),
       exportProjectJSON, importProjectJSON, deserializeProject, applyLoadedProject,
+      getProjectData: () => buildCurrentProjectData(),
+      collectAudioTimeline,
       projectLibrary: {
         save: saveProjectToLibrary,
         list: listProjectsFromLibrary,
@@ -17610,7 +18727,9 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       /* 历史 */
       undo, redo, saveHistory,
       /* 工具与选区 */
-      setActiveTool, cloneSelected,
+      setActiveTool, cloneSelected, setActiveTrack, switchUiSheet, applyTimelineDock,
+      /* 元件构造（插件/MCP 全开放入口） */
+      makeShape, makeAccessory, makeBubble, makeMaskField, makeDistortField,
       /* 画布视图 */
       zoomViewAt, clampViewOffset, canvasPosLocked, drawCanvasBounds,
       /* 图层与几何 */
@@ -17622,11 +18741,164 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       exportSelectedJPGs, exportActionPresets,
       /* 特效与媒体 */
       toggleDistortMode, applyBasicMaskToCanvas, applyChromaMaskToCanvas,
-      makeVideoClip, playVideoClips, seekVideoClipsToFrame
+      makeVideoClip, playVideoClips, seekVideoClipsToFrame,
+      makeAudioClip, playAudioClips, pauseAudioClips, disposeAudioClipSource,
+      /* 编组 */
+      deleteGroupById,
+      /* 画布与轨道 UI */
+      getCanvas: () => document.getElementById('c'),
+      getTimelineEl: () => document.getElementById('timeline')
     };
     /* 兼容早前的调试钩子名（无头回归脚本仍在用） */
     window.__SKFE_DBG = window.__skfe;
     /* v7.8.0：挂到命名空间下，供本地插件稳定发现（不再依赖 ?debug=1） */
     window.SKFE = window.SKFE || {};
     window.SKFE.__skfe = window.__skfe;
+
+    /* ==================== v7.8.2：统一拖放导入 ====================
+       把文件从系统/文件管理器拖进 SKFE 窗口即可自动识别并加入：
+         图片       → 配饰元件（与「导入图片」一致）
+         视频       → 视频元件（与「插入视频」一致，保留画面+音轨，不是参考视频）
+         音频       → 音频元件（与「导入音频」一致）
+         .json      → 内容嗅探：项目 / 动作 / data 型插件 manifest
+         .zip       → 插件压缩包（走插件宿主的原生风险确认链）
+       只接管 dataTransfer 含 'Files' 的原生拖放：画布绘制与轨道拖拽都走 pointer 事件，
+       不受影响。大文件 (>20MB) 先确认，避免误拖导致长时间卡住。 */
+    (function initDropImport() {
+      var dragDepth = 0;
+      var overlay = null;
+
+      function hasFiles(e) {
+        var dt = e.dataTransfer;
+        if (!dt || !dt.types) return false;
+        for (var i = 0; i < dt.types.length; i++) {
+          if (dt.types[i] === 'Files') return true;
+        }
+        return false;
+      }
+
+      function showOverlay() {
+        if (!overlay) {
+          overlay = document.createElement('div');
+          overlay.className = 'skfe-drop-overlay';
+          overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.35);pointer-events:none;';
+          var box = document.createElement('div');
+          box.style.cssText = 'background:#fff;color:#222;padding:18px 26px;border-radius:14px;font-size:15px;font-weight:600;box-shadow:0 8px 30px rgba(0,0,0,.25);display:flex;align-items:center;gap:10px;';
+          box.innerHTML = ic('upload') + '<span data-i18n="drop.hint">' + tr2('drop.hint', '松开以导入：图片 / 视频 / 音频 / JSON / 插件') + '</span>';
+          var svg = box.querySelector('svg');
+          if (svg) { svg.setAttribute('width', '22'); svg.setAttribute('height', '22'); }
+          overlay.appendChild(box);
+          document.body.appendChild(overlay);
+        }
+        overlay.style.display = 'flex';
+      }
+      function hideOverlay() { if (overlay) overlay.style.display = 'none'; }
+
+      /* JSON 内容嗅探：数组→动作；manifest 特征→插件；工程特征→项目；{name,frames}→动作 */
+      function sniffJSON(obj) {
+        if (Array.isArray(obj)) {
+          var allActions = obj.length && obj.every(function (p) {
+            return p && typeof p.name === 'string' && Array.isArray(p.frames);
+          });
+          return allActions ? 'action' : 'unknown';
+        }
+        if (!obj || typeof obj !== 'object') return 'unknown';
+        /* data 型插件的 .json 顶层就是 manifest（见 host.js readDataFile） */
+        if (obj.id && typeof obj.name === 'string' && obj.version &&
+            (obj.type === 'data' || obj.type === 'code') && obj.skfeVersion) return 'plugin';
+        /* 项目：frames 数组 + 任一工程专属字段 */
+        if (Array.isArray(obj.frames) &&
+            (typeof obj.currentFrameIndex === 'number' || obj.tracks != null ||
+             typeof obj.defaultFPS === 'number' || 'canvasBounds' in obj || 'groundLineEnabled' in obj)) return 'project';
+        /* 单个动作：{name, frames} */
+        if (typeof obj.name === 'string' && Array.isArray(obj.frames)) return 'action';
+        return 'unknown';
+      }
+
+      function dispatchPlugin(file) {
+        if (window.SKFE && window.SKFE.plugin && typeof window.SKFE.plugin.importFile === 'function') {
+          /* 插件宿主内部已含同 id 升级、版本兼容、代码型风险确认与失败提示 */
+          window.SKFE.plugin.importFile(file).catch(function () {});
+        } else {
+          alert(tr2('drop.pluginUnavailable', '插件系统不可用，无法导入插件文件'));
+        }
+      }
+
+      function handleOneDroppedFile(file) {
+        if (!file) return;
+        var name = file.name || 'dropped';
+        var lower = name.toLowerCase();
+
+        /* 大文件先确认（项目 JSON 30MB+、长视频都在此列） */
+        if (file.size > 20 * 1024 * 1024) {
+          var mb = (file.size / 1048576).toFixed(1);
+          if (!window.confirm(trv('drop.largeFile', { n: mb }, '文件较大（约 ' + mb + ' MB），导入可能需要几秒，是否继续？'))) return;
+        }
+
+        /* 1) 插件压缩包 */
+        if (/\.zip$/i.test(lower)) { dispatchPlugin(file); return; }
+
+        /* 2) JSON：读一次，嗅探后分派 */
+        if (/\.json$/i.test(lower)) {
+          var reader = new FileReader();
+          reader.onload = function (ev) {
+            var obj;
+            try { obj = JSON.parse(ev.target.result); }
+            catch (_) { alert(tr2('drop.jsonBad', 'JSON 解析失败，文件可能损坏')); return; }
+            var kind = sniffJSON(obj);
+            if (kind === 'plugin') { dispatchPlugin(file); return; }
+            if (kind === 'project') { importProjectData(obj, name); return; }
+            if (kind === 'action') { applyActionImport(obj, false); return; }
+            alert(tr2('drop.jsonUnknown', '无法识别的 JSON（不是项目、动作或插件文件）'));
+          };
+          reader.onerror = function () { alert(tr2('drop.jsonBad', 'JSON 解析失败，文件可能损坏')); };
+          reader.readAsText(file);
+          return;
+        }
+
+        /* 3) 图片 → 配饰元件 */
+        if ((file.type && /^image\//i.test(file.type)) || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(lower)) {
+          handleImageFile(file, 'acc'); return;
+        }
+        /* 4) 视频 → 视频元件（不是参考视频） */
+        if ((file.type && /^video\//i.test(file.type)) || /\.(mp4|webm|mov|m4v|ogv|mkv)$/i.test(lower)) {
+          handleVideoClipFile(file); return;
+        }
+        /* 5) 音频 → 音频元件 */
+        if ((file.type && /^audio\//i.test(file.type)) || /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(lower)) {
+          handleAudioClipFile(file); return;
+        }
+        alert(tr2('drop.unsupported', '不支持的文件类型：') + name);
+      }
+
+      function handleDroppedFiles(files) {
+        if (!files || !files.length) return;
+        Array.prototype.forEach.call(files, function (file) { handleOneDroppedFile(file); });
+      }
+
+      document.addEventListener('dragenter', function (e) {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepth++;
+        showOverlay();
+      });
+      document.addEventListener('dragover', function (e) {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        showOverlay();
+      });
+      document.addEventListener('dragleave', function (e) {
+        if (!hasFiles(e)) return;
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) hideOverlay();
+      });
+      document.addEventListener('drop', function (e) {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepth = 0;
+        hideOverlay();
+        handleDroppedFiles(e.dataTransfer.files);
+      });
+    })();
 })();
