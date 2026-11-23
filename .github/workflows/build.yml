@@ -88,7 +88,8 @@ jobs:
       - name: 校验固定 debug 签名密钥
         # 只复制到 ~/.android/debug.keystore 不够：实测 AGP 8.2.1 在 validateSigningDebug
         # 仍会现场生成 serial=1 的新 debug 证书。必须显式写 signingConfigs.debug。
-        run: keytool -list -v -keystore native/android-debug.keystore -storepass android -alias androiddebugkey | grep 'SHA1: CB:BD:1B:C5:93:12:83:E3:0C:16:C4:CA:B1:D1:1C:C8:50:61:3A:EF'
+        run: |
+          keytool -list -v -keystore native/android-debug.keystore -storepass android -alias androiddebugkey | grep 'SHA1: CB:BD:1B:C5:93:12:83:E3:0C:16:C4:CA:B1:D1:1C:C8:50:61:3A:EF'
       - run: npm ci
       - name: 生成原生工程（首次）
         run: |
