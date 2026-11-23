@@ -85,22 +85,20 @@ jobs:
         # 允许失败：runner 镜像通常已预装，Gradle 也能按需自动下载
         continue-on-error: true
         run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
-      - name: 写入固定 debug 签名密钥
-        # 原来用 actions/cache 缓存 ~/.android/debug.keystore，但缓存步骤在密钥生成前执行，
-        # 构建结束保存时这个文件又不存在，所以从来没真正缓存成功。
-        # 现在直接复制仓库内固定 keystore 到 Gradle 默认位置，保证每次 APK 签名一致。
-        # 注意：已经装过历史 debug 包的用户需要卸载一次才能覆盖安装。
-        run: |
-          mkdir -p ~/.android
-          cp native/android-debug.keystore ~/.android/debug.keystore
-          chmod 600 ~/.android/debug.keystore
-          keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep 'SHA1: CB:BD:1B:C5:93:12:83:E3:0C:16:C4:CA:B1:D1:1C:C8:50:61:3A:EF'
+      - name: 校验固定 debug 签名密钥
+        # 只复制到 ~/.android/debug.keystore 不够：实测 AGP 8.2.1 在 validateSigningDebug
+        # 仍会现场生成 serial=1 的新 debug 证书。必须显式写 signingConfigs.debug。
+        run: keytool -list -v -keystore native/android-debug.keystore -storepass android -alias androiddebugkey | grep 'SHA1: CB:BD:1B:C5:93:12:83:E3:0C:16:C4:CA:B1:D1:1C:C8:50:61:3A:EF'
       - run: npm ci
       - name: 生成原生工程（首次）
         run: |
           node scripts/sync-www.js
           if [ ! -d android ]; then npx cap add android; fi
           npx cap sync android
+      - name: 写入固定 debug 签名配置
+        # 把 android/app/build.gradle 的 debug signingConfig 指向仓库内固定 keystore，
+        # 不依赖 AGP 默认路径；这样每次 APK 才真正用同一把钥匙。
+        run: node scripts/stamp-android-signing.js
       - name: 写入版本号（versionCode / versionName）
         # Capacitor 模板默认是 versionCode 1 / versionName "1.0"，每个包都一样 ——
         # 系统「应用信息」里看不出装的是哪一版，覆盖安装也只能靠 versionCode 判断。
