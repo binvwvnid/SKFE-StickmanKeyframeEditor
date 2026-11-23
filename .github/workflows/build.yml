@@ -85,14 +85,16 @@ jobs:
         # 允许失败：runner 镜像通常已预装，Gradle 也能按需自动下载
         continue-on-error: true
         run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
-      - name: 缓存 debug 签名密钥
-        # runner 每次都是干净的，~/.android/debug.keystore 会重新生成 →
-        # 同一条流水线前后产出的 APK 签名不同，用户覆盖安装会被系统拒绝。
-        # 缓存一把密钥，后续构建就能直接盖掉旧版本。
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: skfe-android-debug-keystore-v1
+      - name: 写入固定 debug 签名密钥
+        # 原来用 actions/cache 缓存 ~/.android/debug.keystore，但缓存步骤在密钥生成前执行，
+        # 构建结束保存时这个文件又不存在，所以从来没真正缓存成功。
+        # 现在直接复制仓库内固定 keystore 到 Gradle 默认位置，保证每次 APK 签名一致。
+        # 注意：已经装过历史 debug 包的用户需要卸载一次才能覆盖安装。
+        run: |
+          mkdir -p ~/.android
+          cp native/android-debug.keystore ~/.android/debug.keystore
+          chmod 600 ~/.android/debug.keystore
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep 'SHA1: CB:BD:1B:C5:93:12:83:E3:0C:16:C4:CA:B1:D1:1C:C8:50:61:3A:EF'
       - run: npm ci
       - name: 生成原生工程（首次）
         run: |

@@ -3,7 +3,7 @@
 <head> <!-- 网页头部，包含元数据和外部引用 -->
 <meta charset="UTF-8"> <!-- 设置字符编码为 UTF-8，防止中文乱码 -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover"> <!-- 移动端视口设置：宽度同设备，允许缩放，适配刘海屏 -->
-<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.1</title> <!-- 网页标题，带有多语言属性；运行时由 i18n 注入 version.js 的版本号 -->
+<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.2</title> <!-- 网页标题，带有多语言属性；运行时由 i18n 注入 version.js 的版本号 -->
 <link rel="stylesheet" href="./style.css"> <!-- 引入外部样式表 -->
 </head> <!-- 头部结束 -->
 <body> <!-- 网页主体开始 -->
@@ -98,7 +98,7 @@
   <div id="uiMain"> <!-- v7.3.0：「属性」分区（data-sheet="props"），标题头由 JS 动态插入，见 mountUiSheets -->
 
   <div id="watermark"> <!-- 控制面板顶部的作者/版本水印 -->
-    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.1</div> <!-- 软件名称及版本 -->
+    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.2</div> <!-- 软件名称及版本 -->
     <div class="author" data-i18n="watermark.author">作者 binvwvnid · QQ 交流群 1121039855</div> <!-- 作者信息及群号 -->
   </div> <!-- 水印结束 -->
 
@@ -395,9 +395,8 @@
 
       <div class="row slider"><label data-i18n="common.head">头部</label><input type="range" id="headSize" min="0.5" max="2" step="0.01" value="1.83"><span class="val" id="headVal">1.83</span></div> <!-- 头部大小 -->
       <div class="row" style="margin-top:4px;"> <!-- 头部填充选项 -->
-        <button id="btnHeadFill" class="btn-xs" data-i18n="head.hollow">头部空心</button> <!-- 切换头部实心/空心 -->
-        <label style="margin-left:auto; font-size:12px;"><input type="checkbox" id="headFillCustom"> <span data-i18n="prop.innerFill">头部内部填充色</span></label> <!-- 开启内部填充 -->
-        <input type="color" id="headFillColor" value="#111111"> <!-- 内部填充颜色 -->
+        <label style="font-size:12px;"><input type="checkbox" id="headFillCustom"> <span data-i18n="prop.innerFill">头部内部填充色（实心头效果）</span></label> <!-- 开启内部填充 -->
+        <input type="color" id="headFillColor" value="#111111" style="margin-left:auto;"> <!-- 内部填充颜色 -->
       </div> <!-- 行结束 -->
       <div class="row" style="margin-top:8px; justify-content:space-between; background:var(--bg-input); padding:6px 10px; border-radius:8px;"> <!-- 独立平移头部 -->
         <label class="checkbox-label" style="font-size:12px; font-weight:600;"><input type="checkbox" id="headIndep"> <span data-i18n="prop.indepHead">独立平移头部</span></label> <!-- 开启头部独立拖拽 -->
@@ -646,88 +645,106 @@
     <div class="hint" style="margin-top:6px;" data-i18n="mask.hint">提示：蒙版作用于当前选中的图片、图形、对话框、画笔和视频元件；基础蒙版按元件包围盒裁剪，色度抠图按颜色逐像素键控。</div>
   </div> <!-- 蒙版面板结束 -->
 
-  <div class="tool-panel" data-tool="eraser"> <!-- ==================== 画笔 / 橡皮面板 v5.1.0 ==================== -->
+  <div class="tool-panel brush-tool-panel" data-tool="eraser"> <!-- ==================== 画笔 / 橡皮面板 ==================== -->
 
-    <!-- ========== 画笔区（新增） ========== -->
-    <!-- v7.0.6：原来这里的「画笔」小标题删了 —— 分区栏里已经写着「画笔」，重复一次很啰嗦 -->
-    <div class="row" style="margin-top:6px;"> <!-- 画笔 / 擦除 开关行 -->
-      <button id="btnBrushToggle" class="btn-xs" style="flex:1;"><i data-icon="pencil"></i><span data-i18n="brush.enable">开启画笔</span></button> <!-- 进入/退出画笔模式 -->
-      <button id="btnEraserToggle" class="btn-xs" style="flex:1;"><i data-icon="erase"></i><span data-i18n="eraser.enable">开启擦除</span></button> <!-- 切换擦除模式按钮 -->
-    </div> <!-- 行结束 -->
+    <!-- ========== 模式 ========== -->
+    <div class="brush-group">
+      <div class="brush-group-title" data-i18n="brush.groupMode">模式</div>
+      <div class="brush-grid brush-grid-mode">
+        <button id="btnBrushToggle" class="btn-xs"><i data-icon="pencil"></i><span data-i18n="brush.enable">开启画笔</span></button>
+        <button id="btnEraserToggle" class="btn-xs"><i data-icon="erase"></i><span data-i18n="eraser.enable">开启擦除</span></button>
+        <button id="btnBrushBucket" class="btn-xs" data-i18n-title="brush.bucketTitle"><i data-icon="bucket"></i><span data-i18n="brush.bucket">油漆桶填充</span></button>
+      </div>
+    </div>
 
-    <div class="row" style="margin-top:8px; align-items:center;"> <!-- 画笔颜色与包边开关 -->
-      <label><span data-i18n="brush.color">画笔颜色</span>
-        <input type="color" id="brushColor" value="#111111"> <!-- 笔迹芯色 -->
-      </label>
-      <label style="margin-left:auto;" class="checkbox-label">
-        <input type="checkbox" id="brushBorderEnabled" checked> <!-- 是否描边 -->
-        <span data-i18n="brush.border">包边</span>
-      </label>
-      <label style="margin-left:8px;" class="checkbox-label" title="勾选后，这些笔的描边统一铺在所有笔芯下面，后画的边不会压住先画的芯" data-i18n-title="brush.strokeOrderTip"> <!-- v6.2.0：描边铺底 -->
-        <input type="checkbox" id="brushOutlineUnder" checked> <!-- 是否把这批笔的边统一铺底 -->
-        <span data-i18n="brush.outlineUnder">描边铺底</span>
-      </label>
-    </div> <!-- 行结束 -->
+    <!-- ========== 外观 ========== -->
+    <div class="brush-group">
+      <div class="brush-group-title" data-i18n="brush.groupLook">外观</div>
+      <div class="brush-grid brush-grid-look">
+        <button id="btnBrushType" class="btn-xs" type="button" data-i18n-title="brush.typeTitle" title="选择画笔类型">
+          <i data-icon="pencil"></i><span id="brushTypeLabel" data-i18n="brush.typeDefault">默认</span>
+        </button>
+        <label><span data-i18n="brush.color">画笔颜色</span>
+          <input type="color" id="brushColor" value="#111111">
+        </label>
+        <label class="brush-slider">
+          <span data-i18n="brush.size">芯粗细</span>
+          <input type="range" id="brushSize" min="1" max="120" step="1" value="6">
+          <span class="val" id="brushSizeVal">6</span>
+        </label>
+        <label class="brush-slider">
+          <span data-i18n="brush.stabilize">防抖</span>
+          <input type="range" id="brushStabilize" min="0" max="100" step="1" value="50">
+          <span class="val" id="brushStabilizeVal">50</span>
+        </label>
+      </div>
+    </div>
 
-    <div class="row" style="margin-top:6px;"> <!-- 边颜色与边粗细 -->
-      <label style="margin-left:0;"><span data-i18n="brush.borderColor">边颜色</span>
-        <input type="color" id="brushBorderColor" value="#1a1a1a"> <!-- 笔迹边色 -->
-      </label>
-      <label style="margin-left:auto;"><span data-i18n="brush.borderWidth">边粗细</span>
-        <input type="range" id="brushBorderWidth" min="0" max="40" step="1" value="3" style="width:86px;"> <!-- 边粗细滑条 -->
-        <span class="val" id="brushBorderWidthVal">3</span>
-      </label>
-    </div> <!-- 行结束 -->
+    <!-- ========== 描边 ========== -->
+    <div class="brush-group">
+      <div class="brush-group-title" data-i18n="brush.groupOutline">描边</div>
+      <div class="brush-grid brush-grid-outline">
+        <label class="checkbox-label">
+          <input type="checkbox" id="brushBorderEnabled" checked>
+          <span data-i18n="brush.border">包边</span>
+        </label>
+        <label class="checkbox-label" title="勾选后，这些笔的描边统一铺在所有笔芯下面，后画的边不会压住先画的芯" data-i18n-title="brush.strokeOrderTip">
+          <input type="checkbox" id="brushOutlineUnder" checked>
+          <span data-i18n="brush.outlineUnder">描边铺底</span>
+        </label>
+        <label><span data-i18n="brush.borderColor">边颜色</span>
+          <input type="color" id="brushBorderColor" value="#1a1a1a">
+        </label>
+        <label class="brush-slider">
+          <span data-i18n="brush.borderWidth">边粗细</span>
+          <input type="range" id="brushBorderWidth" min="0" max="40" step="1" value="3">
+          <span class="val" id="brushBorderWidthVal">3</span>
+        </label>
+      </div>
+    </div>
 
-    <div class="row slider"> <!-- 芯粗细 -->
-      <label data-i18n="brush.size">芯粗细</label>
-      <input type="range" id="brushSize" min="1" max="120" step="1" value="6">
-      <span class="val" id="brushSizeVal">6</span>
-    </div> <!-- 行结束 -->
+    <!-- ========== 操作 ========== -->
+    <div class="brush-group">
+      <div class="brush-group-title" data-i18n="brush.groupAction">操作</div>
+      <div class="brush-grid brush-grid-two">
+        <button id="btnBrushEdit" class="btn-xs"><i data-icon="pencil"></i><span data-i18n="brush.editSelected">编辑选中画笔</span></button>
+        <button id="btnBrushClearFrame" class="btn-xs danger" data-i18n="brush.clearFrameBtn">清除本帧画笔元件</button>
+      </div>
+    </div>
 
-    <div class="row slider"> <!-- 防抖 -->
-      <label data-i18n="brush.stabilize">防抖</label>
-      <input type="range" id="brushStabilize" min="0" max="100" step="1" value="0">
-      <span class="val" id="brushStabilizeVal">0</span>
-    </div> <!-- 行结束 -->
+    <!-- ========== 画笔预设 ========== -->
+    <div class="brush-group brush-preset-group">
+      <div class="brush-group-title" data-i18n="brushPreset.title">画笔预设</div>
+      <div class="brush-grid brush-grid-two">
+        <input type="text" id="inkPresetName" maxlength="20" placeholder="预设名称（可留空）" data-i18n-placeholder="brushPreset.namePlaceholder">
+        <button id="btnInkPresetSave" class="btn-xs"><i data-icon="save"></i><span data-i18n="brushPreset.save">存为预设</span></button>
+      </div>
+      <div class="brush-grid brush-grid-preset">
+        <select id="inkPresetSelect"></select>
+        <button id="btnInkPresetApply" class="btn-xs" data-i18n="brushPreset.apply">应用</button>
+        <button id="btnInkPresetDelete" class="btn-xs danger" data-i18n="brushPreset.del">删除</button>
+      </div>
+      <div class="hint" data-i18n-html="brushPreset.hint">预设会记录笔迹形状与「挂载点 + 相对偏移」，应用到当前选中的火柴人时保持相对位置。</div>
+    </div>
 
-    <div class="row" style="margin-top:6px;"> <!-- 编辑 / 清除 画笔元件 -->
-      <button id="btnBrushEdit" class="btn-xs" style="flex:1;"><i data-icon="pencil"></i><span data-i18n="brush.editSelected">编辑选中画笔</span></button>
-      <button id="btnBrushClearFrame" class="btn-xs danger" style="flex:1;" data-i18n="brush.clearFrameBtn">清除本帧画笔元件</button>
-    </div> <!-- 行结束 -->
+    <div class="hint brush-hint" data-i18n-html="brush.hint">开启画笔后在画布上绘制。画完后点浮动工具栏「确定」即可生成元件，并自动绑定到选中的火柴人（若无则绑最近的关节点）。</div>
 
-    <!-- ========== 画笔预设（v5.1.1：笔迹 + 挂载位置一起存） ========== -->
-    <div class="divider" style="margin:10px 0;"></div> <!-- 分割线 -->
-    <div class="section-title" data-i18n="brushPreset.title">画笔预设</div> <!-- 预设区标题 -->
-    <div class="row" style="margin-top:6px;"> <!-- 预设命名与保存 -->
-      <input type="text" id="inkPresetName" maxlength="20" placeholder="预设名称（可留空）" data-i18n-placeholder="brushPreset.namePlaceholder"> <!-- 预设名称（外观与元件重命名框一致，样式在 style.css 里统一） -->
-      <button id="btnInkPresetSave" class="btn-xs" style="flex-shrink:0;"><i data-icon="save"></i><span data-i18n="brushPreset.save">存为预设</span></button> <!-- 保存当前画笔为预设 -->
-    </div> <!-- 行结束 -->
-    <div class="row" style="margin-top:6px;"> <!-- 预设选择与应用 -->
-      <select id="inkPresetSelect" style="flex:1; min-width:0;"></select> <!-- 预设列表 -->
-      <button id="btnInkPresetApply" class="btn-xs" style="flex-shrink:0;" data-i18n="brushPreset.apply">应用</button> <!-- 应用选中的预设 -->
-      <button id="btnInkPresetDelete" class="btn-xs danger" style="flex-shrink:0;" data-i18n="brushPreset.del">删除</button> <!-- 删除选中的预设 -->
-    </div> <!-- 行结束 -->
-    <div class="hint" style="margin-top:4px;" data-i18n-html="brushPreset.hint">预设会记录笔迹形状与「挂载点 + 相对偏移」，应用到当前选中的火柴人时保持相对位置。</div> <!-- 预设说明 -->
-
-    <div class="hint" style="margin-top:6px;" data-i18n-html="brush.hint">开启画笔后在画布上绘制。画完后点浮动工具栏「确定」即可生成元件，并自动绑定到选中的火柴人（若无则绑最近的关节点）。</div> <!-- 操作提示 -->
-
-    <div class="divider" style="margin:12px 0;"></div> <!-- 分割线 -->
-
-    <!-- ========== 橡皮擦区（保留原有） ========== -->
-    <div class="section-title" data-i18n="eraser.title">圆形笔刷矢量橡皮擦</div> <!-- 面板标题 -->
-    <div class="row" style="margin-top:4px;"> <!-- 状态提示行 -->
-      <span class="eraser-state" id="eraserState" data-i18n="eraser.stateIdle">擦除 = 隐藏，不破坏原像素</span> <!-- 当前状态提示文字 -->
-    </div> <!-- 行结束 -->
-    <div class="row slider"><label data-i18n="eraser.size">笔刷大小</label><input type="range" id="eraserSize" min="1" max="100" step="1" value="15"><span class="val" id="eraserSizeVal">15</span></div> <!-- 笔刷大小调整 -->
-    <div class="row" style="margin-top:4px; margin-bottom:8px;"> <!-- 直线模式行 -->
-      <label class="checkbox-label" style="font-size:11.5px;"><input type="checkbox" id="eraserLineMode"> <span data-i18n="eraser.lineMode">直线模式（仅画起点到终点的直线）</span></label> <!-- 直线模式复选框 -->
-    </div> <!-- 行结束 -->
-    <div class="row"> <!-- 清除按钮组 -->
-      <button id="btnEraserClearFrame" class="btn-xs" style="flex:1;" data-i18n="eraser.clearFrame">清除本帧擦除</button> <!-- 仅清除当前帧的擦除痕迹 -->
-      <button id="btnEraserClearAll" class="btn-xs danger" style="flex:1;" data-i18n="eraser.clearAll">清除全部擦除</button> <!-- 清除所有帧的擦除痕迹 -->
-    </div> <!-- 行结束 -->
-    <div class="hint" style="margin-top:6px;" data-i18n-html="eraser.hint">在画布上按住拖动即可擦除；遮罩保存在对象局部坐标中，会跟随移动、缩放与旋转。<br>提示：撤销/恢复不会关闭擦除模式，方便连续作画。</div> <!-- 操作提示 -->
+    <!-- ========== 橡皮擦 ========== -->
+    <div class="brush-group brush-eraser-group">
+      <div class="brush-group-title" data-i18n="eraser.title">圆形笔刷矢量橡皮擦</div>
+      <div class="row" style="margin-top:4px;">
+        <span class="eraser-state" id="eraserState" data-i18n="eraser.stateIdle">擦除 = 隐藏，不破坏原像素</span>
+      </div>
+      <div class="row slider"><label data-i18n="eraser.size">笔刷大小</label><input type="range" id="eraserSize" min="1" max="100" step="1" value="15"><span class="val" id="eraserSizeVal">15</span></div>
+      <div class="row" style="margin-top:4px; margin-bottom:8px;">
+        <label class="checkbox-label" style="font-size:11.5px;"><input type="checkbox" id="eraserLineMode"> <span data-i18n="eraser.lineMode">直线模式（仅画起点到终点的直线）</span></label>
+      </div>
+      <div class="brush-grid brush-grid-two">
+        <button id="btnEraserClearFrame" class="btn-xs" data-i18n="eraser.clearFrame">清除本帧擦除</button>
+        <button id="btnEraserClearAll" class="btn-xs danger" data-i18n="eraser.clearAll">清除全部擦除</button>
+      </div>
+      <div class="hint" data-i18n-html="eraser.hint">在画布上按住拖动即可擦除；遮罩保存在对象局部坐标中，会跟随移动、缩放与旋转。<br>提示：撤销/恢复不会关闭擦除模式，方便连续作画。</div>
+    </div>
   </div> <!-- 画笔 / 橡皮面板结束 -->
 
   <div class="tool-panel" data-tool="canvas" id="canvasSettingsPanel"> <!-- ==================== 画布设置面板 ==================== -->
@@ -1020,6 +1037,7 @@
     <div class="ts-scroll" id="tsScroll"> <!-- 唯一滚动区（横竖共用） -->
       <div class="ts-canvas" id="tsCanvas"><!-- 内容层：宽高由 JS 按列宽×帧数算 --></div>
     </div>
+    <div class="ts-playhead" aria-hidden="true"></div> <!-- 播放头：固定在视口中央，不参与滚动 -->
   </div> <!-- 轨道容器结束 -->
   
   <div class="adv-panel" id="timelineAdvancedPanel" hidden> <!-- ==================== 时间轴高级设置弹窗 ==================== -->
@@ -1187,6 +1205,31 @@
   </div>
   <div id="globalEditHelpBody" class="help-float-body" data-i18n-html="adv.globalHelp"></div>
 </div> <!-- 全局属性说明浮窗结束 -->
+
+<!-- 画笔类型浮窗：与「使用说明」同款，挂在 body 下；两个选项：默认 / 柳叶笔 -->
+<div id="brushTypeFloat" class="help-float brush-type-float" hidden>
+  <div class="help-float-head">
+    <strong data-i18n="brush.typeTitle">画笔类型</strong>
+    <button id="brushTypeClose" class="help-float-close" type="button" aria-label="关闭" data-i18n-title="help.close"><i data-icon="close"></i></button>
+  </div>
+  <div class="help-float-body brush-type-body">
+    <div class="brush-type-grid">
+      <button type="button" class="brush-type-option on" data-brush-type="default">
+        <span class="brush-type-name" data-i18n="brush.typeDefault">默认</span>
+        <span class="brush-type-desc" data-i18n="brush.typeDefaultDesc">普通矢量笔迹，保持原来的画笔效果。</span>
+      </button>
+      <button type="button" class="brush-type-option" data-brush-type="blob">
+        <span class="brush-type-name" data-i18n="brush.typeBlob">柳叶笔</span>
+        <span class="brush-type-desc" data-i18n="brush.typeBlobDesc">拖动画出不规则有机填充块，边缘自动平滑并闭合。</span>
+      </button>
+      <button type="button" class="brush-type-option" data-brush-type="crayon">
+        <span class="brush-type-name" data-i18n="brush.typeCrayon">蜡笔</span>
+        <span class="brush-type-desc" data-i18n="brush.typeCrayonDesc">沿笔迹撒出颗粒状短笔触，模拟蜡笔纸纹；不使用包边。</span>
+      </button>
+    </div>
+    <div class="brush-type-tip" data-i18n="brush.typeTip">选择的画笔类型会记在本地配置里；切换类型只影响之后画的笔，不会改动已有笔迹。</div>
+  </div>
+</div> <!-- 画笔类型浮窗结束 -->
 
 <!-- 引入外部 JavaScript 脚本 -->
 <script src="./js/version.js"></script> <!-- 版本号单一来源，必须在 i18n 之前 -->

@@ -1497,6 +1497,38 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .ui-sheet .tool-panel .section-title:first-child { margin-top: 0; }
   .tool-panel .section-title { margin: 0 0 6px; font-size: 12px; } /* 面板内标题：外边距，字号 */
 
+  /* ===== 画笔面板：三段式分组布局（跟其它面板一样透明融入，不加卡片白底） ===== */
+  .brush-tool-panel { display: flex; flex-direction: column; gap: 4px; }
+  .brush-group { padding: 0; border: none; background: transparent; }
+  .brush-group-title {
+    margin: 8px 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-main);
+  }
+  .brush-tool-panel > .brush-group:first-child .brush-group-title { margin-top: 0; }
+  .brush-grid { display: grid; align-items: center; gap: 6px 8px; }
+  .brush-grid-mode { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .brush-grid-look, .brush-grid-outline, .brush-grid-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .brush-grid-preset { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .brush-tool-panel label { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11.5px; color: var(--text-main); }
+  .brush-tool-panel label > span:first-child { white-space: nowrap; }
+  .brush-tool-panel input[type="color"] {
+    width: 34px; height: 24px; padding: 0; flex-shrink: 0;
+    border: 1px solid var(--border-color); border-radius: 6px; background: transparent;
+  }
+  .brush-tool-panel .btn-xs { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .brush-slider input[type="range"] { flex: 1; min-width: 0; }
+  .brush-slider .val { min-width: 22px; text-align: right; color: var(--text-sub); font-size: 11px; }
+  .brush-grid-preset select { width: 100%; min-width: 0; }
+  .brush-hint { margin-top: 0; }
+  .brush-preset-group, .brush-eraser-group { padding: 0; border: none; background: transparent; }
+  .brush-preset-group .brush-group-title, .brush-eraser-group .brush-group-title { color: var(--text-main); }
+  @media (max-width: 360px) {
+    .brush-grid-mode { grid-template-columns: 1fr; }
+    .brush-grid-look, .brush-grid-outline, .brush-grid-two { grid-template-columns: 1fr; }
+  }
+
   details.add-details { /* 可折叠详情容器（如“添加物体”） */
     margin-top: 8px; background: transparent; /* 上边距，透明背景 */
     border: none; border-radius: 12px; padding: 4px 0; /* 无边框，圆角，内边距 */
@@ -1571,6 +1603,36 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     margin: 6px 0; padding: 6px 8px; /* 内边距 */
     background: var(--bg-input); border-radius: 8px; /* 浅底圆角 */
   } /* 引用块结束 */
+
+  .brush-type-float { /* 画笔类型浮窗：沿用说明浮窗的位置和底色，仅覆盖内容区尺寸 */
+    height: auto; max-height: 70vh; overflow: auto;
+  } /* 画笔类型浮窗结束 */
+  .brush-type-body { padding: 14px 16px 16px; } /* 类型选择内容 */
+  .brush-type-grid { /* 画笔类型列表 */
+    display: flex; flex-direction: column; gap: 8px;
+  } /* 类型列表结束 */
+  .brush-type-option { /* 单个列表项：左侧名称，右侧说明 */
+    display: flex; flex-direction: row; align-items: baseline; gap: 12px;
+    min-height: 0; padding: 10px 12px; text-align: left;
+    border: 1px solid var(--border-color); border-radius: 10px;
+    background: #fff; color: var(--text-main); cursor: pointer;
+  } /* 类型列表项结束 */
+  .brush-type-option:hover { background: var(--btn-hover); }
+  .brush-type-option.on { /* 当前选中类型 */
+    border-color: var(--color-primary);
+    box-shadow: inset 0 0 0 1px var(--color-primary);
+    background: rgba(59, 130, 246, .06);
+  } /* 当前选中类型结束 */
+  .brush-type-name { font-size: 14px; font-weight: 700; color: var(--text-main); flex: 0 0 56px; } /* 类型名称 */
+  .brush-type-desc { font-size: 12px; line-height: 1.6; color: var(--text-sub); flex: 1; } /* 类型说明 */
+  .brush-type-tip { /* 底部提示 */
+    margin-top: 12px; font-size: 11.5px; line-height: 1.7; color: var(--text-sub);
+  } /* 底部提示结束 */
+  .tool-panel label.disabled { opacity: .45; } /* 蜡笔模式下禁用的包边控件 */
+  @media (max-width: 640px) { /* 手机上改为上下排列说明，避免挤成两列 */
+    .brush-type-option { flex-direction: column; align-items: flex-start; gap: 3px; }
+    .brush-type-name { flex: none; }
+  } /* 手机适配结束 */
 
   .color-enhance { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; } /* 颜色输入框增强包裹层：行内弹性布局，居中，间距 4px，垂直居中对齐 */
   .color-tool-btn { /* 颜色工具按钮（吸管、色板） */
@@ -1981,6 +2043,10 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   body.brush-mode #anchorHandle,
   body.brush-mode #headMoveHandle { pointer-events: none; opacity: .35; } /* 画笔模式下弱化并禁用编辑手柄 */
 
+  /* v7.9.2：油漆桶模式——overlay 接管点击但不画，光标改为十字准星 */
+  body.bucket-mode #brushOverlay { display: block; pointer-events: auto; cursor: crosshair; }
+  body.bucket-mode #c { pointer-events: none; }
+
   #brushFloatBar { /* 画笔浮动工具栏 */
     position: fixed; left: 50%; bottom: 100px; /* 固定定位在底部居中 */
     transform: translateX(-50%); /* 水平居中 */
@@ -2098,7 +2164,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #timeline.track-mode #frameBar,
   #timeline.track-mode #kfCurveWrap { display: none; }
   #timeline.track-mode #trackStrip { display: block; }
-  #trackStrip { display: none; flex: 1 1 auto; min-height: 0; margin: 2px -10px -4px; --ts-gutter: 108px; }
+  #trackStrip { display: none; position: relative; flex: 1 1 auto; min-height: 0; margin: 2px -10px -4px; --ts-gutter: 108px; }
   #trackStrip[hidden] { display: none !important; }
 
   /* 轨道模式下控制栏只留「播放组 + 分割 / 删除 / 关键帧 / 循环 / 插 N 帧 / 曲线」 */
@@ -2259,10 +2325,12 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   }
   .ts-key.sel.cut { border-color: #e24b4a; }
 
-  /* 播放头 */
+  /* 播放头：挂在 #trackStrip 上而不是滚动内容里，视觉坐标固定在可视轨道区中线。
+     中线 = 左侧元件列 + 剩余宽度的一半；left 随 --ts-gutter 自动适配手机断点。 */
   .ts-playhead {
-    position: absolute; top: 0; width: 1px;
-    background: #e24b4a; pointer-events: none; z-index: 5;
+    position: absolute; top: 0; bottom: 0;
+    left: calc(var(--ts-gutter, 108px) + (100% - var(--ts-gutter, 108px)) / 2);
+    width: 1px; background: #e24b4a; pointer-events: none; z-index: 7;
   }
 
   /* v7.4.4：空白处拖出来的框选框（压到哪几条长条就选哪几条） */

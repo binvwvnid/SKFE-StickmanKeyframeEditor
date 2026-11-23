@@ -206,17 +206,24 @@
     return exportCanvasFirst && AppState.canvasBoundsEnabled;
   }
 
-  function setGlobalProp(fig, path, value) {
-    if (!globalEditEnabled) return;
-    const set = (obj, p, v) => {
-      const keys = p.split('.');
-      let cur = obj;
-      for (let i = 0; i < keys.length - 1; i++) {
-        if (cur[keys[i]] === undefined || cur[keys[i]] === null) cur[keys[i]] = {};
-        cur = cur[keys[i]];
-      }
-      cur[keys[keys.length - 1]] = v;
-    };
+  /* v7.9.4：input 拖动期间把「全局属性跨帧写入」也合并到 change 时一次提交。
+     以前滑条每动一下就把同一属性扫写进所有轨道所有帧，再清一次派生帧缓存；
+     和扭曲映射重算叠在一起就是属性操作卡住的主因。 */
+  let globalPropBatch = null;
+  let boundPropBatch = null;
+
+  function setPathValue(obj, p, v) {
+    const keys = p.split('.');
+    let cur = obj;
+    for (let i = 0; i < keys.length - 1; i++) {
+      if (cur[keys[i]] === undefined || cur[keys[i]] === null) cur[keys[i]] = {};
+      cur = cur[keys[i]];
+    }
+    cur[keys[keys.length - 1]] = v;
+  }
+
+  function writeGlobalProp(fig, path, value, deferBump) {
+    if (!fig) return;
     const targetId = String(fig.id);
     for (const id in AppState.tracks) {
       const t = AppState.tracks[id];
@@ -226,14 +233,25 @@
         if (data && String(data.id) === targetId) {
           // 如果开启了多选模式，且当前帧不在多选列表中，则跳过
           if (multiSelectMode && !multiSelectedFrames.has(i)) continue;
-          set(data, path, value);
+          setPathValue(data, path, value);
         }
       }
     }
-    if (AppState.selected && String(AppState.selected.id) === targetId) set(AppState.selected, path, value);
-    /* v7.4.7：关键帧写过了，段内派生帧就得按新值重算 —— 不清缓存的话
-       「全局改了颜色/比例，关键帧之间那几帧还是旧样子」。 */
-    bumpKfEval();
+    if (AppState.selected && String(AppState.selected.id) === targetId) setPathValue(AppState.selected, path, value);
+    if (!deferBump) bumpKfEval();
+  }
+
+  function setGlobalProp(fig, path, value) {
+    if (!globalEditEnabled || !fig) return;
+    if (uiInputBurstActive) {
+      if (!globalPropBatch) globalPropBatch = new Map();
+      const id = String(fig.id);
+      let rec = globalPropBatch.get(id);
+      if (!rec) { rec = { fig, props: new Map() }; globalPropBatch.set(id, rec); }
+      rec.props.set(path, value);
+      return;
+    }
+    writeGlobalProp(fig, path, value, false);
   }
 
 /* 判断对象是否处于"已绑定"状态（配饰/图形/对话框/画笔） */
@@ -250,28 +268,18 @@ function isBoundObj(o) {
    否则某些帧（例如建帧时全局属性是关的、或绑定只在当前帧生效）会被跳过，
    表现就是"开了全局属性修改，总有一帧位置/大小不对"。 */
 const BOUND_PLACEMENT_PATHS = { offX: 1, offY: 1, bindTo: 1, targetId: 1, rot: 1, scale: 1, x: 1, y: 1, ax: 1, ay: 1, mirror: 1 };
-function setGlobalPropForBound(obj, path, value) {
-  if (!globalEditEnabled) return;
+function writeGlobalPropForBound(obj, path, value, deferBump) {
   if (!obj) return;
   const targetId = String(obj.id);
-  const set = (o, p, v) => {
-    const keys = p.split('.');
-    let cur = o;
-    for (let i = 0; i < keys.length - 1; i++) {
-      if (cur[keys[i]] === undefined || cur[keys[i]] === null) cur[keys[i]] = {};
-      cur = cur[keys[i]];
-    }
-    cur[keys[keys.length - 1]] = v;
-  };
   for (const id in AppState.tracks) {
     const t = AppState.tracks[id];
     if (!t || !t.frames) continue;
     for (const data of t.frames) {
-      if (data && String(data.id) === targetId) set(data, path, value);
+      if (data && String(data.id) === targetId) setPathValue(data, path, value);
     }
   }
   if (AppState.selected && String(AppState.selected.id) === targetId) {
-    set(AppState.selected, path, value);
+    setPathValue(AppState.selected, path, value);
   }
   /* 位置类属性同步后，把"当前世界位置"写进各帧的 x/y 作为兜底缓存：
      若某帧缺少目标火柴人（getBindTransform 会退回 x/y），也能停在同一处而不是旧出生点。 */
@@ -291,8 +299,39 @@ function setGlobalPropForBound(obj, path, value) {
       }
     }
   }
-  /* v7.4.7：绑定件的全局改动同样要让段内派生帧重算 */
-  bumpKfEval();
+  if (!deferBump) bumpKfEval();
+}
+
+function setGlobalPropForBound(obj, path, value) {
+  if (!globalEditEnabled || !obj) return;
+  if (uiInputBurstActive) {
+    if (!boundPropBatch) boundPropBatch = new Map();
+    const id = String(obj.id);
+    let rec = boundPropBatch.get(id);
+    if (!rec) { rec = { obj, props: new Map() }; boundPropBatch.set(id, rec); }
+    rec.props.set(path, value);
+    return;
+  }
+  writeGlobalPropForBound(obj, path, value, false);
+}
+
+function flushGlobalPropBatch() {
+  let dirty = false;
+  if (globalPropBatch) {
+    dirty = true;
+    for (const rec of globalPropBatch.values()) {
+      for (const [path, value] of rec.props) writeGlobalProp(rec.fig, path, value, true);
+    }
+    globalPropBatch = null;
+  }
+  if (boundPropBatch) {
+    dirty = true;
+    for (const rec of boundPropBatch.values()) {
+      for (const [path, value] of rec.props) writeGlobalPropForBound(rec.obj, path, value, true);
+    }
+    boundPropBatch = null;
+  }
+  if (dirty) bumpKfEval();
 }
 
 /* v5.3.0 全局属性：四角扭曲也要跨帧同步。
@@ -877,7 +916,58 @@ function syncDistortToAllFrames(obj) {
     if (isSubTrackMode()) syncOne(AppState.activeTrackId);
   }
 
+  /* v7.9.4：属性面板的滑条 / 色块会在一次拖动里连发几十次 input。
+     原来每个 input 都立刻跑「自动落帧 + clip 同步 + 派生帧失效 + 缩略图清理」，
+     扭曲开着时这一串会叠加映射重算，表现为属性操作非常卡。
+     这里只把 input 期间的「重活」合并：画面仍然每个 input 立即重绘，
+     落帧 / 缓存失效统一拖到 change（松手或输入完成）再做。 */
+  let uiInputBurstActive = false;
+  let uiInputBurstTimer = 0;
+  let pendingFrameModified = false;
+
+  function isFormInputTarget(el) {
+    return !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'));
+  }
+
   function markCurrentFrameModified() {
+    if (uiInputBurstActive) {
+      pendingFrameModified = true;
+      if (uiInputBurstTimer) clearTimeout(uiInputBurstTimer);
+      uiInputBurstTimer = setTimeout(flushPendingFrameModified, 160);
+      return;
+    }
+    markCurrentFrameModifiedNow();
+  }
+
+  function flushPendingFrameModified() {
+    if (uiInputBurstTimer) { clearTimeout(uiInputBurstTimer); uiInputBurstTimer = 0; }
+    uiInputBurstActive = false;
+    /* 先把 input 期间攒下的全局属性写回所有帧，再做落帧 / 派生帧失效。
+       顺序反了会把新落的关键帧又用旧值覆盖。 */
+    flushGlobalPropBatch();
+    if (!pendingFrameModified) return;
+    pendingFrameModified = false;
+    markCurrentFrameModifiedNow();
+  }
+
+  /* input 用捕获：必须在控件自己的 input 监听之前进入 burst，
+     否则第一次 input 仍会同步跑一遍重活，拖动开头就会顿一下。 */
+  document.addEventListener('input', (e) => {
+    if (!isFormInputTarget(e.target)) return;
+    uiInputBurstActive = true;
+    if (uiInputBurstTimer) clearTimeout(uiInputBurstTimer);
+    uiInputBurstTimer = setTimeout(flushPendingFrameModified, 160);
+    return;
+  }, true);
+
+  document.addEventListener('change', (e) => {
+    if (!isFormInputTarget(e.target)) return;
+    if (uiInputBurstActive || pendingFrameModified || globalPropBatch || boundPropBatch) {
+      flushPendingFrameModified();
+    }
+  }, false);
+
+  function markCurrentFrameModifiedNow() {
     if (AppState.frames[AppState.currentFrameIndex] && AppState.frames[AppState.currentFrameIndex].isTween) {
       AppState.frames[AppState.currentFrameIndex].isTween = false;
       updateFrameBar();
@@ -1961,7 +2051,6 @@ function syncDistortToAllFrames(obj) {
     const data = {
       color: AppState.selected.color, lw: AppState.selected.lw, alpha: AppState.selected.alpha, scale: AppState.selected.scale,
       rot: AppState.selected.rot || 0, mirror: !!AppState.selected.mirror,
-      headFilled: AppState.selected.headFilled,
       headFillCustom: !!AppState.selected.headFillCustom,
       headFillColor: AppState.selected.headFillColor || '#111111',
       headShape: AppState.selected.headShape || 'circle',   /* v6.4.0 */
@@ -2005,7 +2094,6 @@ function syncDistortToAllFrames(obj) {
     const d = p.data;
     f.color = d.color; f.lw = d.lw; f.alpha = d.alpha; f.scale = d.scale;
     f.rot = d.rot || 0; f.mirror = !!d.mirror;
-    f.headFilled = d.headFilled;
     f.headFillCustom = !!d.headFillCustom;
     f.headFillColor = d.headFillColor || '#111111';
     /* v6.4.0：旧预设没有这个字段 → 正圆；拿不到对应头型数据也退回正圆 */
@@ -3190,7 +3278,7 @@ function importActionPresets() {
       /* v7.2.1：地面阴影从「工程级全局开关」搬到每个火柴人身上，才能分别打关键帧 */
       shadowEnabled: false, shadowColor: '#000000', shadowAlpha: 0.3,
       shadowOffX: 0, shadowOffY: 0, shadowScaleX: 1, shadowScaleY: 1,
-      headFilled: false, headFillCustom: false, headFillColor: '#111111',
+      headFillCustom: false, headFillColor: '#111111',
       headShape: 'TCO',   /* v7.0.4：默认头型改成 TCO（'circle' | 'Vic' | 'TCO' | 'TDL' | 'TSC'） */
       /* v6.3.0：初始预设改成用户调好的比例（手臂 0.98 / 小臂占比 0.41，其余不变） */
       bodyScale: { head: 1.83, arm: 0.98, leg: 1.16, torso: 0.62, foreArm: 0.41, shin: 0.49 },
@@ -4944,7 +5032,7 @@ function importActionPresets() {
       ctx.save(); ctx.globalAlpha = f.alpha * alphaMul; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       
       // 新增：躯干被头部挖空逻辑
-      const needsMask = f.layer.body < f.layer.head && !(f.headFilled || f.headFillCustom);
+      const needsMask = f.layer.body < f.layer.head && !f.headFillCustom;
       if (needsMask) {
         ctx.save();
         clipOutHeadHole(ctx, f, j, curLW);
@@ -4999,10 +5087,9 @@ function importActionPresets() {
       }
       const customFill = f.headFillCustom && f.headFillColor;
       if (hShape) {
-        /* v6.4.0：手绘头型。粗细由形状本身决定，不吃线宽滑块 —— 大小只跟「头部」比例走 */
-        if (f.headFilled) {
-          paintHeadShape(ctx, j, f, hShape, (tint || !customFill) ? effColor : f.headFillColor, 'solid');
-        } else if (customFill) {
+        /* v6.4.0：手绘头型。粗细由形状本身决定，不吃线宽滑块 —— 大小只跟「头部」比例走。
+           v7.9.4：实心/空心切换已删除，只有「头部内部填充色」一种填充入口。 */
+        if (customFill) {
           paintHeadShape(ctx, j, f, hShape, tint || effColor, 'inner', tint || f.headFillColor);
         } else {
           paintHeadShape(ctx, j, f, hShape, effColor, 'ring');
@@ -5010,22 +5097,17 @@ function importActionPresets() {
         ctx.restore();
         return;
       }
-      if (f.headFilled) {
-        ctx.fillStyle = (tint || !customFill) ? effColor : f.headFillColor;
+      if (customFill) {
+        ctx.fillStyle = tint || f.headFillColor;
         ctx.beginPath(); ctx.arc(j.headC.x, j.headC.y, j.headR, 0, TAU); ctx.fill();
-      } else {
-        if (customFill) {
-          ctx.fillStyle = tint || f.headFillColor;
-          ctx.beginPath(); ctx.arc(j.headC.x, j.headC.y, j.headR, 0, TAU); ctx.fill();
-        }
-        ctx.strokeStyle = effColor; ctx.lineWidth = curLW;
-        ctx.beginPath(); ctx.arc(j.headC.x, j.headC.y, j.headR, 0, TAU); ctx.stroke();
       }
+      ctx.strokeStyle = effColor; ctx.lineWidth = curLW;
+      ctx.beginPath(); ctx.arc(j.headC.x, j.headC.y, j.headR, 0, TAU); ctx.stroke();
       ctx.restore();
     };
 
     const drawLimbMasked = (limbName, pts, isArm) => {
-      const needsMask = f.layer[limbName] < f.layer.head && !(f.headFilled || f.headFillCustom);
+      const needsMask = f.layer[limbName] < f.layer.head && !f.headFillCustom;
       if (needsMask) {
         ctx.save();
         clipOutHeadHole(ctx, f, j, curLW);
@@ -5686,16 +5768,34 @@ function importActionPresets() {
     const syncScale = (ink.scale || 1) * ((getBindTransform(ink).syncScale) || 1);
     const alpha = (ink.alpha === undefined ? 1 : ink.alpha) * alphaMul;
 
+    /* v7.9.4：同一条笔迹的填充环 / 描边 / 笔芯 / 橡皮遮罩会反复投影同一批点。
+       以前每次都重新走一次单应性 + 矩阵乘法；这里按局部坐标缓存一次，
+       扭曲后的画笔渲染从 O(点被使用次数) 降到 O(唯一点数)。 */
+    const projCache = new Map();
+    const scaleCache = new Map();
+    const pkey = (x, y) => x + '|' + y;
     /* 局部坐标 → 变形后的世界坐标 */
-    const toW = (x, y) => DL.mapWorld(mp, {
-      x: LM.a * x + LM.c * y + LM.e,
-      y: LM.b * x + LM.d * y + LM.f
-    });
+    const toW = (x, y) => {
+      const key = pkey(x, y);
+      const hit = projCache.get(key);
+      if (hit) return hit;
+      const q = DL.mapWorld(mp, {
+        x: LM.a * x + LM.c * y + LM.e,
+        y: LM.b * x + LM.d * y + LM.f
+      });
+      projCache.set(key, q);
+      return q;
+    };
     /* 局部 1 单位在 (x,y) 处对应多长世界距离 */
     const kAt = (x, y) => {
+      const key = pkey(x, y);
+      const hit = scaleCache.get(key);
+      if (hit !== undefined) return hit;
       const a = toW(x, y), b = toW(x + 1, y);
       const d = Math.hypot(b.x - a.x, b.y - a.y);
-      return isFinite(d) && d > 0 ? d : 0;
+      const k = isFinite(d) && d > 0 ? d : 0;
+      scaleCache.set(key, k);
+      return k;
     };
 
     c.save();
@@ -5703,8 +5803,66 @@ function importActionPresets() {
     c.lineCap = 'round';
     c.lineJoin = 'round';
 
+    /* v7.9.3：区域填充垫在笔迹下面，随单应性一起变形 */
+    for (const f of (ink.fills || [])) {
+      if (!f || !f.color || !f.loops || !f.loops.length) continue;
+      c.fillStyle = f.color;
+      c.beginPath();
+      for (const loop of f.loops) {
+        if (!loop || loop.length < 3) continue;
+        const q0 = toW(loop[0].x, loop[0].y);
+        c.moveTo(q0.x, q0.y);
+        for (let i = 1; i < loop.length; i++) {
+          const q = toW(loop[i].x, loop[i].y);
+          c.lineTo(q.x, q.y);
+        }
+        c.closePath();
+      }
+      c.fill('evenodd');
+    }
+
     /* v6.2.0：把「边」「芯」「橡皮」拆成三个独立动作，方便按描边铺底规则重新排序 */
     const paintBorder = (s, pts) => {
+      /* v7.9.4：柳叶笔走有机填充块，不走线宽圆头渲染 */
+      if (s.type === 'blob') {
+        const loop = SKFE.core.geometry.blobLoopFromPoints(pts, s.blobSeed || 0);
+        if (loop.length < 3) return;
+        c.fillStyle = s.color;
+        c.beginPath();
+        const q0 = toW(loop[0].x, loop[0].y);
+        c.moveTo(q0.x, q0.y);
+        for (let i = 1; i < loop.length; i++) {
+          const q = toW(loop[i].x, loop[i].y);
+          c.lineTo(q.x, q.y);
+        }
+        c.closePath();
+        c.fill();
+        if (s.borderWidth > 0 && s.borderColor) {
+          c.strokeStyle = s.borderColor;
+          c.lineWidth = Math.max(0.5, s.borderWidth * kAt(pts[0].x, pts[0].y));
+          c.stroke();
+        }
+        return;
+      }
+      /* v7.9.4：蜡笔 = 颗粒短笔触，无包边；随单应性逐点映射 */
+        if (s.type === 'crayon') {
+          SKFE.core.geometry.drawCrayonStroke(c, pts, s.color, s.blobSeed || 0,
+            (d) => toW(d.x, d.y), (d) => kAt(d.x, d.y));
+          return;
+        }
+      /* 旧版整笔填充只在没有区域填充时兜底渲染 */
+      if (!(ink.fills && ink.fills.length) && s.fill && s.fill.color && pts.length >= 4) {
+        c.fillStyle = s.fill.color;
+        c.beginPath();
+        const q0 = toW(pts[0].x, pts[0].y);
+        c.moveTo(q0.x, q0.y);
+        for (let i = 1; i < pts.length; i++) {
+          const q = toW(pts[i].x, pts[i].y);
+          c.lineTo(q.x, q.y);
+        }
+        c.closePath();
+        c.fill();
+      }
       if (!(s.borderWidth > 0) || !s.borderColor) return;
       c.strokeStyle = s.borderColor;
       c.fillStyle = s.borderColor;
@@ -5726,6 +5884,7 @@ function importActionPresets() {
     };
 
     const paintCore = (s, pts) => {
+      if (s.type === 'blob') return; /* 柳叶笔只有填充层，避免 core 趟再画一遍线 */
       c.strokeStyle = s.color;
       c.fillStyle = s.color;
       if (pts.length === 1) {
@@ -5843,6 +6002,25 @@ function importActionPresets() {
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
 
+      /* v7.9.3：区域填充垫在笔迹下面，多环 evenodd 自动挖洞 */
+      const useRegionFills = !!(ink.fills && ink.fills.length);
+      if (useRegionFills) {
+        for (const f of ink.fills) {
+          if (!f || !f.color || !f.loops || !f.loops.length) continue;
+          ctx.fillStyle = f.color;
+          ctx.beginPath();
+          for (const loop of f.loops) {
+            if (!loop || loop.length < 3) continue;
+            ctx.moveTo(loop[0].x * finalScale, loop[0].y * finalScale);
+            for (let i = 1; i < loop.length; i++) {
+              ctx.lineTo(loop[i].x * finalScale, loop[i].y * finalScale);
+            }
+            ctx.closePath();
+          }
+          ctx.fill('evenodd');
+        }
+      }
+
       /* brush-v5.1.2: 笔迹与擦除遮罩按落笔顺序 z 交替绘制 —— 遮罩只吃掉它之前的笔迹。
          以前是"先画完所有笔迹、再统一叠遮罩"，导致编辑时"先擦除再画上去"的新笔迹
          在确定后又被旧遮罩擦掉（看起来像没保存）。 */
@@ -5857,6 +6035,41 @@ function importActionPresets() {
 
       /* ---- 边 ---- */
       const paintBorder = (s, pts) => {
+        /* v7.9.4：柳叶笔 = 有机填充块，直接填多边形，再按需描边 */
+        if (s.type === 'blob') {
+          const loop = SKFE.core.geometry.blobLoopFromPoints(pts, s.blobSeed || 0);
+          if (loop.length < 3) return;
+          ctx.fillStyle = s.color;
+          ctx.beginPath();
+          ctx.moveTo(loop[0].x * finalScale, loop[0].y * finalScale);
+          for (let i = 1; i < loop.length; i++) {
+            ctx.lineTo(loop[i].x * finalScale, loop[i].y * finalScale);
+          }
+          ctx.closePath();
+          ctx.fill();
+          if (s.borderWidth > 0 && s.borderColor) {
+            ctx.strokeStyle = s.borderColor;
+            ctx.lineWidth = Math.max(0.5, s.borderWidth * finalScale);
+            ctx.stroke();
+          }
+          return;
+        }
+        /* v7.9.4：蜡笔 = 颗粒短笔触，无包边 */
+        if (s.type === 'crayon') {
+          SKFE.core.geometry.drawCrayonStroke(ctx, pts, s.color, s.blobSeed || 0, null, () => finalScale);
+          return;
+        }
+        /* v7.9.2：旧版整笔填充兜底；v7.9.3 起优先用 ink.fills 区域填充 */
+        if (!useRegionFills && s.fill && s.fill.color && pts.length >= 4) {
+          ctx.fillStyle = s.fill.color;
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x * finalScale, pts[0].y * finalScale);
+          for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x * finalScale, pts[i].y * finalScale);
+          }
+          ctx.closePath();
+          ctx.fill();
+        }
         if (!(s.borderWidth > 0 && s.borderColor)) return;
         ctx.strokeStyle = s.borderColor;
         ctx.fillStyle = s.borderColor;
@@ -5881,6 +6094,7 @@ function importActionPresets() {
 
       /* ---- 芯 ---- */
       const paintCore = (s, pts) => {
+        if (s.type === 'blob') return; /* 柳叶笔只有填充层 */
         ctx.strokeStyle = s.color;
         ctx.fillStyle = s.color;
         if (pts.length === 1) {
@@ -9164,6 +9378,13 @@ function importActionPresets() {
   function bumpKfEval() {
     kfEvalEpoch++;
     if (kfEvalCache.size) kfEvalCache.clear();
+    /* v7.9.4：派生帧缓存一失效，扭曲映射缓存也必须跟着换代数。
+       否则撤销 / 全局属性 / 关节落帧后，对象可能还拿着上一姿态的 H。
+       同一姿态内的重复映射仍由 distort 内部 key 命中，不会被这里打断。 */
+    try {
+      const DZ = SKFE.systems && SKFE.systems.distort;
+      if (DZ && typeof DZ.invalidateMappingCache === 'function') DZ.invalidateMappingCache();
+    } catch (_) {}
   }
 
   /* 全轨道归一化：段内的普通/空白帧接管成派生，段外的悬空派生退回空白。
@@ -10617,6 +10838,9 @@ function importActionPresets() {
       if (audioClipSources.size) playAudioClips(st.idx); /* 音频随帧推进切换段落 */
       renderCanvas(false);
       updateFrameBarHighlight();
+      /* 播放时轨道视口跟随当前帧，保证画面正下方那格始终是播放头指到的帧。 */
+      const TS = SKFE.features && SKFE.features.trackStrip;
+      if (TS && TS.centerOnFrame) TS.centerOnFrame();
       SKFE.systems.camera.updateCameraPreview(); // ⬅️ 新增这一行！让预览窗口跟着刷新
     }
     playTimer = requestAnimationFrame(playTick);
@@ -13543,7 +13767,6 @@ function importActionPresets() {
   const colorInput = document.getElementById('color');
   const lwInput = document.getElementById('lw');
   const lwVal = document.getElementById('lwVal');
-  const btnHeadFill = document.getElementById('btnHeadFill');
   /* v6.4.0：头型切换按钮组（只有火柴人显示） */
   const headShapeRow = document.getElementById('headShapeRow');
   const headShapeBtns = Array.from(document.querySelectorAll('.head-shape-btn'));
@@ -13726,8 +13949,10 @@ function importActionPresets() {
       /* 三个浮窗互斥 */
       const qh = document.getElementById('quickHelpFloat');
       const cl = document.getElementById('changeLogFloat');
+      const btf = document.getElementById('brushTypeFloat');
       if (qh) qh.hidden = true;
       if (cl) cl.hidden = true;
+      if (btf) btf.hidden = true;
       globalEditHelpFloat.hidden = !globalEditHelpFloat.hidden;
       if (!globalEditHelpFloat.hidden) positionGlobalEditHelpFloat();
     });
@@ -13791,6 +14016,8 @@ function importActionPresets() {
       if (clf) clf.hidden = true;
       const gef = document.getElementById('globalEditHelpFloat');
       if (gef) gef.hidden = true;
+      const btf = document.getElementById('brushTypeFloat');
+      if (btf) btf.hidden = true;
       quickHelpFloat.hidden = !quickHelpFloat.hidden;
       if (!quickHelpFloat.hidden) positionQuickHelpFloat();
     });
@@ -13872,6 +14099,8 @@ function importActionPresets() {
       if (quickHelpFloat) quickHelpFloat.hidden = true;
       const gef = document.getElementById('globalEditHelpFloat');
       if (gef) gef.hidden = true;
+      const btf = document.getElementById('brushTypeFloat');
+      if (btf) btf.hidden = true;
       changeLogFloat.hidden = !changeLogFloat.hidden;
       if (!changeLogFloat.hidden) positionChangeLogFloat();
     });
@@ -14257,7 +14486,6 @@ function togglePin(part) {
     document.getElementById('presetNameInput').disabled = !isFig;
     colorInput.disabled = !isFig;
     lwInput.disabled = !isFig;
-    btnHeadFill.disabled = !isFig;
     /* v6.4.0：头型行只对火柴人出现 */
     if (headShapeRow) headShapeRow.style.display = isFig ? 'flex' : 'none';
     if (headFillCustomCheckbox) headFillCustomCheckbox.disabled = !isFig;
@@ -14532,8 +14760,6 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       legLenRInput.value = isIndep ? bs.legR : bs.leg; legLenRVal.textContent = (+legLenRInput.value).toFixed(2);
       shinRatioLInput.value = isIndep ? bs.shinL : sh; shinRatioLVal.textContent = (+shinRatioLInput.value).toFixed(2);
       shinRatioRInput.value = isIndep ? bs.shinR : sh; shinRatioRVal.textContent = (+shinRatioRInput.value).toFixed(2);
-      btnHeadFill.textContent = AppState.selected.headFilled ? tr2('head.solid', '头部实心') : tr2('head.hollow', '头部空心');
-      btnHeadFill.classList.toggle('on', AppState.selected.headFilled);
       /* v6.4.0：回填当前头型（旧工程没有这个字段 → 正圆） */
       const curHeadShape = AppState.selected.headShape || 'circle';
       headShapeBtns.forEach(b => b.classList.toggle('on', b.dataset.shape === curHeadShape));
@@ -16469,7 +16695,6 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       AppState.selected.scale = 1.67;
       AppState.selected.rot = 0;
       AppState.selected.mirror = false;
-      AppState.selected.headFilled = false;
       AppState.selected.headFillCustom = false;
       AppState.selected.headFillColor = '#111111';
       AppState.selected.headAngle = tpl.headAngle;
@@ -17013,14 +17238,6 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     }
   });
   lwInput.addEventListener('change', () => EventBus.emit('history:save', '修改线宽'));
-
-  btnHeadFill.onclick = () => {
-    if (!AppState.selected || AppState.selected.type !== 'figure') return;
-    AppState.selected.headFilled = !AppState.selected.headFilled;
-    setGlobalProp(AppState.selected, 'headFilled', AppState.selected.headFilled);
-    EventBus.emit('need:syncUI'); EventBus.emit('need:render'); markCurrentFrameModified();
-    EventBus.emit('history:save', '切换头部填充');
-  };
 
   /* v6.4.0：切换头型（圆 / Vic / TCO / TDL / TSC）。
      头型只受「头部」比例滑块影响大小，不吃线宽；朝向跟随 headAngle，和圆头一致。 */

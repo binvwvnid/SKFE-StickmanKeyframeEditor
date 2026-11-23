@@ -24,6 +24,7 @@ SKFE.systems.brush = (function () {
 
   /* ==================== 状态 ==================== */
   let brushOn = false;              // 画笔模式是否开启
+  let bucketMode = false;           // v7.9.2：油漆桶模式（点画布闭合区域填充）
   let editingInk = null;            // 正在编辑的 ink 元件（null 表示新建模式）
   /* v6.2.0：会话内的笔迹 / 橡皮 / 实时笔画**一律用世界坐标 + 世界宽度**。
      以前存屏幕坐标、收笔时才除以缩放，导致：换个缩放级别画同一笔，绝对粗细就变了；
@@ -31,6 +32,7 @@ SKFE.systems.brush = (function () {
      改成世界坐标后，渲染时按当前视图投影 —— 缩放多少都不影响画面里的真实粗细。 */
   let baseStrokes = [];             // 进入时的初始笔迹（世界坐标）
   let baseErasers = [];             // 进入时的初始橡皮（世界坐标）
+  let baseFills = [];               // 进入时的区域填充（世界坐标，v7.9.3）
   let ops = [];                     // 本次编辑的操作栈（{ type:'stroke'|'erase', data }）
   let current = null;               // 当前笔画（实时）
   let penTip = { x: 0, y: 0 };      // 防抖笔尖位置（世界坐标）
@@ -54,14 +56,15 @@ SKFE.systems.brush = (function () {
 
   /* ==================== 画笔配置（面板驱动） ==================== */
   const cfg = {
-    v: 3,              /* v6.2.0：size / borderWidth 改成世界单位；v6.3.0：防抖默认改 0 */
+    v: 5,              /* v6.2.0：size / borderWidth 改成世界单位；v7.9.4：新增画笔类型；默认防抖改为 50 */
+    type: 'default',   /* v7.9.4：default = 原画笔；blob = 柳叶笔；crayon = 蜡笔 */
     color: '#111111',
     borderColor: '#1a1a1a',
     borderWidth: 3,
     borderEnabled: true,
     outlineUnder: true, /* v6.2.0：勾选后，这几笔的边统一铺在所有笔芯下面 */
     size: 6,
-    stabilize: 0        /* v6.3.0：默认 0 = 笔迹 1:1 跟手，不再拖尾；需要顺滑可自行往右调 */
+    stabilize: 0.5      /* v7.9.4：默认 50，新用户直接得到更顺滑的手感 */
   };
   /* 面板配置持久化（不影响项目数据） */
   const CFG_KEY = 'skfe_brush_cfg_v1';
@@ -71,6 +74,8 @@ SKFE.systems.brush = (function () {
       if (!raw) return;
       const o = JSON.parse(raw);
       if (o && typeof o === 'object') {
+        if (o.type === 'start') cfg.type = 'crayon'; /* v7.9.4：起步点已改成蜡笔 */
+        else if (o.type === 'default' || o.type === 'blob' || o.type === 'crayon') cfg.type = o.type;
         if (typeof o.color === 'string') cfg.color = o.color;
         if (typeof o.borderColor === 'string') cfg.borderColor = o.borderColor;
         if (typeof o.borderWidth === 'number') cfg.borderWidth = o.borderWidth;
@@ -79,18 +84,18 @@ SKFE.systems.brush = (function () {
         if (typeof o.size === 'number') cfg.size = o.size;
         if (typeof o.stabilize === 'number') cfg.stabilize = o.stabilize;
         /* 老配置存的是屏幕像素，按当前缩放折算成世界单位，避免升级后粗细突然差好几倍 */
-        if (o.v !== 2 && o.v !== 3) {
+        if (o.v !== 2 && o.v !== 3 && o.v !== 4 && o.v !== 5) {
           const kv = worldUnitScreenLen();
           if (kv > 1e-6 && Math.abs(kv - 1) > 1e-3) {
             cfg.size = Math.max(0.2, Math.min(120, cfg.size / kv));
             cfg.borderWidth = Math.max(0, Math.min(40, cfg.borderWidth / kv));
           }
         }
-        /* v6.3.0：老配置里的 40% 防抖会被强制归零 —— 那是"画出来的线追不上手指"的主因，
-           一次性地让它跟手；想要顺滑的用户再从滑条上调回来 */
-        if (o.v !== 3) {
-          cfg.stabilize = 0;
-          cfg.v = 3;
+        /* v7.9.4：默认防抖从 0 改为 50。老配置只迁移一次到 50；
+           v5 之后保留用户自己调过的数值。 */
+        if (o.v !== 5) {
+          cfg.stabilize = 0.5;
+          cfg.v = 5;
           saveCfg();
         }
       }
@@ -113,6 +118,7 @@ SKFE.systems.brush = (function () {
     loadCfg();
     syncOverlaySize();
     bindUI();
+    bindBrushTypeUI();
     bindFloatBar();
     bindPresetUI();
     loadPresets();
@@ -243,6 +249,10 @@ SKFE.systems.brush = (function () {
       });
     }
 
+    /* 油漆桶：只填选中的闭合笔画，颜色取当前画笔颜色 */
+    const btnBucket = $('btnBrushBucket');
+    if (btnBucket) btnBucket.addEventListener('click', toggleBucketMode);
+
     const btnClearFrame = $('btnBrushClearFrame');
     if (btnClearFrame) {
       btnClearFrame.addEventListener('click', () => {
@@ -282,6 +292,120 @@ SKFE.systems.brush = (function () {
     }
   }
 
+  /* ===== v7.9.4：画笔类型（默认 / 柳叶笔） ===== */
+  function bindBrushTypeUI() {
+    const btn = document.getElementById('btnBrushType');
+    const float = document.getElementById('brushTypeFloat');
+    const close = document.getElementById('brushTypeClose');
+    if (btn) btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openBrushTypeFloat();
+    });
+    if (close) close.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (float) float.hidden = true;
+    });
+    if (float) {
+      float.querySelectorAll('.brush-type-option').forEach((opt) => {
+        opt.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setBrushType(opt.getAttribute('data-brush-type') || 'default');
+          float.hidden = true;
+        });
+      });
+      document.addEventListener('pointerdown', (e) => {
+        if (!float || float.hidden) return;
+        if (e.target.closest && (e.target.closest('#brushTypeFloat') || e.target.closest('#btnBrushType'))) return;
+        float.hidden = true;
+      }, true);
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !float.hidden) {
+          e.preventDefault();
+          float.hidden = true;
+        }
+      });
+      window.addEventListener('resize', positionBrushTypeFloat);
+    }
+    syncBrushTypeUI();
+  }
+
+  function positionBrushTypeFloat() {
+    const float = document.getElementById('brushTypeFloat');
+    if (!float || float.hidden) return;
+    /* 先清掉上一次的显式尺寸，避免多次打开时高度缓存导致位置偏移 */
+    float.style.width = '';
+    float.style.height = '';
+    float.style.left = '15vw';
+    float.style.top = '15vh';
+    const w = float.offsetWidth || Math.round(window.innerWidth * 0.7);
+    const h = float.offsetHeight || Math.round(window.innerHeight * 0.4);
+    float.style.left = Math.round((window.innerWidth - w) / 2) + 'px';
+    float.style.top = Math.round((window.innerHeight - h) / 2) + 'px';
+  }
+
+  function openBrushTypeFloat() {
+    const float = document.getElementById('brushTypeFloat');
+    if (!float) return;
+    /* 和其它「说明」浮窗保持互斥，避免叠在一起 */
+    ['quickHelpFloat', 'changeLogFloat', 'globalEditHelpFloat'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.hidden = true;
+    });
+    syncBrushTypeUI();
+    float.hidden = !float.hidden;
+    if (!float.hidden) positionBrushTypeFloat();
+  }
+
+  function setBrushType(type) {
+    const next = (type === 'blob' || type === 'crayon') ? type : 'default';
+    if (current) finishCurrentStroke();
+    cfg.type = next;
+    saveCfg();
+    syncBrushTypeUI();
+    const key = next === 'blob' ? 'brush.typeToastBlob' : next === 'crayon' ? 'brush.typeToastCrayon' : 'brush.typeToastDefault';
+    const fallback = next === 'blob' ? '画笔类型：柳叶笔' : next === 'crayon' ? '画笔类型：蜡笔' : '画笔类型：默认';
+    D.showToast(tr(key, fallback), 'ink', 1800);
+  }
+
+  function syncBrushTypeUI() {
+    const label = document.getElementById('brushTypeLabel');
+    const key = cfg.type === 'blob' ? 'brush.typeBlob' : cfg.type === 'crayon' ? 'brush.typeCrayon' : 'brush.typeDefault';
+    const fallback = cfg.type === 'blob' ? '柳叶笔' : cfg.type === 'crayon' ? '蜡笔' : '默认';
+    if (label) {
+      label.textContent = tr(key, fallback);
+      label.setAttribute('data-i18n', key);
+    }
+    const btn = document.getElementById('btnBrushType');
+    if (btn) btn.classList.toggle('on', cfg.type !== 'default');
+
+    /* 蜡笔没有包边：控件直接禁用，状态仍留在 cfg 里，切回默认时恢复用户原设置 */
+    const noBorder = cfg.type === 'crayon';
+    ['brushBorderEnabled', 'brushBorderColor', 'brushBorderWidth', 'brushOutlineUnder'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.disabled = noBorder;
+        const lab = el.closest('label');
+        if (lab) {
+          if (noBorder) lab.classList.add('disabled');
+          else lab.classList.remove('disabled');
+        }
+      }
+    });
+    const float = document.getElementById('brushTypeFloat');
+    if (float) {
+      float.querySelectorAll('.brush-type-option').forEach((opt) => {
+        opt.classList.toggle('on', opt.getAttribute('data-brush-type') === cfg.type);
+      });
+    }
+  }
+
+  function currentPointWidth() {
+    const base = widthAt();
+    /* 柳叶笔的「芯粗细」当成有机块的半宽基准，默认 6 时直径约 12，更适合当填充块。
+       蜡笔仍按普通宽度，颗粒只在宽度范围内撒点。 */
+    return cfg.type === 'blob' ? Math.max(2, base * 2) : base;
+  }
+
   function applyCfgToPanel() {
     const $ = (id) => document.getElementById(id);
     const map = [
@@ -297,6 +421,7 @@ SKFE.systems.brush = (function () {
     const st = $('brushStabilizeVal'); if (st) st.textContent = Math.round(cfg.stabilize * 100);
     const bc = $('brushBorderEnabled'); if (bc) bc.checked = !!cfg.borderEnabled;
     const oc = $('brushOutlineUnder'); if (oc) oc.checked = !!cfg.outlineUnder;
+    syncBrushTypeUI();
   }
 
   function restoreCfgInputs() {
@@ -334,17 +459,19 @@ SKFE.systems.brush = (function () {
     if (u) u.disabled = ops.length === 0;
     const cl = document.getElementById('bfClear');
     if (cl) cl.disabled = !hasContent;
+    const sel = D.getSelected();
     const edit = document.getElementById('btnBrushEdit');
-    if (edit) {
-      const sel = D.getSelected();
-      edit.disabled = !(sel && sel.type === 'ink' && !sel.locked);
-    }
+    if (edit) edit.disabled = !(sel && sel.type === 'ink' && !sel.locked);
+    /* 油漆桶按画布闭合区域工作，不依赖当前选中项，所以按钮始终可用 */
+    const bucket = document.getElementById('btnBrushBucket');
+    if (bucket) { bucket.disabled = false; bucket.classList.toggle('on', bucketMode); }
   }
 
   /* brush-v5.1.0: 实现 §6.1.2 —— 开关画笔模式（body.brush-mode + overlay 接管指针） */
   function setOn(on) {
     on = !!on;
     if (on === brushOn) return;
+    if (on && bucketMode) setBucketMode(false);
     brushOn = on;
     if (on) {
       if (D.isPlaying && D.isPlaying()) D.pause();
@@ -389,6 +516,7 @@ SKFE.systems.brush = (function () {
     editingInk = null;
     baseStrokes.length = 0;
     baseErasers.length = 0;
+    baseFills.length = 0;
     ops.length = 0;
     current = null;
     drawing = false;
@@ -415,9 +543,12 @@ SKFE.systems.brush = (function () {
 
     const strokes = (ink.strokes || []).map(s => ({
       z: (typeof s.z === 'number' ? s.z : 0),        /* brush-v5.1.2: 落笔顺序 */
+      type: s.type === 'blob' ? 'blob' : (s.type === 'crayon' || s.type === 'start') ? 'crayon' : 'default',  /* v7.9.4: 柳叶笔类型 */
+      blobSeed: (typeof s.blobSeed === 'number' ? s.blobSeed : 0),
       color: s.color,
       borderColor: s.borderColor || null,
       outlineUnder: !!s.outlineUnder,                /* v6.2.0: 描边铺底标记 */
+      fill: s.fill ? JSON.parse(JSON.stringify(s.fill)) : null, /* v7.9.2: 油漆桶填充 */
 
       borderWidth: (s.borderWidth || 0) * scaleUnit,
       points: (s.points || []).map(p => {
@@ -436,7 +567,14 @@ SKFE.systems.brush = (function () {
       })
     }));
 
-    return { strokes, erasers };
+    /* v7.9.3：区域填充的环也跟着 ink 一起做局部→世界变换，重绘编辑不会丢 */
+    const fills = (ink.fills || []).map(f => ({
+      id: f.id,
+      color: f.color,
+      loops: (f.loops || []).map(loop => loop.map(p => applyM(p)))
+    }));
+
+    return { strokes, erasers, fills };
   }
 
   /* brush-v5.1.0: 实现 §6.1.4 —— 打开重绘（旧笔迹回显 + 追加 + 局部擦除） */
@@ -456,6 +594,7 @@ SKFE.systems.brush = (function () {
       borderColor: s.borderColor,
       borderWidth: s.borderWidth,
       outlineUnder: !!s.outlineUnder,                 /* v6.2.0: 描边铺底标记 */
+      fill: s.fill,                                   /* v7.9.2: 油漆桶填充 */
 
       points: s.points.map(p => ({ x: p.x, y: p.y, w: p.w }))
     }));
@@ -465,6 +604,7 @@ SKFE.systems.brush = (function () {
       size: er.size,
       points: er.points.map(p => ({ x: p.x, y: p.y }))
     }));
+    baseFills = JSON.parse(JSON.stringify(world.fills || []));
 
     editingInk = ink;
     ops.length = 0;
@@ -595,8 +735,9 @@ SKFE.systems.brush = (function () {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of worldStrokes) {
       const bw = s.borderWidth || 0;
+      const blobPad = s.type === 'blob' ? 1.5 : 1; /* 柳叶笔有机边缘可能比半宽略外扩 */
       for (const p of s.points) {
-        const half = Math.max(p.w || 0, 1) / 2 + bw;
+        const half = (Math.max(p.w || 0, 1) / 2 + bw) * blobPad;
         if (p.x - half < minX) minX = p.x - half;
         if (p.y - half < minY) minY = p.y - half;
         if (p.x + half > maxX) maxX = p.x + half;
@@ -629,10 +770,13 @@ SKFE.systems.brush = (function () {
         bindTo: 'none', targetId: null, offX: 0, offY: 0, rot: 0,
         strokes: worldStrokes.map(s => ({
           z: s.z,                                  /* brush-v5.1.2: 落笔顺序（不绑定分支） */
+          type: s.type === 'blob' ? 'blob' : (s.type === 'crayon' || s.type === 'start') ? 'crayon' : 'default',
+          blobSeed: (typeof s.blobSeed === 'number' ? s.blobSeed : 0),
           color: s.color,
           borderColor: s.borderColor,
           borderWidth: s.borderWidth || 0,
           outlineUnder: !!s.outlineUnder,           /* v6.2.0: 描边铺底标记 */
+          fill: s.fill,                             /* v7.9.2: 油漆桶填充 */
 
           points: s.points.map(p => ({ x: p.x - center.x, y: p.y - center.y, w: p.w }))
         })),
@@ -640,6 +784,10 @@ SKFE.systems.brush = (function () {
           z: er.z,                               /* brush-v5.1.2: 擦除顺序（不绑定分支） */
           size: er.size,
           points: er.points.map(p => ({ x: p.x - center.x, y: p.y - center.y }))
+        })),
+        fills: (opts.fills || []).map(f => ({
+          id: f.id, color: f.color,
+          loops: (f.loops || []).map(loop => loop.map(p => ({ x: p.x - center.x, y: p.y - center.y })))
         }))
       };
     }
@@ -679,10 +827,13 @@ SKFE.systems.brush = (function () {
 
     const strokes = worldStrokes.map(s => ({
       z: s.z,                                    /* brush-v5.1.2: 落笔顺序 */
+      type: s.type === 'blob' ? 'blob' : (s.type === 'crayon' || s.type === 'start') ? 'crayon' : 'default',
+      blobSeed: (typeof s.blobSeed === 'number' ? s.blobSeed : 0),
       color: s.color,
       borderColor: s.borderColor,
       borderWidth: (s.borderWidth || 0) / g,
       outlineUnder: !!s.outlineUnder,             /* v6.2.0: 描边铺底标记 */
+      fill: s.fill,                               /* v7.9.2: 油漆桶填充 */
 
       points: s.points.map(p => {
         const l = localOf(p);
@@ -695,6 +846,11 @@ SKFE.systems.brush = (function () {
       /* 遮罩宽度按世界单位绘制（drawMask 不做局部缩放） */
       size: er.size,
       points: er.points.map(p => localOf(p))
+    }));
+
+    const fills = (opts.fills || []).map(f => ({
+      id: f.id, color: f.color,
+      loops: (f.loops || []).map(loop => loop.map(p => localOf(p)))
     }));
 
     /* 7. 反算 offX/offY：使 getBindTransform(ink) 落在 cInv 上 */
@@ -710,7 +866,8 @@ SKFE.systems.brush = (function () {
       x: center.x, y: center.y, w: boxW / g, h: boxH / g,
       bindTo: bindTo, targetId: fig.id, offX: offX, offY: offY, rot: rotDeg,
       strokes: strokes,
-      eraser: eraser
+      eraser: eraser,
+      fills: fills
     };
   }
 
@@ -718,7 +875,7 @@ SKFE.systems.brush = (function () {
   function autoBind(ink) {
     if (!ink || ink.type !== 'ink') return false;
     const world = inkToWorld(ink);
-    const built = buildFromWorld(world.strokes, world.erasers, { keepBind: null });
+    const built = buildFromWorld(world.strokes, world.erasers, { keepBind: null, fills: world.fills });
     if (!built) return false;
     applyBuilt(ink, built);
     D.EventBus.emit('need:render');
@@ -737,6 +894,7 @@ SKFE.systems.brush = (function () {
     ink.offY = built.offY;
     ink.strokes = built.strokes;
     ink.eraser = built.eraser;
+    ink.fills = built.fills || [];
   }
 
   /* brush-v5.1.1: 点到线段距离（屏幕/世界同一套算法） */
@@ -747,6 +905,555 @@ SKFE.systems.brush = (function () {
     if (len2 > 1e-9) t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2));
     return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t));
   }
+
+  /* v7.9.2：闭合判定。判据与 QuickShape 的 qsAnalyze 完全一致：
+     首尾弦长小于路径总长的 30%，且总长大于包围盒对角线的 1.55 倍。
+     缩放无关，局部坐标 / 世界坐标都能直接用。 */
+  function isStrokeClosed(pts) {
+    if (!pts || pts.length < 4) return false;
+    let L = 0;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      if (i) L += Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y);
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const diag = Math.max(1e-6, Math.hypot(maxX - minX, maxY - minY));
+    const p0 = pts[0], p1 = pts[pts.length - 1];
+    const chord = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+    return chord < L * 0.30 && L > diag * 1.55;
+  }
+
+  /* v7.9.2：把填充写进指定笔画，并只落一次历史 */
+  function commitFill(ink, indexes) {
+    let n = 0;
+    ink.strokes = (ink.strokes || []).map((s, i) => {
+      if (indexes.indexOf(i) < 0 || !s || !isStrokeClosed(s.points)) return s;
+      n++;
+      const copy = Object.assign({}, s);
+      copy.fill = { color: cfg.color };
+      return copy;
+    });
+    if (!n) return false;
+    D.setGlobalProp(ink, 'strokes', JSON.parse(JSON.stringify(ink.strokes)));
+    D.markCurrentFrameModified();
+    D.invalidateAllFrameThumbs();
+    D.refreshUI();
+    D.EventBus.emit('need:render');
+    D.EventBus.emit('history:save', tr('brush.bucket', '油漆桶填充'));
+    D.showToast(tr('brush.bucketDone', '已填充 %n 条闭合笔画').replace('%n', String(n)), 'ink', 2200);
+    return true;
+  }
+
+  /* v7.9.3：区域级油漆桶。
+     判定单位从「整条笔画」改成「点击点所在的封闭连通区域」。
+     做法：在 ink 局部坐标离屏画一张边界 mask → 从点击点 flood fill →
+     如果连通区碰到 mask 边缘就说明没闭合，拒绝；否则把该连通区描成多边形存进 ink.fills。 */
+
+  /* 点是否落在已存填充的环内（多环用 evenodd，天然支持洞） */
+  function pointInFillLoops(loops, x, y) {
+    if (!loops || !loops.length) return false;
+    let inside = false;
+    for (const loop of loops) {
+      if (!loop || loop.length < 3) continue;
+      for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+        const a = loop[i], b = loop[j];
+        if (((a.y > y) !== (b.y > y)) &&
+            (x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x)) inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  function loopArea(loop) {
+    let s = 0;
+    for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+      s += (loop[j].x + loop[i].x) * (loop[j].y - loop[i].y);
+    }
+    return s / 2;
+  }
+
+  /* Ramer-Douglas-Peucker：把像素描出来的密点压成可存的矢量环 */
+  function rdpSimplify(points, tol) {
+    if (!points || points.length <= 2) return (points || []).slice();
+    const first = points[0], last = points[points.length - 1];
+    const dx = last.x - first.x, dy = last.y - first.y;
+    const den = Math.hypot(dx, dy);
+    let maxD = -1, idx = 0;
+    for (let i = 1; i < points.length - 1; i++) {
+      const p = points[i];
+      const d = den < 1e-9
+        ? Math.hypot(p.x - first.x, p.y - first.y)
+        : Math.abs(dy * p.x - dx * p.y + last.x * first.y - last.y * first.x) / den;
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD <= tol) return [first, last];
+    const a = rdpSimplify(points.slice(0, idx + 1), tol);
+    const b = rdpSimplify(points.slice(idx), tol);
+    return a.slice(0, -1).concat(b);
+  }
+
+  function simplifyLoop(pts, tol) {
+    if (!pts || pts.length < 5) return pts || [];
+    const seq = pts.concat([pts[0]]);
+    const out = rdpSimplify(seq, tol);
+    if (out.length > 1 &&
+        Math.abs(out[0].x - out[out.length - 1].x) < 1e-6 &&
+        Math.abs(out[0].y - out[out.length - 1].y) < 1e-6) out.pop();
+    return out.length >= 3 ? out : pts;
+  }
+
+  /* 把连通区向外扩几像素，让矢量填充钻到笔画下面，消除白缝。
+     只在 mask 像素上做，不改变“是否闭合”的判定（判定用的是扩张前的 region）。 */
+  function dilateRegion(region, w, h, iterations) {
+    let cur = region;
+    for (let k = 0; k < iterations; k++) {
+      const next = new Uint8Array(cur.length);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const idx = y * w + x;
+          if (!cur[idx]) continue;
+          next[idx] = 1;
+          if (x > 0) next[idx - 1] = 1;
+          if (x < w - 1) next[idx + 1] = 1;
+          if (y > 0) next[idx - w] = 1;
+          if (y < h - 1) next[idx + w] = 1;
+          if (x > 0 && y > 0) next[idx - w - 1] = 1;
+          if (x < w - 1 && y > 0) next[idx - w + 1] = 1;
+          if (x > 0 && y < h - 1) next[idx + w - 1] = 1;
+          if (x < w - 1 && y < h - 1) next[idx + w + 1] = 1;
+        }
+      }
+      cur = next;
+    }
+    return cur;
+  }
+
+  /* 两条线段的最短距离：相交为 0，端点互相投影也能算出相接距离 */
+  function segSegDistance(a, b, c, d) {
+    return Math.min(
+      distPointSeg(a, c, d), distPointSeg(b, c, d),
+      distPointSeg(c, a, b), distPointSeg(d, a, b)
+    );
+  }
+
+  function distToPolyline(p, pts) {
+    if (!pts || !pts.length) return Infinity;
+    if (pts.length === 1) return Math.hypot(pts[0].x - p.x, pts[0].y - p.y);
+    let best = Infinity;
+    for (let i = 1; i < pts.length; i++) {
+      best = Math.min(best, distPointSeg(p, pts[i - 1], pts[i]));
+    }
+    return best;
+  }
+
+  /* 把当前帧所有可编辑笔迹摊平成世界坐标节点；不再区分 ink 元件层级 */
+  function buildStrokeNodes() {
+    const objs = (D.getObjects && D.getObjects()) || [];
+    const nodes = [];
+    if (!D.getInkLocalMatrix) return nodes;
+    for (const ink of objs) {
+      if (!ink || ink.type !== 'ink' || ink.locked || !ink.strokes) continue;
+      const M = D.getInkLocalMatrix(ink);
+      if (!M) continue;
+      const apply = (p) => ({ x: M.a * p.x + M.c * p.y + M.e, y: M.b * p.x + M.d * p.y + M.f });
+      const o = apply({ x: 0, y: 0 }), u = apply({ x: 1, y: 0 });
+      const scaleUnit = Math.hypot(u.x - o.x, u.y - o.y) || 1;
+
+      for (let si = 0; si < ink.strokes.length; si++) {
+        const s = ink.strokes[si];
+        const raw = (s && s.points) || [];
+        if (!raw.length) continue;
+        let maxHalf = 0;
+        const pts = raw.map(p => {
+          const half = ((p.w || 0) / 2 + (s.borderWidth || 0)) * scaleUnit;
+          maxHalf = Math.max(maxHalf, half);
+          const q = apply(p);
+          return { x: q.x, y: q.y, half };
+        });
+        /* 柳叶笔按真实填充多边形判定点击，而不是只看中心点连线 */
+        let loop = null;
+        if (s.type === 'blob' && SKFE.core.geometry && SKFE.core.geometry.blobLoopFromPoints) {
+          const localLoop = SKFE.core.geometry.blobLoopFromPoints(raw, s.blobSeed || 0);
+          if (localLoop.length >= 3) loop = localLoop.map(apply);
+        }
+        const bboxPts = loop || pts;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of bboxPts) {
+          const half = loop ? 1 : (p.half || 0);
+          minX = Math.min(minX, p.x - half); maxX = Math.max(maxX, p.x + half);
+          minY = Math.min(minY, p.y - half); maxY = Math.max(maxY, p.y + half);
+        }
+        nodes.push({ ink, si, pts, loop, maxHalf, minX, minY, maxX, maxY });
+      }
+    }
+    return nodes;
+  }
+
+  /* 找到点击命中的笔迹，并把所有与它相交/接触（含跨元件）的笔迹作为一个连通分量返回 */
+  function findConnectedStrokeGroup(wp) {
+    const nodes = buildStrokeNodes();
+    if (!nodes.length || !wp) return null;
+
+    let hit = -1, best = Infinity;
+    for (let i = 0; i < nodes.length; i++) {
+      const d = distToPolyline(wp, nodes[i].pts);
+      const inBlob = !!(nodes[i].loop && pointInFillLoops([nodes[i].loop], wp.x, wp.y));
+      if ((inBlob || d <= nodes[i].maxHalf + 2) && (inBlob ? 0 : d) < best) {
+        hit = i;
+        best = inBlob ? 0 : d;
+      }
+    }
+    if (hit < 0) return null;
+
+    const parent = nodes.map((_, i) => i);
+    const find = (i) => {
+      while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+      return i;
+    };
+    const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
+
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const A = nodes[i], B = nodes[j];
+        const touchDist = A.maxHalf + B.maxHalf + 1;
+        if (A.maxX + 1 < B.minX || B.maxX + 1 < A.minX ||
+            A.maxY + 1 < B.minY || B.maxY + 1 < A.minY) continue;
+        let touch = false;
+        for (let ai = 1; ai < A.pts.length && !touch; ai++) {
+          for (let bj = 1; bj < B.pts.length; bj++) {
+            if (segSegDistance(A.pts[ai - 1], A.pts[ai], B.pts[bj - 1], B.pts[bj]) <= touchDist) {
+              touch = true; break;
+            }
+          }
+        }
+        if (!touch && A.pts.length === 1) touch = distToPolyline(A.pts[0], B.pts) <= touchDist;
+        if (!touch && B.pts.length === 1) touch = distToPolyline(B.pts[0], A.pts) <= touchDist;
+        if (touch) union(i, j);
+      }
+    }
+
+    const root = find(hit);
+    const groups = new Map();
+    for (let i = 0; i < nodes.length; i++) {
+      if (find(i) !== root) continue;
+      const ink = nodes[i].ink;
+      let g = groups.get(ink.id);
+      if (!g) { g = { ink, indexes: [] }; groups.set(ink.id, g); }
+      g.indexes.push(nodes[i].si);
+    }
+    return Array.from(groups.values());
+  }
+
+  /* 把区域 mask 的像素边界描成闭合环；evenodd 渲染时环方向无所谓 */
+  function traceRegionLoops(region, w, h) {
+    const edges = new Map();
+    const k = (x, y) => x + ',' + y;
+    const add = (x1, y1, x2, y2) => {
+      const key = k(x1, y1);
+      let arr = edges.get(key);
+      if (!arr) { arr = []; edges.set(key, arr); }
+      arr.push({ x: x2, y: y2 });
+    };
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = y * w + x;
+        if (!region[idx]) continue;
+        if (y === 0 || !region[idx - w]) add(x, y, x + 1, y);
+        if (x === w - 1 || !region[idx + 1]) add(x + 1, y, x + 1, y + 1);
+        if (y === h - 1 || !region[idx + w]) add(x + 1, y + 1, x, y + 1);
+        if (x === 0 || !region[idx - 1]) add(x, y + 1, x, y);
+      }
+    }
+    const loops = [];
+    while (edges.size) {
+      const firstKey = edges.keys().next().value;
+      const start = firstKey.split(',').map(Number);
+      let cur = { x: start[0], y: start[1] };
+      const loop = [];
+      let guard = 0;
+      while (guard++ < 200000) {
+        const key = k(cur.x, cur.y);
+        const arr = edges.get(key);
+        if (!arr || !arr.length) break;
+        const next = arr.shift();
+        if (!arr.length) edges.delete(key);
+        loop.push({ x: cur.x, y: cur.y });
+        cur = next;
+        if (cur.x === start[0] && cur.y === start[1]) break;
+      }
+      if (loop.length >= 4) loops.push(loop);
+    }
+    return loops;
+  }
+
+  /* 在 ink 局部坐标里算出点击点所在区域；返回可存储的环数组，或 null 表示开放区域 */
+  function buildRegionFill(ink, lx, ly) {
+    const strokes = (ink && ink.strokes) || [];
+    if (!strokes.length) return null;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of strokes) {
+      const pts = (s && s.points) || [];
+      if (pts.length < 2) continue;
+      const bw = s.borderWidth || 0;
+      for (const p of pts) {
+        const half = (p.w || 0) / 2 + bw;
+        if (p.x - half < minX) minX = p.x - half;
+        if (p.y - half < minY) minY = p.y - half;
+        if (p.x + half > maxX) maxX = p.x + half;
+        if (p.y + half > maxY) maxY = p.y + half;
+      }
+    }
+    if (!isFinite(minX)) return null;
+
+    const pad = Math.max(6, Math.min(60, Math.max(maxX - minX, maxY - minY) * 0.08));
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+    const spanW = Math.max(1, maxX - minX), spanH = Math.max(1, maxY - minY);
+    let rs = 2;
+    if (spanW * rs > 2048 || spanH * rs > 2048) {
+      rs = Math.max(0.25, Math.min(2048 / spanW, 2048 / spanH));
+    }
+    const cw = Math.max(4, Math.ceil(spanW * rs));
+    const ch = Math.max(4, Math.ceil(spanH * rs));
+
+    const cv = document.createElement('canvas');
+    cv.width = cw; cv.height = ch;
+    const c = cv.getContext('2d', { willReadFrequently: true });
+    c.setTransform(rs, 0, 0, rs, -minX * rs, -minY * rs);
+    c.strokeStyle = '#000';
+    c.fillStyle = '#000';
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+
+    for (const s of strokes) {
+      const pts = (s && s.points) || [];
+      if (pts.length < 2) continue;
+      if (s.type === 'blob' && SKFE.core.geometry && SKFE.core.geometry.blobLoopFromPoints) {
+        const loop = SKFE.core.geometry.blobLoopFromPoints(pts, s.blobSeed || 0);
+        if (loop.length >= 3) {
+          c.beginPath();
+          c.moveTo(loop[0].x, loop[0].y);
+          for (let i = 1; i < loop.length; i++) c.lineTo(loop[i].x, loop[i].y);
+          c.closePath();
+          c.fill();
+          continue;
+        }
+      }
+      let lw = 0;
+      for (const p of pts) lw = Math.max(lw, (p.w || 0) + 2 * (s.borderWidth || 0));
+      c.lineWidth = Math.max(1.5 / rs, lw + 1 / rs);
+      c.beginPath();
+      c.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+      c.stroke();
+    }
+
+    /* 橡皮也算边界：被擦开的地方不能当成可填的封闭面 */
+    const M = D.getInkLocalMatrix ? D.getInkLocalMatrix(ink) : null;
+    let scaleUnit = 1;
+    if (M) {
+      const o = { x: M.a * 0 + M.c * 0 + M.e, y: M.b * 0 + M.d * 0 + M.f };
+      const u = { x: M.a * 1 + M.c * 0 + M.e, y: M.b * 1 + M.d * 0 + M.f };
+      scaleUnit = Math.hypot(u.x - o.x, u.y - o.y) || 1;
+    }
+    for (const er of (ink.eraser || [])) {
+      const pts = (er && er.points) || [];
+      if (!pts.length) continue;
+      c.lineWidth = Math.max(2 / rs, (er.size || 1) / scaleUnit + 1 / rs);
+      if (pts.length === 1) {
+        c.beginPath();
+        c.arc(pts[0].x, pts[0].y, c.lineWidth / 2, 0, Math.PI * 2);
+        c.fill();
+      } else {
+        c.beginPath();
+        c.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+        c.stroke();
+      }
+    }
+
+    const data = c.getImageData(0, 0, cw, ch).data;
+    const total = cw * ch;
+    const boundary = new Uint8Array(total);
+    for (let i = 0; i < total; i++) boundary[i] = data[i * 4 + 3] > 8 ? 1 : 0;
+
+    const sx = Math.floor((lx - minX) * rs), sy = Math.floor((ly - minY) * rs);
+    if (sx < 0 || sy < 0 || sx >= cw || sy >= ch) return null;
+    const start = sy * cw + sx;
+    if (boundary[start]) return null;
+
+    const region = new Uint8Array(total);
+    const stack = [start];
+    region[start] = 1;
+    let open = false, count = 0;
+    while (stack.length) {
+      const idx = stack.pop();
+      count++;
+      const x = idx % cw, y = (idx / cw) | 0;
+      if (x === 0 || y === 0 || x === cw - 1 || y === ch - 1) { open = true; break; }
+      const nb = [];
+      if (x > 0) nb.push(idx - 1);
+      if (x < cw - 1) nb.push(idx + 1);
+      if (y > 0) nb.push(idx - cw);
+      if (y < ch - 1) nb.push(idx + cw);
+      for (const ni of nb) {
+        if (!region[ni] && !boundary[ni]) { region[ni] = 1; stack.push(ni); }
+      }
+    }
+    if (open || count < 4) return null;
+
+    /* 闭合判定用原始 region；描环前把区域向外扩一点，让填充压到笔画下面，消除白缝 */
+    const grow = Math.min(4, Math.max(2, Math.round(1.5 * rs)));
+    const grown = dilateRegion(region, cw, ch, grow);
+    const loops = [];
+    for (const raw of traceRegionLoops(grown, cw, ch)) {
+      const pts = raw.map(v => ({ x: minX + v.x / rs, y: minY + v.y / rs }));
+      const simp = simplifyLoop(pts, 0.6 / rs);
+      if (simp.length >= 3 && Math.abs(loopArea(simp)) > 2) loops.push(simp);
+    }
+    return loops.length ? loops : null;
+  }
+
+  /* 改一整条连续笔迹的颜色（Live Paint 的「给边上色」语义） */
+  function recolorStrokeGroup(groups, color) {
+    let n = 0;
+    for (const g of groups || []) {
+      const strokes = JSON.parse(JSON.stringify((g.ink.strokes || [])));
+      for (const i of g.indexes) {
+        const s = strokes[i];
+        if (!s) continue;
+        s.color = color;
+        /* 描边和笔芯一起换色，否则黑色外框会盖住新颜色，看起来像没改 */
+        s.borderColor = color;
+        n++;
+      }
+      g.ink.strokes = strokes;
+      D.setGlobalProp(g.ink, 'strokes', JSON.parse(JSON.stringify(strokes)));
+    }
+    if (!n) return false;
+    D.markCurrentFrameModified();
+    D.invalidateAllFrameThumbs();
+    D.refreshUI();
+    D.EventBus.emit('need:render');
+    D.EventBus.emit('history:save', tr('brush.bucketStroke', '笔迹改色'));
+    D.showToast(tr('brush.bucketStrokeDone', '已将 %n 条相连笔迹改为当前画笔颜色').replace('%n', String(n)), 'ink', 2200);
+    return true;
+  }
+
+  /* 写入 / 改色一个区域填充，只落一次历史 */
+  function commitRegionFill(ink, index, color, loops) {
+    const fills = (ink.fills || []).map(f => JSON.parse(JSON.stringify(f)));
+    if (index >= 0 && fills[index]) {
+      fills[index].color = color;
+    } else {
+      fills.push({
+        id: 'fill-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+        color: color,
+        loops: JSON.parse(JSON.stringify(loops || []))
+      });
+    }
+    ink.fills = fills;
+    D.setGlobalProp(ink, 'fills', JSON.parse(JSON.stringify(fills)));
+
+    /* 新模型不再用 stroke.fill；顺手清掉旧版本留下的整笔填充，避免叠色 */
+    if ((ink.strokes || []).some(s => s && s.fill)) {
+      const cleared = (ink.strokes || []).map(s => {
+        if (!s || !s.fill) return s;
+        const copy = Object.assign({}, s);
+        delete copy.fill;
+        return copy;
+      });
+      ink.strokes = cleared;
+      D.setGlobalProp(ink, 'strokes', JSON.parse(JSON.stringify(cleared)));
+    }
+    D.markCurrentFrameModified();
+    D.invalidateAllFrameThumbs();
+    D.refreshUI();
+    D.EventBus.emit('need:render');
+    D.EventBus.emit('history:save', tr('brush.bucket', '油漆桶填充'));
+    D.showToast(tr('brush.bucketDone', '已填充 1 个闭合区域'), 'ink', 2200);
+    return true;
+  }
+
+  /* v7.9.3：油漆桶主交互 —— 点画布，填 / 改点击点所在的封闭连通区域 */
+  function bucketFillAt(clientX, clientY) {
+    if (!D.screenToWorld || !D.getObjects || !D.getInkLocalMatrix) return;
+    const wp = D.screenToWorld(clientX, clientY);
+    if (!wp) return;
+    const objs = D.getObjects() || [];
+
+    /* 先跨元件判笔迹连通分量：相交 / 接触的笔迹视为一个整体，一起改色 */
+    const strokeGroup = findConnectedStrokeGroup(wp);
+    if (strokeGroup) { recolorStrokeGroup(strokeGroup, cfg.color); return; }
+
+    for (let oi = objs.length - 1; oi >= 0; oi--) {
+      const ink = objs[oi];
+      if (!ink || ink.type !== 'ink' || ink.locked || !ink.strokes) continue;
+      const M = D.getInkLocalMatrix(ink);
+      if (!M) continue;
+      const det = M.a * M.d - M.b * M.c;
+      if (!isFinite(det) || Math.abs(det) < 1e-9) continue;
+      const dx = wp.x - M.e, dy = wp.y - M.f;
+      const lx = (M.d * dx - M.c * dy) / det;
+      const ly = (-M.b * dx + M.a * dy) / det;
+
+      /* 已填区域：再点一次只改这一块；同时用当前扩张算法重算环，顺手修掉旧白缝 */
+      const fills = ink.fills || [];
+      for (let fi = fills.length - 1; fi >= 0; fi--) {
+        const f = fills[fi];
+        if (f && f.loops && pointInFillLoops(f.loops, lx, ly)) {
+          const refreshed = buildRegionFill(ink, lx, ly);
+          commitRegionFill(ink, fi, cfg.color, refreshed || f.loops);
+          return;
+        }
+      }
+
+      const loops = buildRegionFill(ink, lx, ly);
+      if (loops) { commitRegionFill(ink, -1, cfg.color, loops); return; }
+    }
+    D.showToast(tr('brush.bucketRegionFail', '这里不是闭合区域，无法填充'));
+  }
+
+  /* v7.9.2：保留 API —— 直接填充选中元件的全部闭合笔画 */
+  function bucketFill() {
+    const sel = D.getSelected && D.getSelected();
+    if (!sel || sel.type !== 'ink') {
+      D.showToast(tr('brush.bucketNoSel', '请先选中一个画笔元件，再使用油漆桶'));
+      return;
+    }
+    if (sel.locked) {
+      D.showToast(tr('brush.locked', '该画笔元件已锁定，请先解锁'));
+      return;
+    }
+    const indexes = [];
+    (sel.strokes || []).forEach((s, i) => { if (isStrokeClosed(s && s.points)) indexes.push(i); });
+    if (!indexes.length) {
+      D.showToast(tr('brush.bucketNoClosed', '没有可填充的闭合笔画，非闭合笔画禁止填充'));
+      return;
+    }
+    commitFill(sel, indexes);
+  }
+
+  /* v7.9.2：面板按钮切换油漆桶模式；开启时先确定当前画笔会话 */
+  function setBucketMode(on, silent) {
+    on = !!on;
+    if (on === bucketMode) return;
+    if (on && brushOn) { finalize(); setOn(false); }
+    bucketMode = on;
+    document.body.classList.toggle('bucket-mode', bucketMode);
+    const btn = document.getElementById('btnBrushBucket');
+    if (btn) btn.classList.toggle('on', bucketMode);
+    if (!silent) {
+      D.showToast(tr(bucketMode ? 'brush.bucketOn' : 'brush.bucketOff',
+        bucketMode ? '油漆桶已开启：点击闭合图形内部填充，再点按钮关闭' : '油漆桶已关闭'));
+    }
+    D.EventBus.emit('need:render');
+  }
+  function toggleBucketMode() { setBucketMode(!bucketMode); }
 
   /* brush-v5.1.1: 把一段擦除遮罩裁剪到"已有笔迹的覆盖范围"内。
      只留下真正压到笔迹的点（边缘少量外扩保留，保证擦边效果不变），
@@ -831,6 +1538,7 @@ SKFE.systems.brush = (function () {
         borderColor: s.borderColor || null,
         borderWidth: s.borderWidth || 0,
         outlineUnder: !!s.outlineUnder,
+        fill: s.fill,                                 /* v7.9.2: 油漆桶填充 */
         points: s.points.map(p => {
           return { x: p.x, y: p.y, w: (p.w || 0) };
         })
@@ -849,7 +1557,7 @@ SKFE.systems.brush = (function () {
     const keepBind = editingInk
       ? { bindTo: editingInk.bindTo, targetId: editingInk.targetId }
       : null;
-    const built = buildFromWorld(worldStrokes, worldErasers, { keepBind: keepBind });
+    const built = buildFromWorld(worldStrokes, worldErasers, { keepBind: keepBind, fills: baseFills });
     if (!built) { cancel(); return; }
 
     if (editingInk) {
@@ -859,6 +1567,7 @@ SKFE.systems.brush = (function () {
       /* 全局属性联动（globalEditEnabled 时同步所有帧） */
       D.setGlobalProp(ink, 'strokes', JSON.parse(JSON.stringify(built.strokes)));
       D.setGlobalProp(ink, 'eraser', JSON.parse(JSON.stringify(built.eraser)));
+      D.setGlobalProp(ink, 'fills', JSON.parse(JSON.stringify(built.fills || [])));
       D.setGlobalProp(ink, 'x', ink.x);
       D.setGlobalProp(ink, 'y', ink.y);
       D.setGlobalProp(ink, 'w', ink.w);
@@ -894,7 +1603,8 @@ SKFE.systems.brush = (function () {
       bindTo: built.bindTo, targetId: built.targetId,
       offX: built.offX, offY: built.offY,
       strokes: built.strokes,
-      eraser: built.eraser
+      eraser: built.eraser,
+      fills: built.fills || []
     };
     D.addObjectToFrames(ink);
     /* 先结束会话，避免 queueInk 把新元件当作"编辑中"跳过 */
@@ -938,6 +1648,7 @@ SKFE.systems.brush = (function () {
     editingInk = null;
     baseStrokes.length = 0;
     baseErasers.length = 0;
+    baseFills.length = 0;
     ops.length = 0;
     current = null;
     drawing = false;
@@ -947,7 +1658,7 @@ SKFE.systems.brush = (function () {
   }
 
   function cancel() {
-    const had = !!editingInk || ops.length > 0 || baseStrokes.length > 0 || baseErasers.length > 0 || !!current;
+    const had = !!editingInk || ops.length > 0 || baseStrokes.length > 0 || baseErasers.length > 0 || baseFills.length > 0 || !!current;
     resetSession();
     /* 未确定就退出 → 恢复进入前的选中状态（已确定时 had 为 false，不动选中） */
     if (had && _prevSelected) {
@@ -964,6 +1675,28 @@ SKFE.systems.brush = (function () {
     overlayCtx.clearRect(0, 0, overlay.width / DPR, overlay.height / DPR);
   }
 
+  /* v7.9.3：画区域填充（多环 evenodd，洞自动挖空）。mapFn 把点转成当前坐标系。 */
+  function drawFillSet(c, fills, mapFn) {
+    for (const f of fills || []) {
+      if (!f || !f.color || !f.loops || !f.loops.length) continue;
+      c.save();
+      c.fillStyle = f.color;
+      c.beginPath();
+      for (const loop of f.loops) {
+        if (!loop || loop.length < 3) continue;
+        const p0 = mapFn(loop[0]);
+        c.moveTo(p0.x, p0.y);
+        for (let i = 1; i < loop.length; i++) {
+          const p = mapFn(loop[i]);
+          c.lineTo(p.x, p.y);
+        }
+        c.closePath();
+      }
+      c.fill('evenodd');
+      c.restore();
+    }
+  }
+
   function renderOverlay() {
     if (!overlayCtx) return;
     const W = overlay.width / DPR;
@@ -973,6 +1706,9 @@ SKFE.systems.brush = (function () {
     /* v6.2.0：会话数据是世界坐标，渲染前统一按当前视图投影一次（带缓存） */
     const sig = viewSignature();
     const kv = worldUnitScreenLen();
+
+    /* v7.9.3：区域填充垫在笔迹下面，编辑时也能看到 */
+    drawFillSet(overlayCtx, baseFills, D.worldToScreen);
 
     /* brush-v5.1.2: 基线内容也按 z 顺序回放（旧遮罩不再盖在后来补画的笔迹上），
        编辑过程中所见即所得，和点「确定」后的结果是同一套顺序。 */
@@ -1019,6 +1755,50 @@ SKFE.systems.brush = (function () {
     c.lineCap = 'round';
     c.lineJoin = 'round';
     const bw = (s.borderWidth || 0) * kv;   /* 世界边界宽 → 屏幕宽 */
+
+    /* v7.9.4：柳叶笔 = 不规则有机填充块。整笔只有一层填充 + 可选描边，
+       所以 core 趟直接跳过；描边铺底分组也只在 border 趟画一次。 */
+    if (s.type === 'blob') {
+      if (pass === 'core') { c.restore(); return; }
+      const loop = (SKFE.core.geometry && SKFE.core.geometry.blobLoopFromPoints)
+        ? SKFE.core.geometry.blobLoopFromPoints(pts, s.blobSeed || 0)
+        : [];
+      if (loop.length >= 3) {
+        c.beginPath();
+        c.moveTo(loop[0].x, loop[0].y);
+        for (let i = 1; i < loop.length; i++) c.lineTo(loop[i].x, loop[i].y);
+        c.closePath();
+        c.fillStyle = s.color;
+        c.fill();
+        if (s.borderWidth > 0 && s.borderColor && bw > 0) {
+          c.strokeStyle = s.borderColor;
+          c.lineWidth = bw;
+          c.stroke();
+        }
+      }
+      c.restore();
+      return;
+    }
+
+    /* v7.9.4：蜡笔 = 沿路径撒颗粒短笔触，无包边、无普通圆头线 */
+    if (s.type === 'crayon') {
+      if (pass === 'core') { c.restore(); return; }
+      SKFE.core.geometry.drawCrayonStroke(c, pts, s.color, s.blobSeed || 0, null, null);
+      c.restore();
+      return;
+    }
+
+    /* v7.9.2：填充画在边和芯之前；分组时只在 border 趟画一次，避免 core 趟再盖住描边。 */
+    if (pass === 'both' || pass === 'border') {
+      if (!baseFills.length && s.fill && s.fill.color && pts.length >= 4) {
+        c.fillStyle = s.fill.color;
+        c.beginPath();
+        c.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) c.lineTo(pts[i].x, pts[i].y);
+        c.closePath();
+        c.fill();
+      }
+    }
 
     if (pass !== 'core' && s.borderWidth > 0 && s.borderColor) {
       c.strokeStyle = s.borderColor;
@@ -1130,7 +1910,9 @@ SKFE.systems.brush = (function () {
     const kv = worldUnitScreenLen();
 
     /* === 0. QuickShape：末端静止 → 吸附标准图形；拖动改大小/角度；再静止 → 轮换 === */
-    if (drawing && current.type === 'stroke') {
+    /* 柳叶笔不走直线、圆等 QuickShape 吸附，避免把有机块吞掉；蜡笔可以正常吸附 */
+    const specialType = current.data && current.data.type === 'blob';
+    if (drawing && current.type === 'stroke' && !specialType) {
       if (!qs) qsTryStart(now, kv);
       else qsDragUpdate(now, kv);
     }
@@ -1161,8 +1943,7 @@ SKFE.systems.brush = (function () {
       const d = Math.hypot(ddx, ddy);
       if (d > 0.2 / kv) {
         if (current.type === 'stroke') {
-          const speed = d / dt * 16;
-          current.data.points.push({ x: penTip.x, y: penTip.y, w: widthAt(speed, tipPressure, isPenPointer) });
+          current.data.points.push({ x: penTip.x, y: penTip.y, w: currentPointWidth() });
         } else {
           current.data.points.push({ x: penTip.x, y: penTip.y });
         }
@@ -1547,6 +2328,14 @@ SKFE.systems.brush = (function () {
   /* brush-v5.1.0: 实现 §6.1.11 —— 指针事件（落笔 / 追逐 / 收笔） */
   function bindPointer() {
     overlay.addEventListener('pointerdown', onDown);
+    /* v7.9.2：油漆桶模式接管画布点击，点闭合区域即填充 */
+    overlay.addEventListener('pointerdown', (e) => {
+      if (!bucketMode || brushOn) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      bucketFillAt(e.clientX, e.clientY);
+    });
     overlay.addEventListener('pointermove', onMove);
     overlay.addEventListener('pointerup', onUp);
     overlay.addEventListener('pointercancel', onUp);
@@ -1619,12 +2408,16 @@ SKFE.systems.brush = (function () {
       current = {
         type: 'stroke',
         data: {
+          /* v7.9.4：三种画笔类型都存进 stroke，changed later only affects new strokes */
+          type: (cfg.type === 'blob' || cfg.type === 'crayon') ? cfg.type : 'default',
+          blobSeed: Math.random() * 1000,
           color: cfg.color,
-          borderColor: cfg.borderEnabled ? cfg.borderColor : null,
-          borderWidth: cfg.borderEnabled ? cfg.borderWidth : 0,
+          /* 蜡笔没有包边，强制写空，避免以后切回默认又被旧边色描出来 */
+          borderColor: (cfg.borderEnabled && cfg.type !== 'crayon') ? cfg.borderColor : null,
+          borderWidth: (cfg.borderEnabled && cfg.type !== 'crayon') ? cfg.borderWidth : 0,
           /* v6.2.0：勾选「描边铺底」后，这笔的边会统一铺在所有芯下面 */
-          outlineUnder: !!(cfg.borderEnabled && cfg.outlineUnder),
-          points: [{ x: p.x, y: p.y, w: widthAt() }]
+          outlineUnder: !!(cfg.borderEnabled && cfg.outlineUnder && cfg.type !== 'crayon'),
+          points: [{ x: p.x, y: p.y, w: currentPointWidth() }]
         }
       };
     }
@@ -1691,7 +2484,7 @@ SKFE.systems.brush = (function () {
       const d = Math.hypot(ddx, ddy);
       const kvNow = worldUnitScreenLen();
       if (d > 0.2 / kvNow) {
-        if (current.type === 'stroke') current.data.points.push({ x: penTip.x, y: penTip.y, w: widthAt() });
+        if (current.type === 'stroke') current.data.points.push({ x: penTip.x, y: penTip.y, w: currentPointWidth() });
         else current.data.points.push({ x: penTip.x, y: penTip.y });
         lastTipPos.x = penTip.x;
         lastTipPos.y = penTip.y;
@@ -1800,6 +2593,7 @@ SKFE.systems.brush = (function () {
       if (!t || !t.closest) return;
       if (t === overlay || t.id === 'brushOverlay') return;
       if (t.closest('#brushFloatBar')) return;
+      if (t.closest('#brushTypeFloat') || t.closest('#btnBrushType')) return;
       if (t.closest('.tool-panel[data-tool="eraser"]')) return;
       if (t.closest('#toolChips .tool-chip[data-tool="eraser"]')) return;
       setOn(false);
@@ -1818,6 +2612,7 @@ SKFE.systems.brush = (function () {
     ops.length = 0;
     baseStrokes.length = 0;
     baseErasers.length = 0;
+    baseFills.length = 0;
     current = null;
     drawing = false;
     stopLoop();
@@ -2014,6 +2809,12 @@ SKFE.systems.brush = (function () {
     getEditingInk,
     undoLast,
     clearAll,
+    /* v7.9.2：油漆桶填充选中画笔元件的闭合笔画 */
+    bucketFill,
+    bucketFillAt,
+    setBucketMode,
+    isBucketMode: () => bucketMode,
+    isStrokeClosed,
     /* 预设 */
     getPresets: () => presets.map(p => ({ id: p.id, name: p.name, bindTo: p.bindTo, offX: p.offX, offY: p.offY })),
     savePreset: () => savePresetFromSelection(),

@@ -45,6 +45,10 @@
   /* v7.4.9：左列宽度在样式里是跟着断点变的（桌面 108 / 手机 84），
      所以只能在渲染时读一次 --ts-gutter 存这儿，不能再用写死的 GUTTER 算播放头。 */
   let gutterPx = GUTTER;
+  /* v7.9.2：内容两侧的虚拟留白。播放头固定在视口中央，首尾帧也要能落在它下面，
+     所以左右各垫半屏（扣掉半列宽），让 scrollLeft 不被浏览器钳在 0。 */
+  let leftPad = 0;
+  let lastCenteredFrame = -1;
   let panelH = 240;        /* 面板高度默认值：约 4~5 条轨道，屏幕上还留得出画布 */
   let drag = null;
   let selClip = null;      /* 最近点选的那一条长条 { id, a, b } —— 分割认它 */
@@ -483,7 +487,12 @@
     const total = Math.max(totalFrames(), 1);
     const width = total * colW;
     const rowsH = Math.max(ids.length, 1) * ROW_H;
-    cv.style.width = (gutterPx + width) + 'px';
+    /* 可视轨道区宽度扣掉左侧元件列；两侧留白保证第 1 帧和最后一帧也能滚到中线。 */
+    const scEl = $('tsScroll');
+    const viewW = scEl ? Math.max(1, scEl.clientWidth - gutterPx) : width;
+    leftPad = Math.max(0, Math.floor((viewW - colW) / 2));
+    const paddedW = leftPad * 2 + width;
+    cv.style.width = (gutterPx + paddedW) + 'px';
     cv.style.height = (RULER_H + rowsH) + 'px';
     cv.style.setProperty('--cw', colW + 'px');
 
@@ -492,7 +501,6 @@
       return;
     }
 
-    const cur = api.currentFrame();
     const rs = rulerStep();
     /* 高级设置里「帧缩略图」开着时，长条也铺一层小图（像 AM 那样） */
     const thumbOn = !!(api.thumbMode && api.thumbMode());
@@ -503,9 +511,9 @@
     html += '<div class="ts-gutter ts-gutter-head">' +
       '<span>' + T('track.gutterHead', '元件') + '</span>' +
       '</div>';
-    html += '<div class="ts-lane ts-ruler" style="width:' + width + 'px">';
+    html += '<div class="ts-lane ts-ruler" style="width:' + paddedW + 'px">';
     for (let i = 0; i < total; i += rs.step) {
-      html += '<span class="ts-tick" style="left:' + (i * colW) + 'px">' +
+      html += '<span class="ts-tick" style="left:' + (leftPad + i * colW) + 'px">' +
         (rs.time ? fmtClock(i) : (i + 1)) + '</span>';
     }
     html += '</div></div>';
@@ -526,9 +534,9 @@
         '<i data-icon="' + (hidden ? 'forbid' : 'preview-open') + '"></i></button>';
       html += '<span class="ts-name" title="' + esc(name) + '">' + esc(name) + '</span>';
       html += '</div>';
-      html += '<div class="ts-lane" style="width:' + width + 'px">';
+      html += '<div class="ts-lane" style="width:' + paddedW + 'px">';
       spans.forEach((s, si) => {
-        const left = s.a * colW;
+        const left = leftPad + s.a * colW;
         const w = Math.max(colW, (s.b - s.a + 1) * colW);
         const label = (s.a + 1) + (s.b > s.a ? '–' + (s.b + 1) : '');
         const sel = isClipSelected(id, s.a, s.b);
@@ -562,13 +570,12 @@
         if (!KF().isKey(slot)) continue;
         html += '<i class="ts-key' + (slot.hidden ? ' off' : '') + (isCut(slot) ? ' cut' : '') +
           (selKeys.has(ktok(id, i)) ? ' sel' : '') +
-          '" data-id="' + esc(id) + '" data-i="' + i + '" style="left:' + (i * colW + colW / 2) + 'px"></i>';
+          '" data-id="' + esc(id) + '" data-i="' + i + '" style="left:' + (leftPad + i * colW + colW / 2) + 'px"></i>';
       }
       html += '</div></div>';
     });
 
-    /* 播放头放在所选帧的正中间 */
-    html += '<div class="ts-playhead" style="left:' + (gutterPx + cur * colW + colW / 2) + 'px;height:' + (RULER_H + rowsH) + 'px"></div>';
+    /* 播放头是 #trackStrip 上的固定覆盖层，不写进滚动内容，横滑时它不会跟着跑。 */
 
     cv.innerHTML = html;
     if (root.SKFEApplyIcons) root.SKFEApplyIcons(cv);
@@ -580,8 +587,9 @@
     const sc = $('tsScroll');
     if (!sc || !enabled) return;
     const viewW = Math.max(1, sc.clientWidth - gutterPx);
-    const x = api.currentFrame() * colW + colW / 2;
+    const x = leftPad + api.currentFrame() * colW + colW / 2;
     sc.scrollLeft = Math.max(0, x - viewW / 2);
+    lastCenteredFrame = api.currentFrame();
   }
 
   function syncPlayhead() {
@@ -1368,13 +1376,13 @@
       const px = (anchorLeft && rect) ? (rect.left + gutterPx) : z.clientX;
       let anchor = null;
       if (sc && rect && typeof px === 'number') {
-        anchor = (sc.scrollLeft + px - rect.left - gutterPx) / colW;
+        anchor = (sc.scrollLeft + px - rect.left - gutterPx - leftPad) / colW;
       }
       colW = v;
       try { localStorage.setItem(COLW_KEY, String(colW)); } catch (_) {}
       render();
       if (sc && rect && anchor != null && isFinite(anchor)) {
-        sc.scrollLeft = Math.max(0, anchor * colW - (px - rect.left - gutterPx));
+        sc.scrollLeft = Math.max(0, leftPad + anchor * colW - (px - rect.left - gutterPx));
       }
     });
   }
@@ -1489,7 +1497,7 @@
   /* 屏幕横坐标 → 第几帧（夹在 0 … 总帧数-1 之内） */
   function frameAt(clientX) {
     const r = laneRef().getBoundingClientRect();
-    const i = Math.floor((clientX - r.left) / colW);
+    const i = Math.floor((clientX - r.left - leftPad) / colW);
     return Math.max(0, Math.min(totalFrames() - 1, i));
   }
 
@@ -1710,7 +1718,7 @@
          一加延时反而把滚动抢走了。 */
       const rowEl = e.target.closest('.ts-row[data-id]');
       const lr = laneRef().getBoundingClientRect();
-      const startFrame = Math.floor((e.clientX - lr.left) / colW);
+      const startFrame = Math.floor((e.clientX - lr.left - leftPad) / colW);
       if (e.pointerType !== 'mouse') {
         /* v7.9.2：手机空白区左右拖 = 逐帧读取画面；上下拖 = 滚动轨道。
            PC 仍保留框选。 */
@@ -1779,10 +1787,16 @@
         if (drag.mode === 'scrub') {
           const i = Math.max(0, Math.min(totalFrames() - 1, drag.startFrame + Math.round(vx / colW)));
           drag.moved = true;
-          if (i !== drag.last) { drag.last = i; api.goToFrame(i); }
+          if (i !== drag.last) {
+            drag.last = i;
+            api.goToFrame(i);
+            /* 播放头固定在视口中央：面板必须随当前帧平移，红线下的帧才是预览帧。 */
+            scrollPlayheadIntoView();
+          }
         } else if (drag.mode === 'pan') {
           const sc = $('tsScroll');
-          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop };
+          /* 纵向滚轨道时不带走横向时间位置。 */
+          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop, verticalOnly: true };
           drag = null;
         }
         e.preventDefault();
@@ -1795,12 +1809,13 @@
         if (Math.abs(dx) > PAN_SLOP || Math.abs(dy) > PAN_SLOP) {
           clearPress();
           const sc = $('tsScroll');
-          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop };
+          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop, verticalOnly: true };
         }
         return;
       }
       if (pan) {
-        pan.sc.scrollLeft = pan.left - (e.clientX - pan.x);
+        /* 播放头固定后，只有明确的横滑刷帧才改横向位置；普通平移只滚轨道行。 */
+        if (!pan.verticalOnly) pan.sc.scrollLeft = pan.left - (e.clientX - pan.x);
         pan.sc.scrollTop = pan.top - (e.clientY - pan.y);
         return;
       }
@@ -1839,6 +1854,7 @@
         drag.last = i;
         drag.moved = true;
         api.goToFrame(i);
+        scrollPlayheadIntoView();
         return;
       }
 
@@ -2331,6 +2347,8 @@
 
     render,
     syncPlayhead,
+    /* 播放推进时由 app.js 调：把视口滚到当前帧，保持它始终在固定播放头下方。 */
+    centerOnFrame() { if (enabled) scrollPlayheadIntoView(); },
 
     /* 外部（撤销 / 导入工程 / 恢复快照）之后重画。
        need:syncUI 一类的广播很密（滑条拖动也会发），这里 rAF 去抖 + 数据指纹比对，
@@ -2341,6 +2359,8 @@
       root.requestAnimationFrame(() => {
         refreshQueued = false;
         if (!enabled) return;
+        /* 任何切帧入口（按钮 / 关键帧 / 滑条 / 脚本）都让视口跟上，播放头下面就是当前帧。 */
+        if (api.currentFrame() !== lastCenteredFrame) scrollPlayheadIntoView();
         syncPlayhead();
         if (signature() !== lastSig) render();
       });

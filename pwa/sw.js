@@ -1,6 +1,6 @@
 /* SKFE PWA service worker
-   策略：核心壳文件 stale-while-revalidate（先给缓存、后台更新），
-   其余同源 GET 运行时缓存。版本号变了就整体换新，避免旧缓存卡住。 */
+   策略：同源 GET 一律 network-first（先取网络，成功即更新缓存并返回本次结果），
+   离线才回退运行时缓存。绝不让旧 HTML / 旧 JS 先渲染再被替换，消除刷新时的旧页面闪现。 */
 /* 缓存标签：改这个字符串即可让浏览器丢弃旧缓存。
    v7.7.1：SVG 导出按钮补进导出面板 + 视频元件改整体视频（带声音、不抽帧）。
    v7.7.3：非火柴人元件蒙版按钮（基础蒙版 + 色度抠图）。
@@ -22,8 +22,8 @@
    v7.8.4a：恢复 v7.8.1 移动端轨道底部栏机制；手机复制/粘贴关键帧恢复文字；工程音轨导入后就绪补播；MP4/WebM 导出混入音频。
    v7.8.4b：新增 js/plugins/api.js 全开放插件/MCP API；代码型插件注入 api 第三参数；EventBus 补 off/once/clear。
    v7.8.4c：修复安卓客户端插件作者工具包 ZIP 下载——原生壳改用 platform.saveURL 写文件并系统分享。
-   v7.9.1：派生帧预览实时刷新、段曲线默认关闭、全局可先打关键帧再改动作；缓存标签随之刷新。 */
-const VERSION = 'skfe-local-v7.9.1';
+   v7.9.2：移动端播放头固定与横滑、油漆桶、画笔类型、扭曲操作优化；缓存标签随之刷新。 */
+const VERSION = 'skfe-local-v7.9.2';
 const SHELL = ['./', './index.html', './style.css', './manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -46,16 +46,27 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== location.origin) return;
 
   e.respondWith(
-    caches.open(VERSION).then((cache) =>
-      cache.match(req).then((cached) => {
-        const network = fetch(req)
-          .then((res) => {
-            if (res && res.status === 200 && res.type === 'basic') cache.put(req, res.clone());
-            return res;
-          })
-          .catch(() => cached);
-        return cached || network;
+    fetch(req)
+      .then((res) => {
+        if (res && res.status === 200 && res.type === 'basic') {
+          const copy = res.clone();
+          caches.open(VERSION).then((c) => {
+            c.put(req, copy.clone());
+            /* 带 ?v= 刷新的导航也要覆盖预缓存首页，避免下一次离线回退拿到旧 HTML。 */
+            if (req.mode === 'navigate' && (url.pathname === '/' || url.pathname === '/index.html')) {
+              c.put('./', copy.clone());
+              c.put('./index.html', copy.clone());
+            }
+          }).catch(() => {});
+        }
+        return res;
       })
-    )
+      .catch(() => caches.match(req).then((r) => {
+        if (r) return r;
+        /* 带查询串的导航在离线时回落到预缓存首页 */
+        return req.mode === 'navigate'
+          ? caches.match('./').then((r2) => r2 || caches.match('./index.html'))
+          : null;
+      }))
   );
 });

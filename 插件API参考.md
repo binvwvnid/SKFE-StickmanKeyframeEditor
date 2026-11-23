@@ -417,7 +417,7 @@ const videoId = api.media.addVideo({
   alpha: 1, scale: 2, locked: false, rot: 0, mirror: false,
   shadowEnabled: false, shadowColor: '#000000', shadowAlpha: 0.3,
   shadowOffX: 0, shadowOffY: 0, shadowScaleX: 1, shadowScaleY: 1,
-  headFilled: false, headFillCustom: false, headFillColor: '#111111',
+  headFillCustom: false, headFillColor: '#111111',
   headShape: 'TCO',               // 'circle'|'Vic'|'TCO'|'TDL'|'TSC'
   bodyScale: { head:1.83, arm:0.98, leg:1.16, torso:0.62, foreArm:0.41, shin:0.49 },
   headAngle: -Math.PI/2 - 15*Math.PI/180,

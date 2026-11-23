@@ -384,11 +384,41 @@ SKFE.systems.distort = (function () {
    *  - parentBox: 父级单应性在本对象盒空间里的表达（拖拽反算用）
    *  - sx/sy    : 当前尺寸相对「初始尺寸」的比例（用于角点自适应缩放）
    */
+  /* v7.9.4：映射缓存。扭曲后的属性/关节操作会在同一帧里反复问同一个对象的 mapping
+     （主画布、命中、控制点、缩略图各一次）。这里按 OBB + distort 数据 + 父级 mapping 做 key，
+     同一姿态只解一次单应性；属性变化只要改了这些字段，key 自然失效。 */
+  let mapCacheSeq = 0;
+  function mappingKey(o, prefix, obb, parent) {
+    const d = o.distort || {};
+    const parentKey = parent
+      ? JSON.stringify([parent.obj && parent.obj.id, parent.H, parent.dst, parent.__mapKey || ''])
+      : '';
+    return prefix + '|' + mapCacheSeq + '|' + JSON.stringify(obb) + '|' +
+      JSON.stringify([d.enabled, d.corners, d.baseW, d.baseH, d.frame0]) + '|' + parentKey;
+  }
+  function readMapCache(o, key) {
+    const c = o && o.__distortMapCache;
+    return (c && c.key === key) ? c.mp : undefined;
+  }
+  function writeMapCache(o, key, mp) {
+    if (!o) return mp;
+    if (mp) mp.__mapKey = key;
+    o.__distortMapCache = { key, mp };
+    return mp;
+  }
+
   function getMapping(o) {
     if (!o) return null;
     if (_mapDepth > 6) return null;
     _mapDepth++;
-    try { return getMappingCore(o, call('getObbCorners', o)); }
+    try {
+      const obb = call('getObbCorners', o);
+      const parent = call('getParentWarp', o);
+      const key = mappingKey(o, 'obb', obb, parent);
+      const cached = readMapCache(o, key);
+      if (cached !== undefined) return cached;
+      return writeMapCache(o, key, getMappingCore(o, obb, parent));
+    }
     finally { _mapDepth--; }
   }
 
@@ -397,14 +427,20 @@ SKFE.systems.distort = (function () {
     if (!o || !corners || corners.length < 4) return null;
     if (_mapDepth > 6) return null;
     _mapDepth++;
-    try { return getMappingCore(o, corners); }
+    try {
+      const parent = call('getParentWarp', o);
+      const key = mappingKey(o, 'box', corners, parent);
+      const cached = readMapCache(o, key);
+      if (cached !== undefined) return cached;
+      return writeMapCache(o, key, getMappingCore(o, corners, parent));
+    }
     finally { _mapDepth--; }
   }
 
-  function getMappingCore(o, obb) {
+  function getMappingCore(o, obb, parentOverride) {
     const ownOn = isActive(o);
     /* 挂载在火柴人身上时，继承父级的单应性 —— 这就是「整个角色像一张图一起变形」 */
-    const parent = call('getParentWarp', o);
+    const parent = (parentOverride === undefined) ? call('getParentWarp', o) : parentOverride;
     if (!ownOn && !parent) return null;
 
     if (!obb || obb.length < 4) return null;
@@ -1152,6 +1188,7 @@ SKFE.systems.distort = (function () {
     worldToBox,
     getMapping,
     getMappingOnBox,
+    invalidateMappingCache: () => { mapCacheSeq++; },
     mapWorld,
     mapBox,
     centerScale,
