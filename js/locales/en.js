@@ -784,7 +784,7 @@ window.SKFE_LOCALES['en'] = {
 "plugin.kitDesc": "All docs, templates, validator and examples are packed into one ZIP — download with a single tap.",
 "plugin.kitDownloadAll": "Download all (ZIP)",
 "plugin.kitDownloadAllTitle": "Download the author kit: API reference, license notice, templates, validator and examples",
-"plugin.kitNote": "Inside the ZIP: (1) 插件API参考.md (API reference); (2) 版权与授权声明.md (license & credit notice); (3) the kit README; (4) manifest.template.json (data-plugin template) and manifest-code.json (code-plugin template); (5) validate-plugin.js (validator) and build-kit.js (packer); (6) sample code example-code.js and example-data.json; (7) two ready-to-import sample plugins — 示例插件-代码型.zip and canvas-grid.zip — plus the canvas-grid source folder. This is a resource bundle; the whole ZIP is not importable. To try the canvas-grid plugin, import the bundled canvas-grid.zip on its own. SKFE is not open source: only making and privately sharing plugins is allowed. Redistribution or removal of author credit is prohibited.",
+"plugin.kitNote": "Inside the ZIP: (1) 插件API参考.md (API reference); (2) 版权与授权声明.md (license & credit notice); (3) the kit README; (4) manifest.template.json (data-plugin template) and manifest-code.json (code-plugin template); (5) validate-plugin.js (validator) and build-kit.js (packer); (6) sample code example-code.js and example-data.json; (7) two ready-to-import sample plugins — 示例插件-代码型.zip and canvas-grid.zip — plus the canvas-grid source folder. This is a resource bundle; the whole ZIP is not importable. To try the canvas-grid plugin, import the bundled canvas-grid.zip on its own.",
 "plugin.kitDownloading": "Preparing plugin kit…",
 "plugin.kitDownloadFail": "Failed to download the plugin kit: {msg}",
 };

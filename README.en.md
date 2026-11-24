@@ -2,7 +2,7 @@
 
 Stickman keyframe animation editor — For the Alan Becker stick figure fandom.
 
-**Author**: binvwvnid　│　**QQ group**: 1121039855　│　**Version**: v7.9.2
+**Author**: binvwvnid　│　**QQ group**: 1121039855　│　**Version**: v7.9.3
 
 - Web app: https://binvwvnid.github.io/SKFE-StickmanKeyframeEditor/
 - Installers (Windows / Android): https://github.com/binvwvnid/SKFE-StickmanKeyframeEditor/releases

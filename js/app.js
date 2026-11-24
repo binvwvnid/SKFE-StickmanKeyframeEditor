@@ -65,7 +65,19 @@
   const btnToggleLock = document.getElementById('btnStripLock');
   const timelineEl = document.getElementById('timeline');
 
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 768;
+  /* v7.9.4-fix：改成 let + refreshIsMobile()。
+     原来用 const 在加载时算一次，PC 上开响应式 / 开发者工具切到手机宽度后，
+     CSS 已经是移动端，JS 仍按桌面端算底部栏位置 → 控制面板浮在半空。 */
+  function isMobileViewport() {
+    /* v7.9.4-fix：PC 响应式模拟时 matchMedia 已经切到手机断点，
+       但 window.innerWidth 仍可能是桌面宽度；必须和 CSS 用同一个判据。 */
+    const mq = window.matchMedia ? window.matchMedia('(max-width: 768px)').matches : (window.innerWidth <= 768);
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || mq;
+  }
+  let isMobile = isMobileViewport();
+  function refreshIsMobile() {
+    isMobile = isMobileViewport();
+  }
 
   let isPanning = false;
   let panStart = { x: 0, y: 0 };
@@ -2839,6 +2851,11 @@ function importActionPresets() {
 
   uiDragHandle.addEventListener('pointerdown', (e) => {
     if (isPanelLocked) return;
+    /* v7.9.4-fix：手机端没开自由缩放时面板永远贴底，顶部手柄不再能把它拖走 */
+    if (isMobile && !uiResizable) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     uiDragMode = 'move';
     uiStartX = e.clientX; uiStartY = e.clientY;
@@ -2927,6 +2944,9 @@ function importActionPresets() {
     uiPanel.classList.toggle('ui-resizable', uiResizable);
     
     if (!uiResizable) {
+      /* v7.9.4-fix：关闭自由缩放必须同时清掉「拖过」标记，
+         否则 resize() 会按旧 top 把面板重新算到半空。 */
+      uiPanelDragged = false;
       uiPanel.style.width = '';
       uiPanel.style.height = '';
       uiPanel.style.maxHeight = '';
@@ -9609,6 +9629,7 @@ function importActionPresets() {
 
   /* ==================== 尺寸/帧管理 ==================== */
   function resize() {
+    refreshIsMobile();  /* v7.9.4-fix：响应式切宽度后必须重算，否则 JS 仍走桌面布局 */
     const timelineEl = document.getElementById('timeline');
     if (timelineEl && getComputedStyle(timelineEl).display !== 'none') {
       const actualTimelineH = timelineEl.offsetHeight;
@@ -15311,11 +15332,10 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
 
     /* 子轨道下：当前帧没有该元件时，画布不产生选中，只保留平移 */
     if (subTrackMode && !subTrackObj) {
-      if (!isTouch) {
-        isPanning = true;
-        panStart = { x: e.clientX - AppState.viewOffset.x, y: e.clientY - AppState.viewOffset.y };
-        canvas.setPointerCapture(e.pointerId);
-      }
+      /* v7.9.4-fix：移动端空白画布也要能单指平移；原来只放开鼠标，手指点空白直接 return */
+      isPanning = true;
+      panStart = { x: e.clientX - AppState.viewOffset.x, y: e.clientY - AppState.viewOffset.y };
+      canvas.setPointerCapture(e.pointerId);
       return;
     }
 
@@ -15474,11 +15494,10 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       }
       /* 子轨道隔离：点击其他元件或空白处不改变选中状态 */
       if (subTrackMode) {
-        if (!isTouch) {
-          isPanning = true;
-          panStart = { x: e.clientX - AppState.viewOffset.x, y: e.clientY - AppState.viewOffset.y };
-          canvas.setPointerCapture(e.pointerId);
-        }
+        /* v7.9.4-fix：同上，手指在空白区也能平移视图 */
+        isPanning = true;
+        panStart = { x: e.clientX - AppState.viewOffset.x, y: e.clientY - AppState.viewOffset.y };
+        canvas.setPointerCapture(e.pointerId);
         return;
       }
       const insideCanvas = AppState.canvasBoundsEnabled && !SKFE.systems.eraser.isOn() && canvasBoundsEditMode && (() => {
@@ -15502,7 +15521,9 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         AppState.canvasSelected = false;
         select(null);
       }
-      if (!isTouch && !SKFE.systems.eraser.isOn()) {
+      /* v7.9.4-fix：移动端空白画布单指平移。命中元件时上面已经 return，
+         所以这里不会抢走火柴人/形状/编组的拖动；橡皮擦开启时仍不平移。 */
+      if (!SKFE.systems.eraser.isOn()) {
         isPanning = true;
         panStart = { x: e.clientX - AppState.viewOffset.x, y: e.clientY - AppState.viewOffset.y };
         canvas.setPointerCapture(e.pointerId);
@@ -18394,6 +18415,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   }
 
   function refreshTimelineDockOffsets() {
+    refreshIsMobile();  /* v7.9.4-fix：这里也会被非 resize 路径调用，统一按当前宽度判断 */
     const tl = document.getElementById('timeline');
     if (!tl) return;
     const visible = getComputedStyle(tl).display !== 'none';
@@ -18472,6 +18494,15 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
 
     // 移动端底部抽屉
     if (isMobile && ui) {
+      /* v7.9.4-fix：未开自由缩放时，无论之前是否拖过，都强制回到贴底。
+         只清状态和内联位置，宽高交给下面的 CSS 50vh / collapsed 内容高。 */
+      if (!uiResizable && uiPanelDragged) {
+        uiPanelDragged = false;
+        ui.style.top = '';
+        ui.style.left = '';
+        ui.style.right = '';
+        ui.style.width = '';
+      }
       /* v7.3.0：面板只有「全关（只剩底部栏）」和「打开某个分区」两种形态，不再整块隐藏 */
       const isCollapsed = ui.classList.contains('collapsed');
 

@@ -32,7 +32,10 @@
   const ROW_H = 32;        /* 每条轨道高度 */
   const RULER_H = 22;      /* 顶部刻度尺高度 */
   const HANDLE_W = 10;     /* 两端手柄的命中宽度（鼠标） */
-  const HANDLE_W_TOUCH = 22; /* v7.7.0：触屏手指粗，手柄命中区放大，否则拉长段落几乎点不中 */
+  /* v7.9.4：收紧触屏手柄命中区。原先 22px 太宽，手指落在长条边缘就被判成拉长/缩短，
+     和「横滑面板读帧」抢手势。现在只留 12px，且触屏拖动要先长按 1 秒。 */
+  const HANDLE_W_TOUCH = 12;
+  const HOLD_MS = 1000;    /* v7.9.4：触屏元件长条长按多久才进入拖动 */
   const KEY_HIT = 13;      /* 关键帧菱形的命中直径 */
   const MIN_H = 160;       /* 面板最小高度 */
   const MAX_FRAMES = 600;  /* 拖拽时允许撑长的上限，防止误拖出几万帧 */
@@ -49,6 +52,11 @@
      所以左右各垫半屏（扣掉半列宽），让 scrollLeft 不被浏览器钳在 0。 */
   let leftPad = 0;
   let lastCenteredFrame = -1;
+  /* v7.9.3：移动端「移动胶片读帧」——手横滑面板 = 移动胶片，红线固定在视口中央，
+     扫到哪帧就连续读哪帧（滚动驱动读帧，和原来「goToFrame 驱动滚动」相反）。
+     filmPan 记录手势起点；suppressCenterFn 期间屏蔽自动回中，否则两者叠加会瞬移。 */
+  let filmPan = null;
+  let suppressCenter = false;
   let panelH = 240;        /* 面板高度默认值：约 4~5 条轨道，屏幕上还留得出画布 */
   let drag = null;
   let selClip = null;      /* 最近点选的那一条长条 { id, a, b } —— 分割认它 */
@@ -74,6 +82,16 @@
   function tracksMap() { return api ? api.tracks() : {}; }
   function totalFrames() { return Math.max(1, api ? api.totalFrames() : 1); }
   function fps() { const f = api && api.fps ? api.fps() : 12; return (f > 0 ? f : 12); }
+  /* v7.9.4-fix：PC 与手机是两套播放头范式，必须按「运行模式」而不是指针类型分流。
+     PC（范式 B）：播放头跟着当前帧走，胶片静止；手机（范式 A）：播放头固定中线，胶片横滑。 */
+  function isMobileMode() {
+    if (api && typeof api.isMobile === 'function') return !!api.isMobile();
+    return !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches);
+  }
+  /* v7.9.2-fix：所有帧格坐标都必须走这两个 helper。
+     以前 leftPad 只在 render / frameAt 里写，拖拽时漏写，手机上一拖就跳一格多。 */
+  function cellLeft(i) { return leftPad + i * colW; }
+  function cellCenter(i) { return leftPad + i * colW + colW / 2; }
 
   /* v7.8.4：音频波形占位。第一版不做真实采样解码（视频音轨浏览器无法直接 decode），
      用元件 id + 段序号派生的「平滑包络 + 细竖线」画一条近似截图的声波带，随长条宽度铺满。
@@ -347,7 +365,9 @@
        need:syncUI 才能立刻把轨道从「组载体」切到「组内成员」。 */
     const SG = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
     const editing = SG ? (SG.getEditingGroupId() || '') : '';
-    let s = editing + '@' + gutterPx + '@' + totalFrames() + '#' + colW + '#' + thumbOn + thumbRev + '#';
+    /* v7.9.4-fix：PC / 手机的左留白不同，模式切换必须让指纹变化触发重画 */
+    const modeFlag = isMobileMode() ? 'M' : 'P';
+    let s = modeFlag + '|' + editing + '@' + gutterPx + '@' + totalFrames() + '#' + colW + '#' + thumbOn + thumbRev + '#';
     for (const id in map) {
       const arr = (map[id] && map[id].frames) || [];
       s += id + ':' + arr.length + ':' + (map[id].name || '') + ':';
@@ -487,14 +507,18 @@
     const total = Math.max(totalFrames(), 1);
     const width = total * colW;
     const rowsH = Math.max(ids.length, 1) * ROW_H;
-    /* 可视轨道区宽度扣掉左侧元件列；两侧留白保证第 1 帧和最后一帧也能滚到中线。 */
+    /* v7.9.4-fix：左留白按范式拆开。
+       手机（范式 A）播放头固定在中线，首尾帧要能滚到线下，所以左右各垫半屏；
+       PC（范式 B）播放头跟着帧走、胶片静止，半屏留白会让左半屏点不到正确帧，
+       点击时全被 clamp 到第 0 帧，播放头就跳回中线附近。PC 不需要这个留白。 */
     const scEl = $('tsScroll');
     const viewW = scEl ? Math.max(1, scEl.clientWidth - gutterPx) : width;
-    leftPad = Math.max(0, Math.floor((viewW - colW) / 2));
+    leftPad = isMobileMode() ? Math.max(0, Math.floor((viewW - colW) / 2)) : 0;
     const paddedW = leftPad * 2 + width;
     cv.style.width = (gutterPx + paddedW) + 'px';
     cv.style.height = (RULER_H + rowsH) + 'px';
     cv.style.setProperty('--cw', colW + 'px');
+    cv.style.setProperty('--ts-lane-offset', leftPad + 'px');
 
     if (!ids.length) {
       cv.innerHTML = '<div class="ts-empty">' + T('track.empty', '还没有元件。先在画布上添加一个元件，它的轨道就会出现在这里。') + '</div>';
@@ -513,7 +537,7 @@
       '</div>';
     html += '<div class="ts-lane ts-ruler" style="width:' + paddedW + 'px">';
     for (let i = 0; i < total; i += rs.step) {
-      html += '<span class="ts-tick" style="left:' + (leftPad + i * colW) + 'px">' +
+      html += '<span class="ts-tick" style="left:' + cellCenter(i) + 'px">' +
         (rs.time ? fmtClock(i) : (i + 1)) + '</span>';
     }
     html += '</div></div>';
@@ -536,7 +560,7 @@
       html += '</div>';
       html += '<div class="ts-lane" style="width:' + paddedW + 'px">';
       spans.forEach((s, si) => {
-        const left = leftPad + s.a * colW;
+        const left = cellLeft(s.a);
         const w = Math.max(colW, (s.b - s.a + 1) * colW);
         const label = (s.a + 1) + (s.b > s.a ? '–' + (s.b + 1) : '');
         const sel = isClipSelected(id, s.a, s.b);
@@ -570,7 +594,7 @@
         if (!KF().isKey(slot)) continue;
         html += '<i class="ts-key' + (slot.hidden ? ' off' : '') + (isCut(slot) ? ' cut' : '') +
           (selKeys.has(ktok(id, i)) ? ' sel' : '') +
-          '" data-id="' + esc(id) + '" data-i="' + i + '" style="left:' + (leftPad + i * colW + colW / 2) + 'px"></i>';
+          '" data-id="' + esc(id) + '" data-i="' + i + '" style="left:' + cellCenter(i) + 'px"></i>';
       }
       html += '</div></div>';
     });
@@ -582,21 +606,88 @@
     scrollPlayheadIntoView();
   }
 
-  /* v7.9.2：播放头默认停在可视轨道区正中；空白区左右拖就是换帧读取画面。 */
-  function scrollPlayheadIntoView() {
+  /* v7.9.4-fix：PC 范式 B —— 播放头跟着当前帧走，胶片静止。
+     只有当前帧滑出可视区才滚动视口把它带回来；不是每帧都回中，否则播放头看起来又「固定」了。 */
+  function keepPlayheadVisible() {
     const sc = $('tsScroll');
     if (!sc || !enabled) return;
     const viewW = Math.max(1, sc.clientWidth - gutterPx);
-    const x = leftPad + api.currentFrame() * colW + colW / 2;
+    const x = cellCenter(api.currentFrame());
+    const margin = Math.min(colW * 2, viewW * 0.25);
+    if (x < sc.scrollLeft + margin) sc.scrollLeft = Math.max(0, x - margin);
+    else if (x > sc.scrollLeft + viewW - margin) sc.scrollLeft = x - viewW + margin;
+    lastCenteredFrame = api.currentFrame();
+  }
+
+  /* 手机范式 A：播放头默认停在可视轨道区正中；空白区左右拖就是换帧读取画面。
+     PC 范式 B：只保证播放头在视口内，并把它的视口坐标写到行内 left。 */
+  function scrollPlayheadIntoView() {
+    if (suppressCenter) return;
+    if (!isMobileMode()) { keepPlayheadVisible(); updatePlayheadPos(); return; }
+    /* v7.9.3：移动胶片读帧期间，视口由手指驱动；此时若再把「当前帧」拉回中线，
+       就会和滚动本身互相打架，表现为一划就瞬移。松手后由 snapPlayheadToFrame 对齐。 */
+    const sc = $('tsScroll');
+    if (!sc || !enabled) return;
+    const viewW = Math.max(1, sc.clientWidth - gutterPx);
+    const x = cellCenter(api.currentFrame());
     sc.scrollLeft = Math.max(0, x - viewW / 2);
     lastCenteredFrame = api.currentFrame();
   }
 
-  function syncPlayhead() {
-    const ph = document.querySelector('#tsCanvas .ts-playhead');
-    if (!ph) return;
-    ph.style.left = (gutterPx + api.currentFrame() * colW + colW / 2) + 'px';
+  /* v7.9.3：红线（CSS 固定在可视轨道区中线）正下方是第几帧。
+     中线在滚动内容里的坐标 = scrollLeft + 可视宽/2，减去留白后除以列宽即得帧号。 */
+  function frameAtPlayhead() {
+    const sc = $('tsScroll');
+    if (!sc) return api.currentFrame();
+    const viewW = Math.max(1, sc.clientWidth - gutterPx);
+    const mid = sc.scrollLeft + viewW / 2;   /* 红线在滚动内容坐标系里的 x */
+    const i = Math.round((mid - leftPad - colW / 2) / colW);
+    return Math.max(0, Math.min(totalFrames() - 1, i));
   }
+
+  /* v7.9.3：松手吸附 —— 把当前帧格中心精确对齐到红线，消除半格偏差。 */
+  function snapPlayheadToFrame() {
+    const sc = $('tsScroll');
+    if (!sc || !enabled) return;
+    suppressCenter = false;
+    const viewW = Math.max(1, sc.clientWidth - gutterPx);
+    sc.scrollLeft = Math.max(0, cellCenter(api.currentFrame()) - viewW / 2);
+    lastCenteredFrame = api.currentFrame();
+  }
+
+  /* v7.9.3：移动胶片读帧的核心。横滑多少就推多少 scrollLeft（1:1 跟手，连续），
+     红线下的帧号一变就立刻 goToFrame —— 平滑连续地读帧；自动回中全程被 suppressCenter
+     挡住，所以不会和手指打架。方向：手指向右 = 把胶片拉向右 = 播放头落到更早的帧。 */
+  function applyFilm(e, st) {
+    const sc = $('tsScroll');
+    if (!sc) return;
+    const dx = e.clientX - st.sx;
+    sc.scrollLeft = Math.max(0, st.startScroll - dx);
+    suppressCenter = true;
+    const i = frameAtPlayhead();
+    st.moved = true;
+    if (i !== st.last) {
+      st.last = i;
+      api.goToFrame(i);       /* 内部会在播放时 pause —— 横滑即接管，符合约定 */
+    }
+  }
+
+  /* v7.9.4-fix：PC 范式 B 的红线位置 = 当前帧格中心映射到视口。
+     手机范式 A 不用行内 left，交给 CSS 固定在中线；这里必须清掉 PC 残留值。 */
+  function updatePlayheadPos() {
+    const ph = document.querySelector('#trackStrip .ts-playhead');
+    if (!ph) return;
+    if (isMobileMode()) {
+      if (ph.style.left) ph.style.left = '';
+      return;
+    }
+    const sc = $('tsScroll');
+    if (!sc || !enabled) return;
+    const x = cellCenter(api.currentFrame()) - sc.scrollLeft;
+    ph.style.left = Math.round(gutterPx + x) + 'px';
+  }
+
+  function syncPlayhead() { updatePlayheadPos(); }
 
   /* ---------------- 写回工具 ---------------- */
   function ensureLen(arr, n) { while (arr.length < n) arr.push(null); }
@@ -1477,13 +1568,16 @@
   }
   function clearDragVisual(st) {
     if (!st) return;
-    if (st.els) st.els.forEach(x => x.el && x.el.classList.remove('dragging'));
-    if (st.el) st.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m');
+    if (st.els) st.els.forEach(x => x.el && x.el.classList.remove('dragging', 'hold-ready'));
+    if (st.el) st.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m', 'hold-ready');
   }
 
   function clearPress() {
     if (!press) return;
     clearTimeout(press.timer);
+    /* v7.9.4：长按计时被划走取消时，撤掉「即将可拖」的反馈 */
+    if (press.els) press.els.forEach(x => x.el && x.el.classList.remove('hold-ready'));
+    if (press.el) press.el.classList.remove('hold-ready');
     press = null;
   }
 
@@ -1507,21 +1601,61 @@
     return !!(target && target.closest && target.closest('.ts-ruler-row'));
   }
 
+  /* v7.9.4-fix：拖动长条时关键帧菱形是长条的兄弟节点，render() 之前不会跟着走。
+     这里按「原始帧号 + 当前位移」直接改 style.left，让帧标记在手指下同步移动；
+     松手后照常 render()，DOM 临时位置和真实数据一次性对齐。 */
+  function shiftKeysForRange(id, a, b, d) {
+    if (!d) return;
+    const canvas = $('tsCanvas');
+    if (!canvas) return;
+    canvas.querySelectorAll('.ts-key[data-id="' + id + '"]').forEach((el) => {
+      const i = +el.dataset.i;
+      if (i >= a && i <= b) el.style.left = cellCenter(i + d) + 'px';
+    });
+  }
+
+  function shiftKeysForClipMove(id, a, b, d) {
+    shiftKeysForRange(id, a, b, d);
+    try {
+      groupMemberIdsOf(id).forEach((mid) => shiftKeysForRange(mid, a, b, d));
+    } catch (_) {}
+  }
+
   function bindDrag() {
     const cv = $('tsCanvas');
     if (!cv || cv.dataset.bound === '1') return;
     cv.dataset.bound = '1';
 
     /* begin = 真正开始拖（建 drag + 加 .dragging）；tap = 短按做什么
-       v7.7.0：触屏改成「按下即拖」，和桌面一致。
-       旧逻辑要求触屏静止长按 1 秒才进入拖动，期间手指滑出 8px 就被判成「想滚动」
-       并 clearPress；但长条铺满整行、滚动本就无意义，于是既没拖也没滚 ——
-       用户看到的就是「长按拖动 / 拉长段落完全没反应」。
-       现在按下立即 begin()：短按（没移动）仍由 finish() 里 !st.moved 分支走点选，
-       触屏靠 touch-action:none 保证原生滚动不抢手势；要滚动请用刻度尺横滑刷时间线。 */
-    const armOrBegin = (e, begin, tap) => {
+       v7.9.4：按用户要求，触屏元件长条改回「长按 1 秒 + 反馈才拖动」。
+       这样横滑面板 / 点边缘不会误拖元件；桌面保持按下即拖不变。
+       长按期间手指一旦滑出阈值：横滑 → 移动胶片读帧，竖滑 → 滚轨道，长按取消。
+       v7.7.0 曾因「长按期间滑走被判成滚动、长条铺满整行滚动无意义」改成按下即拖；
+       现在有胶片读帧兜底，横滑是有意义的操作，长按等待不会再出现「既没拖也没滚」。 */
+    const armOrBegin = (e, begin, tap, holdEls, immediate) => {
       clearPress();
-      begin();
+      /* v7.9.4-fix：两端拉长 / 缩短手柄是明确的小目标，触屏必须按下即响应。
+         长按门槛只约束「抓长条中间平移」，否则一碰手柄就想划动会被判成胶片读帧，
+         用户会觉得拉长手柄根本点不中。 */
+      if (!isMobileMode() || immediate) {
+        begin();
+        return;
+      }
+      const sc0 = $('tsScroll');
+      press = {
+        sx: e.clientX, sy: e.clientY,
+        startScroll: sc0 ? sc0.scrollLeft : 0,
+        begin, tap,
+        els: holdEls || null,
+        timer: setTimeout(() => {
+          if (!press) return;
+          const p = press;
+          press = null;
+          /* 反馈：长条微微高亮 + 加粗描边，告诉用户「现在可以拖了」 */
+          if (p.els) p.els.forEach(x => x.el && x.el.classList.add('hold-ready'));
+          p.begin();
+        }, HOLD_MS)
+      };
     };
 
     /* 空白处短按：跳帧 + 选中这一行的长条 + 选中这一行的元件。
@@ -1551,12 +1685,13 @@
 
       /* v7.9.2：手机端双指缩放覆盖整个下方面板（长条 / 空白 / 刻度尺都行）。
          PC 滚轮仍只在蓝色刻度尺行生效，两套手势互不干扰。 */
-      if (e.pointerType !== 'mouse' && inTrackPanel(e.target)) {
+      if (isMobileMode() && inTrackPanel(e.target)) {
         pinchPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
         if (pinchPointers.size >= 2) {
           clearPress();
           clearDragVisual(drag);
           drag = null; pan = null;
+          suppressCenter = false;   /* 双指接管：胶片手势终止，恢复自动回中 */
           pinching = true;
           const pts = Array.from(pinchPointers.values());
           pinch0 = {
@@ -1577,8 +1712,22 @@
          放在最前面：这一栏只有 22px 高，拖它的人想的是拖时间线，不该起框选。 */
       if (e.target.closest('.ts-ruler')) {
         const i0 = frameAt(e.clientX);
-        drag = { kind: 'scrub', last: i0, moved: false };
-        if (i0 !== api.currentFrame()) api.goToFrame(i0);
+        /* v7.9.2-fix：按下先不跳帧。以前 pointerdown 就 goToFrame，
+           手指刚碰到刻度尺，视口立刻被 scrollPlayheadIntoView 拉走，
+           接着 pointermove 又从新视口算帧号，表现为第一下「瞬移」。
+           现在真正划动再刷帧；短按抬手时才跳到 i0。
+           v7.9.3：手机端改成「移动胶片读帧」——横滑直接推 sc.scrollLeft，
+           红线固定，扫到哪帧读哪帧；PC 仍走原来的相对位移 scrub。 */
+        if (isMobileMode()) {
+          const sc0 = $('tsScroll');
+          drag = {
+            kind: 'film', sx: e.clientX, sy: e.clientY,
+            startScroll: sc0 ? sc0.scrollLeft : 0,
+            i0, last: api.currentFrame(), moved: false
+          };
+        } else {
+          drag = { kind: 'scrub', start: i0, last: i0, sx: e.clientX, moved: false };
+        }
         try { cv.setPointerCapture(e.pointerId); } catch (_) {}
         e.preventDefault();
         return;
@@ -1641,7 +1790,7 @@
           els.forEach(x => x.el.classList.add('dragging'));
           try { cv.setPointerCapture(e.pointerId); } catch (_) {}
         };
-        armOrBegin(e, begin, () => tapKeys(items));
+        armOrBegin(e, begin, () => tapKeys(items), els);
         e.preventDefault();
         return;
       }
@@ -1651,9 +1800,14 @@
         const rect = clip.getBoundingClientRect();
         const dx = e.clientX - rect.left;
         /* v7.7.0：触屏手指粗，两端手柄命中区放大到 HANDLE_W_TOUCH（鼠标仍用 10px）。
-           但长条本身很窄时（1~2 帧）不能让两端把手把整条吃光，取 1/3 宽兜底。 */
+           但长条本身很窄时（1~2 帧）不能让两端把手把整条吃光，取 1/3 宽兜底。
+           v7.9.4-fix：优先认可见的 ‹ / › 手柄元素，点到它就一定是拉长 / 缩短。 */
+        const handleEl = e.target.closest('.ts-h');
         const hw = Math.min(e.pointerType === 'mouse' ? HANDLE_W : HANDLE_W_TOUCH, rect.width / 3);
-        const mode = dx <= hw ? 'l' : (rect.width - dx <= hw ? 'r' : 'm');
+        const mode = handleEl
+          ? (handleEl.classList.contains('ts-h-r') ? 'r' : 'l')
+          : (dx <= hw ? 'l' : (rect.width - dx <= hw ? 'r' : 'm'));
+        const immediateResize = isMobileMode() && mode !== 'm';
         const cid = clip.dataset.id;
         const ca = +clip.dataset.a, cb = +clip.dataset.b;
         const additive = !!(e.ctrlKey || e.metaKey || e.shiftKey);
@@ -1706,7 +1860,7 @@
           /* 短按 = 只选中这个元件和这条长条，不切子轨、不动帧号 */
           api.selectTrack(cid);
           render();
-        });
+        }, group ? els.map(x => x.el) : [clip], immediateResize);
         e.preventDefault();
         return;
       }
@@ -1719,9 +1873,9 @@
       const rowEl = e.target.closest('.ts-row[data-id]');
       const lr = laneRef().getBoundingClientRect();
       const startFrame = Math.floor((e.clientX - lr.left - leftPad) / colW);
-      if (e.pointerType !== 'mouse') {
-        /* v7.9.2：手机空白区左右拖 = 逐帧读取画面；上下拖 = 滚动轨道。
-           PC 仍保留框选。 */
+      if (isMobileMode()) {
+        /* v7.9.4-fix：按运行模式分流，不用指针类型 —— PC 上用触屏也应保留框选 / 范式 B。 */
+        const sc0 = $('tsScroll');
         drag = {
           kind: 'blankTouch',
           i: startFrame,
@@ -1729,6 +1883,7 @@
           rowId: rowEl ? rowEl.dataset.id : null,
           sx: e.clientX,
           sy: e.clientY,
+          startScroll: sc0 ? sc0.scrollLeft : 0,
           mode: null,
           moved: false
         };
@@ -1778,21 +1933,23 @@
         e.preventDefault();
         return;
       }
-      /* v7.9.2：手机空白区左右拖 = 读取画面，上下拖 = 滚动轨道 */
+      /* v7.9.3：刻度尺起手的「移动胶片读帧」——红线固定，横滑推面板，扫到哪帧读哪帧。 */
+      if (drag && drag.kind === 'film') {
+        applyFilm(e, drag);
+        e.preventDefault();
+        return;
+      }
+
+      /* v7.9.3：手机空白区左右拖 = 移动胶片读帧，上下拖 = 滚动轨道。
+         方向判定仍是「首次超过阈值的轴向」锁定，之后一路只走一种，避免斜划反复横跳。 */
       if (drag && drag.kind === 'blankTouch') {
         const vx = e.clientX - drag.sx, vy = e.clientY - drag.sy;
         if (!drag.mode && (Math.abs(vx) > PAN_SLOP || Math.abs(vy) > PAN_SLOP)) {
-          drag.mode = Math.abs(vx) > Math.abs(vy) ? 'scrub' : 'pan';
+          drag.mode = Math.abs(vx) > Math.abs(vy) ? 'film' : 'pan';
         }
-        if (drag.mode === 'scrub') {
-          const i = Math.max(0, Math.min(totalFrames() - 1, drag.startFrame + Math.round(vx / colW)));
-          drag.moved = true;
-          if (i !== drag.last) {
-            drag.last = i;
-            api.goToFrame(i);
-            /* 播放头固定在视口中央：面板必须随当前帧平移，红线下的帧才是预览帧。 */
-            scrollPlayheadIntoView();
-          }
+        if (drag.mode === 'film') {
+          drag.kind = 'film';        /* 交给统一的胶片读帧收尾（松手吸附） */
+          applyFilm(e, drag);
         } else if (drag.mode === 'pan') {
           const sc = $('tsScroll');
           /* 纵向滚轨道时不带走横向时间位置。 */
@@ -1803,13 +1960,25 @@
         return;
       }
 
-      /* 长按还没到就划走了：不是拖长条，是想滚轨道 —— 改成平移 */
+      /* v7.9.4：元件长条长按等待期间划走了 —— 长按取消，按首次轴向分流：
+         横滑 = 移动胶片读帧（红线扫到哪帧读哪帧）；竖滑 = 滚轨道。
+         这样「横滑面板」落在元件长条上也不会误拖元件位置。 */
       if (press && !drag) {
         const dx = e.clientX - press.sx, dy = e.clientY - press.sy;
         if (Math.abs(dx) > PAN_SLOP || Math.abs(dy) > PAN_SLOP) {
+          const p = press;
           clearPress();
-          const sc = $('tsScroll');
-          if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop, verticalOnly: true };
+          if (Math.abs(dx) > Math.abs(dy)) {
+            drag = {
+              kind: 'film', sx: p.sx, sy: p.sy,
+              startScroll: p.startScroll,
+              i0: frameAtPlayhead(), last: api.currentFrame(), moved: false
+            };
+            applyFilm(e, drag);
+          } else {
+            const sc = $('tsScroll');
+            if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop, verticalOnly: true };
+          }
         }
         return;
       }
@@ -1838,8 +2007,8 @@
       if (drag.isTouch && !drag.moved && (drag.kind === 'clip' || drag.kind === 'keys')) {
         const vx = Math.abs(e.clientX - drag.startX), vy = Math.abs(e.clientY - drag.startY);
         if (vy > PAN_SLOP && vy > vx * 1.4) {
-          if (drag.els) drag.els.forEach(x => x.el.classList.remove('dragging'));
-          if (drag.el) drag.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m');
+          if (drag.els) drag.els.forEach(x => x.el && x.el.classList.remove('dragging', 'hold-ready'));
+          if (drag.el) drag.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m', 'hold-ready');
           drag = null;
           const sc = $('tsScroll');
           if (sc) pan = { sc: sc, x: e.clientX, y: e.clientY, left: sc.scrollLeft, top: sc.scrollTop };
@@ -1849,7 +2018,11 @@
 
       /* 刷时间线：手指划到哪一帧就跳哪一帧 */
       if (drag.kind === 'scrub') {
-        const i = frameAt(e.clientX);
+        /* 必须用「相对起点的位移」算帧号。绝对 frameAt(e.clientX) 会在每次
+           goToFrame 后视口重新居中，于是同一根手指位置被反复解释到更后面的帧，
+           表现为一划就连续瞬移。 */
+        const raw = Math.round((e.clientX - drag.sx) / colW);
+        const i = Math.max(0, Math.min(totalFrames() - 1, drag.start + raw));
         if (i === drag.last) return;
         drag.last = i;
         drag.moved = true;
@@ -1865,7 +2038,7 @@
         drag.d = d;
         drag.moved = d !== 0;
         /* 只挪 DOM，不碰数据 —— 整组一起走同一格数 */
-        drag.els.forEach((x) => { x.el.style.left = ((x.i + d) * colW + colW / 2) + 'px'; });
+        drag.els.forEach((x) => { x.el.style.left = cellCenter(x.i + d) + 'px'; });
         return;
       }
 
@@ -1921,22 +2094,25 @@
           if (drag.mode === 'm') { ta = c.a + d; tb = c.b + d; }
           else if (drag.mode === 'r') { tb = c.b + d; }
           else { ta = c.a + d; }
-          x.el.style.left = (ta * colW) + 'px';
+          x.el.style.left = cellLeft(ta) + 'px';
           x.el.style.width = Math.max(colW, (tb - ta + 1) * colW) + 'px';
           const lab = x.el.querySelector('.ts-lab');
           if (lab) lab.textContent = (ta + 1) + (tb > ta ? '–' + (tb + 1) : '');
+          if (drag.mode === 'm') shiftKeysForClipMove(c.id, c.a, c.b, d);
         });
         return;
       }
       const el = drag.el;
       if (drag.mode === 'm') {
-        el.style.left = ((drag.a + d) * colW) + 'px';
+        el.style.left = cellLeft(drag.a + d) + 'px';
         el.querySelector('.ts-lab').textContent = (drag.a + d + 1) + '–' + (drag.b + d + 1);
+        /* v7.9.4-fix：关键帧菱形同步位移，松手前就能看到整段带着帧一起走 */
+        shiftKeysForClipMove(drag.id, drag.a, drag.b, d);
       } else if (drag.mode === 'r') {
         el.style.width = Math.max(colW, (drag.b - drag.a + 1 + d) * colW) + 'px';
         el.querySelector('.ts-lab').textContent = (drag.a + 1) + '–' + (drag.b + d + 1);
       } else {
-        el.style.left = ((drag.a + d) * colW) + 'px';
+        el.style.left = cellLeft(drag.a + d) + 'px';
         el.style.width = Math.max(colW, (drag.b - drag.a + 1 - d) * colW) + 'px';
         el.querySelector('.ts-lab').textContent = (drag.a + d + 1) + '–' + (drag.b + 1);
       }
@@ -1962,11 +2138,33 @@
       drag = null;
       try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
       if (st.kind === 'marquee') hideMarquee();
-      if (st.els) st.els.forEach(x => x.el.classList.remove('dragging'));
-      else if (st.el) st.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m');
+      if (st.els) st.els.forEach(x => x.el && x.el.classList.remove('dragging', 'hold-ready'));
+      else if (st.el) st.el.classList.remove('dragging', 'drag-l', 'drag-r', 'drag-m', 'hold-ready');
 
-      /* 刷时间线：一路上已经跳过去了，松手什么都不用做，也不进历史 */
-      if (st.kind === 'scrub') return;
+      /* v7.9.3：移动胶片读帧 —— 松手把当前帧格吸附对齐红线；
+         短按（没划动）等于点这一帧，走 tapFrameAt。取消手势也要解除回中屏蔽。 */
+      if (st.kind === 'film') {
+        if (isCancel) { suppressCenter = false; return; }
+        if (!st.moved) {
+          suppressCenter = false;
+          tapFrameAt(st.i0 != null ? st.i0 : frameAtPlayhead(), st.rowId);
+          return;
+        }
+        const f = frameAtPlayhead();
+        if (f !== api.currentFrame()) api.goToFrame(f);
+        snapPlayheadToFrame();
+        render();
+        return;
+      }
+
+      /* 刷时间线：划动时已经逐帧跳过了；短按才在这里补跳一次。 */
+      if (st.kind === 'scrub') {
+        if (!st.moved && !isCancel && st.start !== api.currentFrame()) {
+          api.goToFrame(st.start);
+          scrollPlayheadIntoView();
+        }
+        return;
+      }
       if (st.kind === 'blankTouch') {
         if (!st.moved && !isCancel) tapFrameAt(st.i, st.rowId);
         else if (st.moved) render();
@@ -2045,6 +2243,7 @@
       if (pinching && pinchPointers.size < 2) {
         pinching = false; pinch0 = null;
         drag = null; pan = null;
+        suppressCenter = false;
         render();
       }
     };
@@ -2052,6 +2251,58 @@
     cv.addEventListener('pointercancel', releasePinch);
     cv.addEventListener('pointerup', finish);
     cv.addEventListener('pointercancel', finish);
+
+    /* v7.9.4-fix：红线本身可拖，但两种范式语义不同：
+       手机 = 移动胶片读帧（固定红线）；PC = 移动播放头读帧（胶片静止）。 */
+    const playhead = document.querySelector('#trackStrip .ts-playhead');
+    if (playhead) {
+      let phDrag = null;
+      playhead.addEventListener('pointerdown', (e) => {
+        if (!enabled || pinching) return;
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        const mobile = isMobileMode();
+        const sc = $('tsScroll');
+        phDrag = {
+          mobile,
+          sx: e.clientX, sy: e.clientY,
+          startScroll: sc ? sc.scrollLeft : 0,
+          i0: api.currentFrame(), last: api.currentFrame(), moved: false
+        };
+        playhead.classList.add('dragging');
+        try { playhead.setPointerCapture(e.pointerId); } catch (_) {}
+        if (mobile) suppressCenter = true;   /* 手机胶片手势期间屏蔽自动回中 */
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      playhead.addEventListener('pointermove', (e) => {
+        if (!phDrag) return;
+        if (phDrag.mobile) {
+          applyFilm(e, phDrag);
+        } else {
+          /* PC 范式 B：红线就是播放头，横拖它 = 直接改当前帧 */
+          const i = frameAt(e.clientX);
+          phDrag.moved = true;
+          if (i !== api.currentFrame()) api.goToFrame(i);
+        }
+        e.preventDefault();
+      });
+      const endPlayhead = (e) => {
+        if (!phDrag) return;
+        const st = phDrag;
+        phDrag = null;
+        playhead.classList.remove('dragging');
+        try { playhead.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (e.type === 'pointercancel') { suppressCenter = false; return; }
+        if (st.mobile) {
+          const f = frameAtPlayhead();
+          if (f !== api.currentFrame()) api.goToFrame(f);
+          snapPlayheadToFrame();
+        }
+        render();
+      };
+      playhead.addEventListener('pointerup', endPlayhead);
+      playhead.addEventListener('pointercancel', endPlayhead);
+    }
 
     /* v7.8.2：PC 滚轮缩放只在顶部刻度尺行（蓝色范围）生效；
        下方长条区域不拦截，滚轮保持原生上下移动；Shift+滚轮仍留给横向滚动。 */
@@ -2064,6 +2315,9 @@
         e.preventDefault();
         zoom(e.deltaY < 0 ? 1 : -1, e.clientX);
       }, { passive: false });
+      /* v7.9.4-fix：PC 范式 B 的红线是逻辑坐标映射到视口，
+         Shift+滚轮 / 触控板横滑改 scrollLeft 后必须重算，否则线会留在原地。 */
+      sc.addEventListener('scroll', updatePlayheadPos, { passive: true });
     }
 
     /* 阻止浏览器把轨道区的双指识别成页面缩放（pointer 事件拦不住原生 pinch） */

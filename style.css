@@ -2127,6 +2127,8 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     /* v7.2.1：开了自由缩放后移动端面板不再固定贴底，可能被拖到屏幕中间，
        四角统一用大圆角（原来只留左下角是直角，浮在画布上很割裂）。 */
     #ui.ui-resizable { border-radius: var(--radius-panel) var(--radius-panel) 0 0; } /* 顶部圆角，底部贴边 */
+    /* v7.9.4-fix：没开自由缩放时面板永远贴底，顶部拖动条不再给「能拖走」的错觉 */
+    #ui:not(.ui-resizable) #uiDragHandle { display: none; }
   } /* 媒体查询结束 */
 /* ==================================================================================
    v7.4.0：轨道模式（新增功能）
@@ -2199,10 +2201,15 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   .ts-scroll {
     position: relative; height: 100%; overflow: auto;
     scrollbar-width: thin; scrollbar-color: var(--border-color) transparent;
+    /* v7.9.4：必须关掉原生触摸滚动。body 的 touch-action:none 不会继承进来，
+       之前空白区横滑被浏览器当成原生横滚，pointermove 直接被 pointercancel 掐掉，
+       表现为「红线不读帧，只有点到带 touch-action:none 的长条才能读」。
+       关掉后横滑读帧 / 竖滑滚轨道 / 双指缩放统一由 JS 手势处理。 */
+    touch-action: none;
   }
   .ts-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
   .ts-scroll::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 999px; }
-  .ts-canvas { position: relative; min-height: 100%; }
+  .ts-canvas { position: relative; min-height: 100%; touch-action: none; }
 
   .ts-row { display: flex; align-items: stretch; height: 32px; }
   .ts-ruler-row {
@@ -2242,13 +2249,19 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     position: relative; flex: 0 0 auto;
     background-image: repeating-linear-gradient(to right, var(--border-color) 0 1px, transparent 1px var(--cw, 26px));
     background-repeat: repeat-x;
+    /* v7.9.2-fix：帧格从 leftPad 起算，网格线也必须从同一处起画；
+       否则手机上 leftPad 很大，网格与长条/菱形会错开小半格。 */
+    background-position: var(--ts-lane-offset, 0px) 0;
   }
   /* 刻度尺那一栏：v7.4.9 起按住拖 = 刷时间线（所以 touch-action 关掉原生滚动） */
   .ts-ruler { border-bottom: 1px solid var(--border-color); touch-action: none; cursor: ew-resize; }
   .ts-gutter-head { justify-content: flex-start; gap: 4px; font-size: 11px; color: var(--text-sub); }
   .ts-gutter-head > span { margin-right: auto; }
   .ts-tick {
-    position: absolute; top: 4px; padding-left: 3px;
+    /* 数字放在帧格正中，和长条里的缩略图 / 关键帧 / 播放头同一列；
+       以前贴在格线左边，手机上看起来播放头永远偏右半格。 */
+    position: absolute; top: 4px; padding-left: 0;
+    transform: translateX(-50%);
     font-size: 10px; line-height: 1; color: var(--text-sub);
     pointer-events: none; user-select: none;
   }
@@ -2325,13 +2338,24 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   }
   .ts-key.sel.cut { border-color: #e24b4a; }
 
-  /* 播放头：挂在 #trackStrip 上而不是滚动内容里，视觉坐标固定在可视轨道区中线。
-     中线 = 左侧元件列 + 剩余宽度的一半；left 随 --ts-gutter 自动适配手机断点。 */
+  /* 播放头：挂在 #trackStrip 上而不是滚动内容里。
+     v7.9.4-fix：PC（范式 B）由 JS 按当前帧写行内 left —— 播放头跟着帧走、胶片静止；
+     手机（范式 A）在下方媒体查询里固定到可视轨道区中线，由 JS 横滑胶片来读帧。 */
   .ts-playhead {
     position: absolute; top: 0; bottom: 0;
-    left: calc(var(--ts-gutter, 108px) + (100% - var(--ts-gutter, 108px)) / 2);
-    width: 1px; background: #e24b4a; pointer-events: none; z-index: 7;
+    left: 0;
+    width: 1px; background: #e24b4a;
+    /* v7.9.4：红线本身可拖 —— 横拖它 = 移动胶片读帧，扫到哪帧预览哪帧。
+       整条命中区 14px 宽（::before 撑开）。按用户要求不画顶部圆点把手。 */
+    pointer-events: auto; cursor: ew-resize; z-index: 7;
   }
+  .ts-playhead::before {
+    content: ''; position: absolute; top: 0; bottom: 0; left: -7px; right: -7px;
+  }
+  .ts-playhead.dragging { width: 2px; }
+  /* 元件长条 / 关键帧长按 1 秒后的「可以拖了」反馈 */
+  .ts-clip.hold-ready { filter: brightness(1.18); box-shadow: 0 0 0 2px var(--text-main) inset, 0 0 0 3px rgba(226, 75, 74, .55); }
+  .ts-key.hold-ready { background: var(--color-primary); border-color: #fff; transform: rotate(45deg) scale(1.5); z-index: 4; }
 
   /* v7.4.4：空白处拖出来的框选框（压到哪几条长条就选哪几条） */
   .ts-marquee {
@@ -2349,8 +2373,16 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   @media (max-width: 768px) { /* 手机上轨道区更紧凑 */
     /* v7.4.9：左列窄一点，但只改这一个变量 —— JS 读它算播放头，
        以前这里单独把 .ts-gutter 写成 84px，JS 还按 108 算，播放头就整体右偏一格多。 */
-    #trackStrip { --ts-gutter: 84px; }
-    .ts-gutter { padding: 0 6px; }
+    /* v7.9.4-fix：左列再收窄 1/3（84 → 56），把横向空间让给时间轴。
+       JS 的播放头 / 读帧都读这个变量，所以只改这里即可。 */
+    #trackStrip { --ts-gutter: 56px; }
+    .ts-gutter { padding: 0 4px; gap: 3px; }
+    .ts-eye { width: 18px; height: 20px; }
+    .ts-eye [data-icon] { font-size: 12px; }
+    .ts-gutter-head, .ts-name { font-size: 10px; }
+    /* v7.9.4-fix：手机范式 A —— 红线固定中线，胶片横滑读帧。
+       JS 在手机模式会清空 PC 写下的行内 left，这里才能生效。 */
+    .ts-playhead { left: calc(var(--ts-gutter, 56px) + (100% - var(--ts-gutter, 56px)) / 2); }
     #btnTrackMode { padding: 4px 10px; font-size: 11px; }
     /* 手机上控制栏横向滚动，复制/粘贴关键帧保留文字，便于和帧面板的「复制帧」区分 */
     #btnTrackKeyCopy, #btnTrackKeyPaste { padding: 4px 8px; }

@@ -783,7 +783,7 @@ window.SKFE_LOCALES['zh-CN'] = {
 "plugin.kitDesc": "制作插件所需的文档、模板、校验脚本与示例，已打包成一个 zip，一键下载。",
 "plugin.kitDownloadAll": "一键下载全部（ZIP）",
 "plugin.kitDownloadAllTitle": "下载插件作者工具包：API 参考、授权声明、模板、校验脚本与示例",
-"plugin.kitNote": "压缩包里包含：① 插件API参考.md（接口说明）；② 版权与授权声明.md；③ 工具包说明 README；④ manifest.template.json（数据型模板）与 manifest-code.json（代码型模板）；⑤ validate-plugin.js（插件校验脚本）与 build-kit.js（打包脚本）；⑥ 示例代码 example-code.js、example-data.json；⑦ 两个可直接导入的示例插件——示例插件-代码型.zip 与 canvas-grid.zip，并附画布网格插件源码目录。这是资料包，整体不能直接导入；想试用画布网格，请单独导入包内 canvas-grid.zip。SKFE 非开源，仅授权制作与私下分享插件，禁止二次公开发布或抹消作者署名。",
+"plugin.kitNote": "压缩包里包含：① 插件API参考.md（接口说明）；② 版权与授权声明.md；③ 工具包说明 README；④ manifest.template.json（数据型模板）与 manifest-code.json（代码型模板）；⑤ validate-plugin.js（插件校验脚本）与 build-kit.js（打包脚本）；⑥ 示例代码 example-code.js、example-data.json；⑦ 两个可直接导入的示例插件——示例插件-代码型.zip 与 canvas-grid.zip，并附画布网格插件源码目录。这是资料包，整体不能直接导入；想试用画布网格，请单独导入包内 canvas-grid.zip。",
 "plugin.kitDownloading": "正在准备插件工具包…",
 "plugin.kitDownloadFail": "插件工具包下载失败：{msg}",
 };
