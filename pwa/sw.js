@@ -22,8 +22,8 @@
    v7.8.4a：恢复 v7.8.1 移动端轨道底部栏机制；手机复制/粘贴关键帧恢复文字；工程音轨导入后就绪补播；MP4/WebM 导出混入音频。
    v7.8.4b：新增 js/plugins/api.js 全开放插件/MCP API；代码型插件注入 api 第三参数；EventBus 补 off/once/clear。
    v7.8.4c：修复安卓客户端插件作者工具包 ZIP 下载——原生壳改用 platform.saveURL 写文件并系统分享。
-   v7.9.3：移动端播放头固定与横滑、油漆桶、画笔类型、扭曲操作优化；缓存标签随之刷新。 */
-const VERSION = 'skfe-local-v7.9.3';
+   v8.0.0：移动端播放头固定与横滑、油漆桶、画笔类型、扭曲操作优化；缓存标签随之刷新。 */
+const VERSION = 'skfe-local-v8.0.0';
 const SHELL = ['./', './index.html', './style.css', './manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {

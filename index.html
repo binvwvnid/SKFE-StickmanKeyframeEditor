@@ -3,7 +3,7 @@
 <head> <!-- 网页头部，包含元数据和外部引用 -->
 <meta charset="UTF-8"> <!-- 设置字符编码为 UTF-8，防止中文乱码 -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover"> <!-- 移动端视口设置：宽度同设备，允许缩放，适配刘海屏 -->
-<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.3</title> <!-- 网页标题，带有多语言属性；运行时由 i18n 注入 version.js 的版本号 -->
+<title data-i18n="app.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v8.0.0</title> <!-- 网页标题，带有多语言属性；运行时由 i18n 注入 version.js 的版本号 -->
 <link rel="stylesheet" href="./style.css"> <!-- 引入外部样式表 -->
 </head> <!-- 头部结束 -->
 <body> <!-- 网页主体开始 -->
@@ -61,6 +61,7 @@
     <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"></path><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"></path></svg> <!-- 重做 SVG 图标 -->
   </button> <!-- 重做按钮结束 -->
   <button id="btnRefVideoTop" style="display: none; padding: 0 12px; font-size: 13px; font-weight: 600; color: var(--color-primary); touch-action: none;" title="长按置顶参考视频" data-i18n-title="refVideoTop.title"><span data-i18n="refVideoTop.label">参考</span><i data-icon="to-top"></i></button> <!-- 参考视频长按置顶按钮（默认隐藏） -->
+  <button id="btnSpace3DCamera" type="button" title="进入 2D 视角" aria-label="进入 2D 视角"><i data-icon="videocamera"></i><span>2D</span></button> <!-- 摄像机视角唯一入口：3D 模式常驻，2D 有摄像机时显示，位于撤销键下方 -->
 </div> <!-- 历史记录区结束 -->
 
 <div id="videoProgress"> <!-- 导入视频时的加载进度浮窗 -->
@@ -80,8 +81,22 @@
     <button type="button" id="btnCloseCameraPreview" class="cp-close" title="关闭预览" data-i18n-title="cameraPreview.closeTitle"><i data-icon="close"></i></button> <!-- 关闭预览按钮 -->
   </div> <!-- 预览窗头部结束 -->
   <canvas id="cameraPreviewCanvas"></canvas> <!-- 用于渲染预览内容的辅助画布 -->
-  <div class="cp-hint" data-i18n="cameraPreview.hint">始终显示当前帧的摄像机导出画面</div> <!-- 预览窗底部提示 -->
+  <div class="cp-hint" data-i18n="cameraPreview.hint">3D 下显示 3D 摄像机视角导出画面；2D 下显示当前帧的摄像机画面</div> <!-- 预览窗底部提示 -->
 </div> <!-- 摄像机预览浮窗结束 -->
+
+<div id="objStripFloat" hidden> <!-- 高级设置：元件浮条独立窗口（细条，无标题无关闭键） -->
+  <div class="osf-body" id="objStripFloatBody"> <!-- 元件浮条实际挂载点 -->
+    <div class="osf-grip" id="objStripFloatGrip" title="拖动元件浮条" data-i18n-title="adv.stripFloatDrag"><i data-icon="hamburger-button"></i></div> <!-- 左侧拖动把手 -->
+  </div> <!-- 挂载区结束 -->
+  <div class="osf-resize" id="objStripFloatResize" title="横向拉长元件浮条" data-i18n-title="adv.stripFloatResize"></div> <!-- 右侧横向缩放手柄 -->
+</div> <!-- 元件浮条独立窗口结束 -->
+
+<div id="customButtonStrip" hidden> <!-- 自定义按键浮条：把常用按钮做成快捷方式 -->
+  <div class="cbs-grip" id="customButtonStripGrip" title="拖动自定义按键浮条" data-i18n-title="shortcut.drag"><i data-icon="hamburger-button"></i></div> <!-- 左侧拖动把手 -->
+  <div class="cbs-items" id="customButtonStripItems"></div> <!-- 快捷按钮容器 -->
+  <button type="button" id="btnOpenShortcutPicker" class="cbs-add" title="添加快捷按键" data-i18n-title="shortcut.add"><i data-icon="add-one"></i></button> <!-- 打开按钮选择弹窗 -->
+  <div class="cbs-resize" id="customButtonStripResize" title="横向拉长缩短浮条" data-i18n-title="adv.stripFloatResize"></div> <!-- 右侧横向缩放手柄 -->
+</div> <!-- 自定义按键浮条结束 -->
 
 <div id="eraserCursor"></div> <!-- 橡皮擦模式下的圆形光标指示器 -->
 
@@ -98,7 +113,7 @@
   <div id="uiMain"> <!-- v7.3.0：「属性」分区（data-sheet="props"），标题头由 JS 动态插入，见 mountUiSheets -->
 
   <div id="watermark"> <!-- 控制面板顶部的作者/版本水印 -->
-    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v7.9.3</div> <!-- 软件名称及版本 -->
+    <div data-i18n="watermark.title">SKFE | Stickman Keyframe Editor-火柴人帧动画编辑器v8.0.0</div> <!-- 软件名称及版本 -->
     <div class="author" data-i18n="watermark.author">作者 binvwvnid · QQ 交流群 1121039855</div> <!-- 作者信息及群号 -->
   </div> <!-- 水印结束 -->
 
@@ -132,7 +147,7 @@
         <button id="btnInsertVideo"><i data-icon="video-two"></i><span data-i18n="add.videoClip">导入视频</span></button> <!-- 导入视频元件（可编辑，与参考视频不同） -->
         <button id="btnInsertAudio"><i data-icon="audio"></i><span data-i18n="add.audio">导入音频</span></button> <!-- v7.8.1：音频元件，仅播声音不画画面，接受 audio/* 与 video/* -->
         <button id="btnBubble"><i data-icon="comment-one"></i><span data-i18n="add.bubble">对话框</span></button> <!-- 添加文字气泡 -->
-        <button id="btnCamera"><i data-icon="videocamera"></i><span data-i18n="add.camera">摄像机</span></button> <!-- 添加摄像机 -->
+        <button id="btnCamera"><i data-icon="videocamera"></i><span data-i18n="add.camera">摄像机</span></button> <!-- 按当前模式添加 / 替换 2D 或 3D 摄像机，按钮文字始终叫摄像机 -->
       </div> <!-- 第一排结束 -->
       <div class="row" style="margin-top:8px;"> <!-- 第二排：内置形状 -->
         <span class="field-label" data-i18n="add.shapes">内置形状：</span> <!-- 标签文字 -->
@@ -197,7 +212,7 @@
       <button class="camera-ratio-btn btn-xs" data-ratio="4:3">4:3</button> <!-- 传统横屏 -->
       <button class="camera-ratio-btn btn-xs" data-ratio="3:4">3:4</button> <!-- 传统竖屏 -->
     </div> <!-- 比例按钮组结束 -->
-    <div class="hint" style="margin-top:6px;" data-i18n="camera.hint">尺寸已锁定，仅可切换比例；中心点与动画数据会保留。切换到摄像机子轨道后，画布会变成摄像机视角。</div> <!-- 操作提示 -->
+    <div class="hint" style="margin-top:6px;" data-i18n="camera.hint">尺寸已锁定，仅可切换比例；中心点与动画数据会保留。点击右上角「2D」按钮进入或退出摄像机视角。</div> <!-- 操作提示 -->
   </div> <!-- 摄像机面板结束 -->
   
   <div id="bindPanel" style="display:none"> <!-- ==================== 配饰绑定设置面板 ==================== -->
@@ -283,7 +298,7 @@
     <div class="row slider"><label data-i18n="obj.yAxis">Y轴</label><input type="range" id="posYSlider" min="-100" max="100" step="1" value="0"><span class="val" style="color:var(--text-sub); font-size:11px;" data-i18n="obj.relative">相对</span></div> <!-- 相对 Y 轴位置微调滑条 -->
     <div class="row slider"><label data-i18n="obj.scale">缩放</label><input type="range" id="posScaleSlider" min="-100" max="100" step="1" value="0"><span class="val" style="color:var(--text-sub); font-size:11px;" data-i18n="obj.relative">相对</span></div> <!-- 相对缩放微调滑条 -->
     <div class="row slider"><label data-i18n="obj.rotation">旋转</label><input type="range" id="posRotSlider" min="-100" max="100" step="1" value="0"><span class="val" style="color:var(--text-sub); font-size:11px;" data-i18n="obj.relative">相对</span></div> <!-- 相对旋转微调滑条 -->
-    
+
     <!-- 必须保留隐藏的旧版缩放，否则 JS 会报错 -->
     <div style="display:none;"><input type="range" id="objScale" min="0" max="4" step="0.01" value="1.67"><span id="objScaleVal"></span></div> <!-- 隐藏的绝对缩放输入（兼容旧 JS 逻辑） -->
 
@@ -661,8 +676,8 @@
     <div class="brush-group">
       <div class="brush-group-title" data-i18n="brush.groupLook">外观</div>
       <div class="brush-grid brush-grid-look">
-        <button id="btnBrushType" class="btn-xs" type="button" data-i18n-title="brush.typeTitle" title="选择画笔类型">
-          <i data-icon="pencil"></i><span id="brushTypeLabel" data-i18n="brush.typeDefault">默认</span>
+        <button id="btnBrushType" class="btn-xs brush-type-btn" type="button" data-i18n-title="brush.typeTitle" title="选择画笔类型">
+          <i data-icon="pencil"></i><span class="brush-type-caption" data-i18n="brush.typeTitle">画笔类型</span><span id="brushTypeLabel" data-i18n="brush.typeDefault">默认</span>
         </button>
         <label><span data-i18n="brush.color">画笔颜色</span>
           <input type="color" id="brushColor" value="#111111">
@@ -912,6 +927,133 @@
 
   </div> <!-- uiMain（属性区）结束 -->
 
+  <!-- 3D 面板：3D 是独立叠加层，所有 3D 控件集中在这里，文本固定不参与多语言。 -->
+  <div class="ui-sheet" id="sheetSpace3d" hidden>
+    <div class="row" style="margin-top:2px;">
+      <button id="btnSpace3DMode" class="btn-primary btn-sm" type="button" style="flex:1;" title="开启 / 关闭 3D 查看模式">开启 3D</button>
+    </div>
+    <div class="hint">3D 是叠加查看层，关闭后完整回到原有 2D 编辑。</div>
+    <div id="s3ObjectPane">
+    <div class="section-title">选中元件</div>
+    <div id="s3ObjectEmpty" class="hint">先在画布或时间轴选中一个元件。</div>
+    <div id="s3ObjectControls" hidden>
+      <div class="row" style="justify-content:space-between; margin-bottom:4px;">
+        <span class="field-label">变换手柄</span>
+        <span style="display:flex; gap:6px;">
+          <button id="s3GizmoMove" class="btn-soft btn-sm on" type="button" title="显示移动手柄（快捷键 G 切换）">移动</button>
+          <button id="s3GizmoRotate" class="btn-soft btn-sm" type="button" title="显示旋转手柄（快捷键 G 切换）">旋转</button>
+        </span>
+      </div>
+      <div class="s3-subtitle">位移</div>
+      <div class="row slider space3d-row">
+        <label>X</label>
+        <input type="range" min="-200" max="200" step="1" value="0" data-s3-prop="posX" title="X 位移相对滑条">
+        <input type="number" class="s3-num" data-s3-num="posX" step="1" title="点击输入或滚轮微调 X">
+      </div>
+      <div class="row slider space3d-row">
+        <label>Y</label>
+        <input type="range" min="-200" max="200" step="1" value="0" data-s3-prop="posY" title="Y 位移相对滑条，向上为正">
+        <input type="number" class="s3-num" data-s3-num="posY" step="1" title="点击输入或滚轮微调 Y，向上为正">
+      </div>
+      <div class="row slider space3d-row">
+        <label>Z</label>
+        <input type="range" min="-500" max="500" step="5" value="0" data-s3-prop="posZ" title="Z 深度相对滑条，远离镜头为正">
+        <input type="number" class="s3-num" data-s3-num="posZ" step="1" title="点击输入或滚轮微调 Z，远离镜头为正">
+      </div>
+
+      <div class="s3-subtitle">旋转</div>
+      <div class="row slider space3d-row">
+        <label>Y 偏航</label>
+        <input type="range" min="-180" max="180" step="1" value="0" data-s3-prop="rotY" title="Y 轴旋转相对滑条">
+        <input type="number" class="s3-num" data-s3-num="rotY" step="1" title="点击输入或滚轮微调 Y 轴旋转">
+      </div>
+      <div class="row slider space3d-row">
+        <label>X 俯仰</label>
+        <input type="range" min="-180" max="180" step="1" value="0" data-s3-prop="rotX" title="X 轴旋转相对滑条">
+        <input type="number" class="s3-num" data-s3-num="rotX" step="1" title="点击输入或滚轮微调 X 轴旋转">
+      </div>
+      <div class="row slider space3d-row">
+        <label>Z 平面</label>
+        <input type="range" min="-180" max="180" step="1" value="0" data-s3-prop="rotZ" title="Z 轴旋转相对滑条，沿用原有 2D 旋转">
+        <input type="number" class="s3-num" data-s3-num="rotZ" step="1" title="点击输入或滚轮微调 Z 轴旋转">
+      </div>
+
+      <div class="s3-subtitle">缩放 / 朝向</div>
+      <div class="row slider space3d-row">
+        <label>缩放</label>
+        <input type="range" min="-100" max="100" step="1" value="0" data-s3-prop="scale" title="缩放相对滑条">
+        <input type="number" class="s3-num" data-s3-num="scale" step="0.01" title="点击输入或滚轮微调缩放">
+      </div>
+      <div class="row">
+        <label class="field-label">Billboard</label>
+        <button id="s3Billboard" class="btn-soft btn-sm" type="button" style="flex:1;">关闭</button>
+      </div>
+    </div>
+    </div>
+
+    <div id="s3CameraPane" hidden>
+    <div class="section-title">3D 摄像机</div>
+    <div class="row">
+      <button id="s3CamPerspective" class="btn-soft btn-sm" type="button" style="flex:1;">透视</button>
+      <button id="s3CamOrthographic" class="btn-soft btn-sm" type="button" style="flex:1;">正交</button>
+    </div>
+    <div class="s3-subtitle">取景比例</div>
+    <div class="row">
+      <button class="s3-cam-ratio-btn btn-xs" data-ratio="16:9" type="button" style="flex:1;">16:9</button>
+      <button class="s3-cam-ratio-btn btn-xs" data-ratio="9:16" type="button" style="flex:1;">9:16</button>
+      <button class="s3-cam-ratio-btn btn-xs" data-ratio="1:1" type="button" style="flex:1;">1:1</button>
+      <button class="s3-cam-ratio-btn btn-xs" data-ratio="4:3" type="button" style="flex:1;">4:3</button>
+      <button class="s3-cam-ratio-btn btn-xs" data-ratio="3:4" type="button" style="flex:1;">3:4</button>
+    </div>
+
+    <div class="s3-subtitle">位置</div>
+    <div class="row slider space3d-row">
+      <label>X</label>
+      <input type="range" min="-3000" max="3000" step="1" value="0" data-s3-cam="position.x">
+      <input type="number" class="s3-num" data-s3-cam-num="position.x" step="1">
+    </div>
+    <div class="row slider space3d-row">
+      <label>Y</label>
+      <input type="range" min="-3000" max="3000" step="1" value="0" data-s3-cam="position.y">
+      <input type="number" class="s3-num" data-s3-cam-num="position.y" step="1">
+    </div>
+    <div class="row slider space3d-row">
+      <label>Z</label>
+      <input type="range" min="-5000" max="5000" step="5" value="-1200" data-s3-cam="position.z">
+      <input type="number" class="s3-num" data-s3-cam-num="position.z" step="1">
+    </div>
+
+    <div class="s3-subtitle">旋转</div>
+    <div class="row slider space3d-row">
+      <label>X</label>
+      <input type="range" min="-180" max="180" step="1" value="0" data-s3-cam="rotation.x">
+      <input type="number" class="s3-num" data-s3-cam-num="rotation.x" step="1">
+    </div>
+    <div class="row slider space3d-row">
+      <label>Y</label>
+      <input type="range" min="-180" max="180" step="1" value="0" data-s3-cam="rotation.y">
+      <input type="number" class="s3-num" data-s3-cam-num="rotation.y" step="1">
+    </div>
+    <div class="row slider space3d-row">
+      <label>Z</label>
+      <input type="range" min="-180" max="180" step="1" value="0" data-s3-cam="rotation.z">
+      <input type="number" class="s3-num" data-s3-cam-num="rotation.z" step="1">
+    </div>
+
+    <div class="row">
+      <label class="field-label">跟随目标</label>
+      <select id="s3CamTarget" class="s3-target" title="选择后镜头保持当前相对机位，并随该元件逐帧移动">
+        <option value="">不跟随</option>
+      </select>
+    </div>
+    <div class="row">
+      <button id="s3AlignView" class="btn-primary btn-sm" type="button" style="flex:1;">摄像机参数</button>
+      <button id="s3ResetCamera" class="btn-soft btn-sm" type="button" style="flex:1;">重置取景</button>
+    </div>
+    <div class="hint">这里修改的是 3D 摄像机视角；滑条与数字框都直接表示当前摄像机的绝对参数，在摄像机视角里拖动 / 平移后，这里会实时跟随显示。选择“跟随目标”后，镜头会保持当前相对机位并随目标逐帧移动；此时位置框显示实际机位，调位置等于调相对偏移。参数会实时带动 3D 空间里的摄像机并写入作品数据。</div>
+    </div>
+  </div>
+
   <!-- 7 个分区容器：内容由 JS 在初始化时从上面搬进来（迁移映射见 app.js 的 mountUiSheets） -->
   <div class="ui-sheet" id="sheetObjects" hidden></div> <!-- 元件 -->
   <div class="ui-sheet" id="sheetBrush" hidden></div> <!-- 画笔（v7.0.6 新增） -->
@@ -945,6 +1087,7 @@
     <!-- v7.3.0：底部栏最左边新增「属性」入口 —— 原来常显的属性区（#uiMain）正式变成第 8 个分区，
          和其它 7 个走同一套开合逻辑：点它展开、再点一次全关（只剩这条底部栏）。 -->
     <button class="ui-tab" type="button" data-sheet="props" role="tab" aria-label="属性" data-i18n-aria-label="tab.props" data-i18n-title="tab.props" title="属性"><i data-icon="setting"></i></button>
+    <button class="ui-tab ui-tab-text" type="button" data-sheet="space3d" role="tab" aria-label="3D" title="3D">3D</button>
     <button class="ui-tab" type="button" data-sheet="objects" role="tab" aria-label="元件" data-i18n-aria-label="tab.objects" data-i18n-title="tab.objects" title="元件"><i data-icon="layers"></i></button>
     <button class="ui-tab" type="button" data-sheet="brush" role="tab" aria-label="画笔" data-i18n-aria-label="tab.brush" data-i18n-title="tab.brush" title="画笔"><i data-icon="high-light"></i></button>
     <button class="ui-tab" type="button" data-sheet="canvas" role="tab" aria-label="画布" data-i18n-aria-label="tab.canvas" data-i18n-title="tab.canvas" title="画布"><i data-icon="selected"></i></button>
@@ -1053,9 +1196,12 @@
     <input type="checkbox" id="frameThumbMode" checked style="display:none"> <!-- 缩略图显示状态 -->
     <input type="checkbox" id="kfCurveCheck" style="display:none"> <!-- 段曲线显示状态（v7.9.0：默认关闭） -->
     <input type="checkbox" id="gifTransparent" checked style="display:none"> <!-- GIF 透明底状态 -->
+    <input type="checkbox" id="s3ExportGrid" style="display:none"> <!-- 阶段4：3D 导出是否包含地面网格，默认关闭 -->
     <input type="checkbox" id="gifHD3x" checked style="display:none"> <!-- GIF 高清状态 -->
     <input type="checkbox" id="hd1080p" style="display:none"> <!-- 1080p 高清状态 -->
     <input type="checkbox" id="cameraPreviewCheck" style="display:none"> <!-- 摄像机预览状态 -->
+    <input type="checkbox" id="objStripFloatCheck" style="display:none"> <!-- 元件浮条独立窗口状态 -->
+    <input type="checkbox" id="customStripCheck" style="display:none"> <!-- 自定义按键浮条状态 -->
 
     <div class="adv-row"> <!-- 其他画面可见性行 -->
       <span class="adv-field-label"><i data-icon="film"></i><span data-i18n="adv.others">其他画面</span></span> <!-- 标签 -->
@@ -1075,7 +1221,10 @@
       <button class="adv-toggle" data-toggle="frameThumbMode" data-i18n="adv.thumb">缩略图</button> <!-- 时间轴显示缩略图开关 -->
       <button class="adv-toggle" data-toggle="kfCurveCheck" data-i18n="adv.curve" data-i18n-title="adv.curveTitle" title="显示/隐藏帧动画面板底部的段曲线">段曲线</button> <!-- v7.9.0：帧动画面板底部曲线显示开关，默认关闭 -->
       <button class="adv-toggle" data-toggle="cameraPreviewCheck"><i data-icon="videocamera"></i><span data-i18n="adv.preview">预览</span></button> <!-- 摄像机浮动预览窗口开关 -->
+      <button class="adv-toggle" data-toggle="objStripFloatCheck" data-i18n-title="adv.stripFloatTitle" title="把属性与 3D 面板的元件条移到可拖动浮窗"><i data-icon="layers"></i><span data-i18n="adv.stripFloat">元件浮条</span></button> <!-- 元件浮条独立窗口开关 -->
+      <button class="adv-toggle" data-toggle="customStripCheck" data-i18n-title="adv.customStripTitle" title="显示可自定义按钮的快捷浮条"><i data-icon="hamburger-button"></i><span data-i18n="adv.customStrip">自定义按键浮条</span></button> <!-- 自定义按键浮条开关 -->
       <button class="adv-toggle" data-toggle="gifTransparent" data-i18n="adv.transparent">透明底</button> <!-- 导出透明背景开关 -->
+      <button class="adv-toggle" data-toggle="s3ExportGrid" id="btnS3ExportGrid" title="3D 导出时包含地面网格" style="display:none;">地面网格</button> <!-- 阶段4：仅 3D 模式显示的导出网格开关 -->
       <button class="adv-toggle" data-toggle="gifHD3x" data-i18n="adv.hd3x">3x高清</button> <!-- 导出 3x 高清开关 -->
       <button class="adv-toggle" data-toggle="hd1080p">1080p</button> <!-- 导出 1080p 开关 -->
       <button class="adv-toggle" data-toggle="autoCollapseTimeline" title="开启后，点击控制面板时会自动收起动画面板" data-i18n="adv.autoCollapse" data-i18n-title="adv.autoCollapseTitle">自动收起</button> <!-- 自动收起时间轴开关 -->
@@ -1231,6 +1380,20 @@
   </div>
 </div> <!-- 画笔类型浮窗结束 -->
 
+<!-- 自定义按键浮条的选择弹窗：与使用说明同款，挂在 body 下 -->
+<div id="shortcutPickerFloat" class="help-float shortcut-picker-float" hidden>
+  <div class="help-float-head">
+    <strong data-i18n="shortcut.pickerTitle">选择快捷按键</strong>
+    <button id="shortcutPickerClose" class="help-float-close" type="button" aria-label="关闭" data-i18n-title="help.close"><i data-icon="close"></i></button>
+  </div>
+  <div class="help-float-body shortcut-picker-body" id="shortcutPickerBody"></div>
+  <div class="shortcut-picker-foot">
+    <span class="shortcut-picker-tip" data-i18n="shortcut.pickerTip">勾选后点击“完成”，这些按钮会作为快捷方式出现在自定义按键浮条里。</span>
+    <button type="button" id="shortcutPickerClear" class="btn-soft" data-i18n="shortcut.clear">清空</button>
+    <button type="button" id="shortcutPickerDone" class="btn-primary" data-i18n="shortcut.done">完成</button>
+  </div>
+</div> <!-- 快捷按键选择弹窗结束 -->
+
 <!-- 引入外部 JavaScript 脚本 -->
 <script src="./js/version.js"></script> <!-- 版本号单一来源，必须在 i18n 之前 -->
 <script src="./js/locales/zh-CN.js"></script> <!-- 引入中文语言包 -->
@@ -1249,6 +1412,7 @@
 <script src="./js/features/ease.js"></script>
 <script src="./js/features/theme.js"></script>
 <script src="./js/features/color-tools.js"></script>
+<script src="./js/vendor/three.min.js"></script> <!-- 阶段 2：本地 Three.js UMD 构建，3D 模式默认关闭时才使用 -->
 <script src="./js/vendor/mp4-muxer.js"></script> <!-- v7.4.6：MP4 封装库（MIT）—— 移动端没有 MediaRecorder(MP4) 时，用 WebCodecs 编码 + 这个库封装 -->
 <script src="./js/features/export.js"></script>
 
@@ -1260,7 +1424,10 @@
 <script src="./js/systems/camera.js"></script>
 <script src="./js/systems/headShapes.js"></script> <!-- 手绘头型数据 v6.4.0（由 tools/gen_head_shapes.js 生成） -->
 <script src="./js/systems/keyframes.js"></script> <!-- 关键帧数据层 v7.0.0（槽位身份 / 段 / 曲线挂在关键帧上） -->
+<script src="./js/systems/space3d-data.js"></script> <!-- 阶段 3：轻量 3D 数据默认值 / 通用插值 / 组局部坐标换算 -->
 <script src="./js/systems/group.js"></script> <!-- v7.9.0：编组系统（成员外层变换 + 点进组原样编辑） -->
+<script src="./js/systems/space3d.js"></script> <!-- 阶段 2：轻量 3D 独立模块，默认关闭，不参与 2D 路径 -->
+<script src="./js/systems/space3d-export.js"></script> <!-- 阶段 4：3D 导出适配层，仅导出入口前置分流 -->
 
 <script src="./js/platform.js"></script> <!-- 运行环境适配层：浏览器/桌面/移动端的文件保存差异 -->
 <script src="./js/features/track-strip.js"></script> <!-- v7.4.0：轨道模式（独立模块，只读 AppState.tracks，不改现有帧块逻辑） -->

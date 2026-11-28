@@ -1,14 +1,14 @@
 # SKFE 插件 API 参考
 
-> 适用版本：SKFE v7.9.0　│　核实日期：2026-11-22
+> 适用版本：SKFE v8.0.0　│　插件 API v2.1.0　│　核实日期：2026-11-28
 > 源码仓库：https://github.com/binvwvnid/SKFE-StickmanKeyframeEditor
 >
 > **这份文档给谁**：插件作者，以及被托付写插件的 AI。
 >
 > **这份文档的用法**：只讲"照着抄就能跑"的公开接口；内部设计背景与取舍不随仓库发布。
-> 这里所有签名、字段名、DOM id、事件名都逐条对着 SKFE v7.8.1 源码核实过，**没有一处是猜的**。
+> 这里所有签名、字段名、DOM id、事件名都逐条对着 SKFE v8.0.0 源码核实过，**没有一处是猜的**。
 >
-> **关于行号**：文中所有 `文件:行号` 基于 v7.8.0 快照，仅供快速定位；源码后续改动会让行号漂移。
+> **关于行号**：文中所有 `文件:行号` 基于 v8.0.0 快照，仅供快速定位；源码后续改动会让行号漂移。
 > 找不到时用**函数名 / 常量名 / DOM id / 事件名**搜索，不要依赖行号。
 >
 > **授权提醒**：SKFE 不是开源项目。只允许两种情况：① 获得作者明确授权后修改；② 按官方接口制作并私下分享插件。
@@ -62,12 +62,16 @@ window
 │   │   └── trackStrip      render, refresh, copyKeys, ...
 │   ├── systems
 │   │   ├── autosave        openAutoArchiveDB, saveToAutoArchive, ...
-│   │   ├── brush           setOn, getPresets, applyPresetById, ...
-│   │   ├── camera          makeCamera, getCameraViewTransform, ...
+│   │   ├── brush           setOn, setBrushType, getBrushConfig, setBucketMode, ...
+│   │   ├── camera          makeCamera, getCameraViewTransform, drawCameraViewMask, ...
 │   │   ├── distort         solveHomography, setEnabled, drawWarpedBitmap, ...
-│   │   ├── eraser          setOn, startStroke, hitObject, ...
+│   │   ├── eraser          setOn, startStroke, hitObject, cancelStroke, ...
+│   │   ├── group           createGroup, ungroup, enterGroup, exitGroup, ...
 │   │   ├── headShapes      get, list, path2d, draw, ...
 │   │   ├── keyframes       KEY, DERIVED, markKey, locate, interpolateObject, ...
+│   │   ├── space3d         setEnabled, setCameraMode, renderFrameToCanvas, ...
+│   │   ├── space3dData     camera2d / camera3d 默认值、归一化、编组坐标换算
+│   │   ├── space3dExport   isActive, renderFrameToCanvas, renderFrameToDataURL
 │   │   └── spatial         defaultLines, drawZVariedLimb, ...
 │   ├── platform            isNative, save, saveBlob, saveDataURL, ...
 │   ├── __skfe              ← 内部接口全量常驻（见第 2 节）
@@ -269,7 +273,7 @@ S.core.eventBus.EventBus.emit('need:render');
 > `disposeAudioClipSource` / `audioClipSources` / `collectAudioTimeline` 已全部暴露到 `__skfe`。
 > 更推荐直接用第 2.9 节的 `api.media.addAudio()`，它会创建媒体元素、加入轨道并按帧区间铺好段落。
 
-### 2.9 全开放 API `window.SKFE.api`（v2.0.0，MCP 插件首选）
+### 2.9 全开放 API `window.SKFE.api`（v2.1.0，MCP 插件首选）
 
 `js/plugins/api.js` 在 `app.js` 之后、`host.js` 之前加载，提供一个稳定、结构化、可 JSON 调用的全开放入口。
 **完全信任，没有沙箱**：`api.raw` 与主程序共享同一份 `window / document / SKFE / AppState` 引用。
@@ -299,12 +303,20 @@ new Function('SKFE', 'plugin', 'api', code)(SKFE, runtime, SKFE.api);
 | `api.history` | `undo / redo / save / run` |
 | `api.export` | PNG / JPG / GIF / SVG / MP4 / WebM / 工程 |
 | `api.render` | 底层绘制入口 |
+| `api.brush` | 画笔模式、画笔类型（default / blob / crayon）、配置、油漆桶、预设 |
+| `api.eraser` | 橡皮模式、笔迹控制、尺寸 / 直线模式、清除 |
+| `api.camera` | 2D 摄像机对象、取景框、遮罩、预览浮窗 |
+| `api.space3d` | 3D 模式开关、摄像机视角、3D 离屏渲染、Gizmo |
+| `api.space3dData` | camera2d / camera3d 默认值、工程归一化、对象级 3D 状态 |
+| `api.space3dExport` | 3D 导出分流、SVG 允许状态 |
+| `api.camera3d` | 3D 摄像机虚拟轨、逐帧求值、播放 / 导出应用 |
+| `api.canvas` | 画布边界、固定视图、导出尺寸 |
 | `api.mcp` | JSON-RPC 风格调用入口，见下 |
 
 #### 2.9.2 MCP / JSON-RPC 调用
 
 ```js
-// 列出全部 48 个稳定方法
+// 列出全部稳定方法
 api.mcp.methods();
 
 // 直接调用
@@ -365,6 +377,53 @@ const videoId = api.media.addVideo({
 ```
 
 `start / end` 是帧区间（含端点），不传则只创建轨道对象，由 `addObjectToFrames` 决定出场。
+
+#### 2.9.5 v8.0.0 新增接口
+
+API 版本从 `2.0.0` 升到 `2.1.0`，旧接口全部保留。新入口直接调用主程序同一份模块实例：
+
+| 路径 | 常用方法 |
+|---|---|
+| `api.brush` | `setOn/isOn`、`getType/setType/listTypes`、`getConfig/setConfig`、`setBucketMode/isBucketMode/toggleBucketMode`、`bucketFill/bucketFillAt`、`getPresets/applyPreset/deletePreset` |
+| `api.eraser` | `setOn/isOn`、`size/setSize`、`lineMode/setLineMode`、`startStroke/updateStroke/finishStroke/cancelStroke`、`clearFrame/clearAll` |
+| `api.camera` | `makeCamera/findCameraObject/getViewObject/getViewTransform`、`drawMask`、`getMaskAlpha/setMaskAlpha`、`updatePreview/fitViewToAvailableArea` |
+| `api.space3d` | `isEnabled/setEnabled`、`isCameraView`、`setCameraMode`、`alignViewToExportCamera`、`renderFrameToCanvas`、`setGizmoMode/getGizmoMode` |
+| `api.space3dData` | `getProjectState/setProjectState`、`setMode`、`ensureCamera2D/ensureCamera3D`、`readObjectState/ensureObjectState` |
+| `api.space3dExport` | `isActive`、`renderFrameToCanvas`、`renderFrameToDataURL`、`isSvgAllowed` |
+| `api.camera3d` | `trackId`、`getFrameAt`、`getObject`、`applyToState`、`syncFromState`、`fillFullLength`、`resetToDefault` |
+| `api.canvas` | `getViewPinned/setViewPinned/posLocked`、`setBoundsEnabled`、`getBounds`、`getExportSize` |
+
+画笔类型接口示例：
+
+```js
+const api = window.SKFE.api;
+
+api.brush.listTypes();        // ['default', 'blob', 'crayon']
+api.brush.getType();          // 当前类型
+api.brush.setType('blob');    // 切柳叶笔
+api.brush.setConfig({ type: 'crayon', size: 8, stabilize: 0.5 });
+api.brush.getConfig();        // 读取完整画笔配置
+```
+
+3D 摄像机逐帧接口示例：
+
+```js
+const api = window.SKFE.api;
+const frame3d = api.camera3d.getFrameAt(api.state.getFrameIndex());
+api.camera3d.applyToState(api.state.getFrameIndex());
+api.space3d.setEnabled(true);
+api.space3d.setCameraMode('camera');
+```
+
+MCP 也暴露了对应方法，例如：
+
+```js
+api.mcp.call('brush.type.set', { type: 'crayon' });
+api.mcp.call('brush.config.set', { patch: { size: 8, stabilize: 0.5 } });
+api.mcp.call('space3d.set', { on: true });
+api.mcp.call('camera3d.frame', { index: 12 });
+api.mcp.call('canvas.pin', { on: true });
+```
 
 ---
 

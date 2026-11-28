@@ -399,6 +399,34 @@ SKFE.systems.brush = (function () {
     }
   }
 
+  /* v8.0.0：画笔参数对外 API。类型与配置都能被插件/MCP 直接读写。 */
+  function cloneCfg() {
+    try { return JSON.parse(JSON.stringify(cfg)); }
+    catch (_) { return Object.assign({}, cfg); }
+  }
+  function listBrushTypes() { return ['default', 'blob', 'crayon']; }
+  function getBrushType() { return cfg.type; }
+  function getBrushConfig() { return cloneCfg(); }
+  function setBrushConfig(patch) {
+    const p = patch && typeof patch === 'object' ? patch : {};
+    if (p.type === 'start') p.type = 'crayon';
+    if (p.type === 'default' || p.type === 'blob' || p.type === 'crayon') {
+      if (p.type !== cfg.type && current) finishCurrentStroke();
+      cfg.type = p.type;
+    }
+    if (typeof p.color === 'string') cfg.color = p.color;
+    if (typeof p.borderColor === 'string') cfg.borderColor = p.borderColor;
+    if (Number.isFinite(p.borderWidth)) cfg.borderWidth = Math.max(0, Math.min(40, p.borderWidth));
+    if (typeof p.borderEnabled === 'boolean') cfg.borderEnabled = p.borderEnabled;
+    if (typeof p.outlineUnder === 'boolean') cfg.outlineUnder = p.outlineUnder;
+    if (Number.isFinite(p.size)) cfg.size = Math.max(1, Math.min(120, p.size));
+    if (Number.isFinite(p.stabilize)) cfg.stabilize = Math.max(0, Math.min(1, p.stabilize));
+    saveCfg();
+    applyCfgToPanel();
+    updateBrushCursorSize();
+    return cloneCfg();
+  }
+
   function currentPointWidth() {
     const base = widthAt();
     /* 柳叶笔的「芯粗细」当成有机块的半宽基准，默认 6 时直径约 12，更适合当填充块。
@@ -1443,6 +1471,9 @@ SKFE.systems.brush = (function () {
     on = !!on;
     if (on === bucketMode) return;
     if (on && brushOn) { finalize(); setOn(false); }
+    if (on && typeof D.eraserIsOn === 'function' && D.eraserIsOn() && typeof D.eraserSetOn === 'function') {
+      D.eraserSetOn(false);
+    }
     bucketMode = on;
     document.body.classList.toggle('bucket-mode', bucketMode);
     const btn = document.getElementById('btnBrushBucket');
@@ -2331,6 +2362,8 @@ SKFE.systems.brush = (function () {
     /* v7.9.2：油漆桶模式接管画布点击，点闭合区域即填充 */
     overlay.addEventListener('pointerdown', (e) => {
       if (!bucketMode || brushOn) return;
+      /* v7.9.5：第二根手指已经进入 onDown 的双指手势，不能再触发填充。 */
+      if (pointers.size > 1) return;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
@@ -2342,7 +2375,7 @@ SKFE.systems.brush = (function () {
     overlay.addEventListener('contextmenu', (e) => e.preventDefault());
     /* v6.2.0：绘制过程中也要能缩放画布（overlay 会挡住画布，滚轮得在这里转交） */
     overlay.addEventListener('wheel', (e) => {
-      if (!brushOn) return;
+      if (!brushOn && !bucketMode) return;
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.1 : 0.9;
       if (D.zoomViewAt && D.zoomViewAt(e.clientX, e.clientY, factor)) renderOverlay();
@@ -2358,7 +2391,9 @@ SKFE.systems.brush = (function () {
   }
 
   function onDown(e) {
-    if (!brushOn) return;
+    /* v7.9.5：油漆桶模式也要共用 overlay 的双指缩放 / 平移，
+       所以这里不再只允许 brushOn 通过。 */
+    if (!brushOn && !bucketMode) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.preventDefault();
 
@@ -2373,6 +2408,12 @@ SKFE.systems.brush = (function () {
       const arr = Array.from(pointers.values());
       pinchLastDist = Math.hypot(arr[0].x - arr[1].x, arr[0].y - arr[1].y);
       pinchLastMid = { x: (arr[0].x + arr[1].x) / 2, y: (arr[0].y + arr[1].y) / 2 };
+      try { overlay.setPointerCapture(e.pointerId); } catch (_) {}
+      return;
+    }
+
+    /* 油漆桶只认单指点击填充；第二指已经进入上面的手势分支，不再触发填充。 */
+    if (bucketMode) {
       try { overlay.setPointerCapture(e.pointerId); } catch (_) {}
       return;
     }
@@ -2426,7 +2467,8 @@ SKFE.systems.brush = (function () {
   }
 
   function onMove(e) {
-    if (!brushOn) return;
+    /* 油漆桶模式下同样要允许双指缩放 / 平移画布。 */
+    if (!brushOn && !bucketMode) return;
     if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     /* 双指：以两指中点为锚缩放，并把中点的位移当成拖动平移 —— 不落笔 */
@@ -2813,7 +2855,14 @@ SKFE.systems.brush = (function () {
     bucketFill,
     bucketFillAt,
     setBucketMode,
+    toggleBucketMode,
     isBucketMode: () => bucketMode,
+    /* v8.0.0：画笔类型 / 配置接口 */
+    setBrushType,
+    getBrushType,
+    listBrushTypes,
+    getBrushConfig,
+    setBrushConfig,
     isStrokeClosed,
     /* 预设 */
     getPresets: () => presets.map(p => ({ id: p.id, name: p.name, bindTo: p.bindTo, offX: p.offX, offY: p.offY })),

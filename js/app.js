@@ -30,6 +30,9 @@
      下限放小到 2%，上限放到 80 倍，基本等于不限制。 */
   const VIEW_SCALE_MIN = 0.02;
   const VIEW_SCALE_MAX = 80;
+  /* v7.9.6：2D 摄像机是真实元件轨；3D 摄像机是工程级虚拟轨，互不复用。 */
+  const CAMERA3D_TRACK_ID = '__camera3d__';
+  const CAMERA3D_TRACK_NAME = '3D 摄像机';
   const { EventBus } = SKFE.core.eventBus;
   const { darkenColor, hexToRgb, rgbToHex, lerpColor, themeHexToRgba, themeMixHex } = SKFE.core.colorUtils;
   const { along, norm, distToSeg, worldToFigureLocal } = SKFE.core.geometry;
@@ -112,6 +115,72 @@
   let canvasBaseBounds = null;
   let viewPinned = false;
   let pinnedView = null;
+  const VIEW_PIN_CACHE_KEY = 'skfe_view_pin_v1';
+
+  /* 画布固定状态（含固定时的视角）写本地缓存，刷新后恢复；不进工程数据。 */
+  function saveViewPinState() {
+    try {
+      localStorage.setItem(VIEW_PIN_CACHE_KEY, JSON.stringify({
+        viewPinned: !!viewPinned,
+        pinnedView: pinnedView ? {
+          offset: { x: Number(pinnedView.offset && pinnedView.offset.x) || 0, y: Number(pinnedView.offset && pinnedView.offset.y) || 0 },
+          scale: Number(pinnedView.scale) || 1
+        } : null
+      }));
+    } catch (_) {}
+  }
+  function loadViewPinState() {
+    try {
+      const raw = localStorage.getItem(VIEW_PIN_CACHE_KEY);
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      viewPinned = !!(d && d.viewPinned);
+      const p = d && d.pinnedView;
+      if (p && p.offset && Number.isFinite(p.scale) && p.scale > 0) {
+        pinnedView = {
+          offset: { x: Number(p.offset.x) || 0, y: Number(p.offset.y) || 0 },
+          scale: p.scale
+        };
+        if (viewPinned) {
+          AppState.viewOffset.x = pinnedView.offset.x;
+          AppState.viewOffset.y = pinnedView.offset.y;
+          AppState.viewScale = pinnedView.scale;
+        }
+      } else {
+        pinnedView = null;
+      }
+    } catch (_) {}
+  }
+
+  /* v8.0.0：固定视图 / 画布边界的插件入口。复用真实按钮逻辑，避免 UI 状态和数据状态分叉。 */
+  function getViewPinned() { return !!viewPinned; }
+  function setViewPinned(on) {
+    const next = !!on;
+    if (next === viewPinned) return viewPinned;
+    const btn = document.getElementById('btnPinView');
+    if (btn) {
+      btn.click();
+    } else {
+      viewPinned = next;
+      pinnedView = next ? { offset: { x: AppState.viewOffset.x, y: AppState.viewOffset.y }, scale: AppState.viewScale } : null;
+      saveViewPinState();
+      EventBus.emit('need:render');
+    }
+    return viewPinned;
+  }
+  function setCanvasBoundsEnabled(on) {
+    const next = !!on;
+    if (!!AppState.canvasBoundsEnabled === next) return AppState.canvasBoundsEnabled;
+    const btn = document.getElementById('btnToggleCanvasBounds');
+    if (btn) {
+      btn.click();
+    } else {
+      AppState.canvasBoundsEnabled = next;
+      EventBus.emit('need:syncUI');
+      EventBus.emit('need:render');
+    }
+    return AppState.canvasBoundsEnabled;
+  }
 
   let canvasMaskEnabled = false;
   let canvasMaskAlpha = 1.0;
@@ -202,6 +271,8 @@
   let anchorModeOn = false;
   let jointStretchOn = false; // 关节拉伸模式状态
   let isolatedJointName = null; // 当前被隔离/单独显示的关节名称
+  /* 四肢独立时，上方手臂/腿长滑条切换为相对倍率滑条（指针按下记录基准，松手回 0%）。 */
+  let limbMasterDrag = { arm: null, leg: null };
 
 
   /* ==================== 全局属性修改 ==================== */
@@ -490,7 +561,7 @@ function syncDistortToAllFrames(obj) {
     const id = String(obj.id);
     const total = Math.max(1, AppState.frames.length);
     let t = AppState.tracks[id];
-    if (!t) { t = { name: obj.name || ('camera' + id), frames: new Array(total).fill(null) }; AppState.tracks[id] = t; }
+    if (!t) { t = { name: obj.name || (obj.type === 'camera' ? '2D 摄像机' : id), frames: new Array(total).fill(null) }; AppState.tracks[id] = t; }
     while (t.frames.length < total) t.frames.push(null);
     for (let i = 0; i < total; i++) {
       if (i === AppState.currentFrameIndex && t.frames[i] && String(t.frames[i].id) === id) continue;
@@ -776,7 +847,16 @@ function syncDistortToAllFrames(obj) {
        缓存里 —— 不失效的话播放时只有「第一次改动的那条肢体」在动，
        后面改的肢体要等到这一帧才突然跳过去。 */
     if (KF.isKey(slot)) { bumpKfEval(); return false; }
-    const live = AppState.objects.find(o => o && o.type !== 'video' && String(o.id) === tid) || null;
+    /* 3D 摄像机虚拟轨不在 AppState.objects 里，单独取它的轨道求值结果。 */
+    let live = null;
+    if (isCamera3DTrackId(tid)) {
+      const camFrame = getCamera3DFrameAt(idx);
+      if (camFrame) {
+        try { live = JSON.parse(JSON.stringify(camFrame)); } catch (_) { live = Object.assign({}, camFrame); }
+      }
+    } else {
+      live = AppState.objects.find(o => o && o.type !== 'video' && String(o.id) === tid) || null;
+    }
     if (KF.isDerived(slot)) {                              /* ② */
       if (!live) return false;
       if (!poseChanged(tid, idx, live)) return false;      /* 没被改过：别平白加一颗菱形 */
@@ -1015,6 +1095,10 @@ function syncDistortToAllFrames(obj) {
     bumpKfEval();
     if (AppState.frames[AppState.currentFrameIndex]) delete AppState.frames[AppState.currentFrameIndex]._thumb;
     if (isSubTrackMode()) trackThumbCache.delete(AppState.activeTrackId + '|' + AppState.currentFrameIndex);
+    /* 摄像机也是元件：它的属性一改就同步到 3D 导出取景参数。 */
+    syncCameraElementToExportCamera();
+    /* 3D 摄像机使用独立虚拟轨，不写进 2D 摄像机元件。 */
+    syncCamera3DTrackFromState();
     SKFE.systems.autosave.scheduleAutoArchiveSave();
   }
 
@@ -1311,6 +1395,14 @@ function syncDistortToAllFrames(obj) {
       if (AppState.activeTrackId !== TRACK_ALL_ID && !AppState.tracks[AppState.activeTrackId]) AppState.activeTrackId = TRACK_ALL_ID;
       AppState.objects = getCombinedObjectsForRender();
       defaultFPS = data.defaultFPS || 12;
+      applySpace3dProjectState(data);
+      cameraView2DActive = false;
+      if (data.camera2d && typeof data.camera2d === 'object') {
+        camViewZoom = Number(data.camera2d.zoom) > 0 ? Number(data.camera2d.zoom) : 1;
+        const co = data.camera2d.offset || {};
+        camViewOffset = { x: Number(co.x) || 0, y: Number(co.y) || 0 };
+      }
+      syncCameraViewEntryUI();
       groundLineEnabled = data.groundLineEnabled || false;
       groundLineY = data.groundLineY !== undefined ? data.groundLineY : 400;
       onionEnabled = data.onionEnabled || false;
@@ -1555,13 +1647,25 @@ function syncDistortToAllFrames(obj) {
     reader.readAsText(file);
   }
 
+  function applySpace3dProjectState(data) {
+    if (!data || !window.SKFE || !SKFE.systems.space3d) return;
+    try { SKFE.systems.space3d.applyProjectState(data); } catch (_) {}
+  }
+
   function buildCurrentProjectData() {
+    syncCamera2DState();
+    const space3dState = (window.SKFE && window.SKFE.systems.space3d && SKFE.systems.space3d.getProjectState)
+      ? SKFE.systems.space3d.getProjectState()
+      : null;
     return {
       version: PROJECT_VERSION,
       minVersion: PROJECT_MIN_VERSION,
       frames: serializeFrames(),
       tracks: serializeTracks(),
       currentFrameIndex: AppState.currentFrameIndex, defaultFPS,
+      space3dMode: !!(space3dState && space3dState.space3dMode),
+      camera2d: space3dState ? space3dState.camera2d : null,
+      camera3d: space3dState ? space3dState.camera3d : null,
       groundLineEnabled, groundLineY,
       onionEnabled, onionBefore, onionAfter,
       canvasBounds: AppState.canvasBounds, canvasBoundsEnabled: AppState.canvasBoundsEnabled,
@@ -1603,19 +1707,24 @@ function syncDistortToAllFrames(obj) {
 
 
   function collectAutoArchiveData() {
+    syncCamera2DState();
     return {
       version: 2,
       timestamp: Date.now(),
       frames: serializeFrames(),
       tracks: serializeTracks(),
       currentFrameIndex: AppState.currentFrameIndex, uid, defaultFPS, viewOffset: AppState.viewOffset, viewScale: AppState.viewScale,
+      space3dMode: !!(window.SKFE && window.SKFE.systems.space3dData && SKFE.systems.space3dData.getProjectState().space3dMode),
+      camera2d: (window.SKFE && window.SKFE.systems.space3dData) ? SKFE.systems.space3dData.getProjectState().camera2d : null,
+      camera3d: (window.SKFE && window.SKFE.systems.space3dData) ? SKFE.systems.space3dData.getProjectState().camera3d : null,
       canvasBounds: AppState.canvasBounds, canvasBoundsEnabled: AppState.canvasBoundsEnabled, canvasBaseBounds,
       canvasMaskEnabled, canvasMaskAlpha,
       canvasMaskBgColor, canvasMaskGridColor, // 新增
       groundLineEnabled, groundLineY,
       gridEnabled, gridSize, pageBgColor,
       onionEnabled, onionBefore, onionAfter,
-      globalEditEnabled, frameThumbMode, multiSelectMode
+      globalEditEnabled, frameThumbMode, multiSelectMode,
+      viewPinned, pinnedView
     };
   }
 
@@ -1637,6 +1746,15 @@ function syncDistortToAllFrames(obj) {
         AppState.objects = getCombinedObjectsForRender();
         uid = data.uid || uid;
         defaultFPS = data.defaultFPS || 12;
+        applySpace3dProjectState(data);
+        /* 摄像机视角不随自动存档自动进入；只恢复 2D 取景缩放 / 偏移。 */
+        cameraView2DActive = false;
+        if (data.camera2d && typeof data.camera2d === 'object') {
+          camViewZoom = Number(data.camera2d.zoom) > 0 ? Number(data.camera2d.zoom) : 1;
+          const co = data.camera2d.offset || {};
+          camViewOffset = { x: Number(co.x) || 0, y: Number(co.y) || 0 };
+        }
+        syncCameraViewEntryUI();
         if (data.viewOffset) AppState.viewOffset = data.viewOffset;
         if (data.viewScale) AppState.viewScale = data.viewScale;
         if (data.canvasBounds) AppState.canvasBounds = data.canvasBounds;
@@ -1672,6 +1790,24 @@ function syncDistortToAllFrames(obj) {
           if (ftEl) ftEl.checked = frameThumbMode;
         }
         if (data.multiSelectMode !== undefined) multiSelectMode = !!data.multiSelectMode;
+        /* 画布固定状态与固定视角：自动存档里有就按存档恢复，没有则保留 localStorage 缓存值。 */
+        if (data.viewPinned !== undefined) viewPinned = !!data.viewPinned;
+        if (data.pinnedView && data.pinnedView.offset) {
+          pinnedView = {
+            offset: {
+              x: Number(data.pinnedView.offset.x) || 0,
+              y: Number(data.pinnedView.offset.y) || 0
+            },
+            scale: Number(data.pinnedView.scale) || AppState.viewScale
+          };
+          if (viewPinned) {
+            AppState.viewOffset.x = pinnedView.offset.x;
+            AppState.viewOffset.y = pinnedView.offset.y;
+            AppState.viewScale = pinnedView.scale;
+          }
+        }
+        syncPinViewBtn();
+        saveViewPinState();
         AppState.selected = null;
         AppState.canvasSelected = false;
         trackThumbCache.clear();
@@ -2829,6 +2965,8 @@ function importActionPresets() {
   } catch(_) {}
   let uiStartLeft = 0, uiStartTop = 0, uiStartWidth = 0;
   let uiPanelDragged = false;
+  /* 移动端未开自由缩放时，用顶部把手单独拖出的展开高度。 */
+  let uiHeightDragged = false;
   const uiDragHandle = document.getElementById('uiDragHandle');
 
   let isPanelLocked = false;
@@ -2851,11 +2989,7 @@ function importActionPresets() {
 
   uiDragHandle.addEventListener('pointerdown', (e) => {
     if (isPanelLocked) return;
-    /* v7.9.4-fix：手机端没开自由缩放时面板永远贴底，顶部手柄不再能把它拖走 */
-    if (isMobile && !uiResizable) {
-      e.preventDefault();
-      return;
-    }
+    /* 顶部把手常态可拖：未开自由缩放时只调整展开高度，面板仍贴底。 */
     e.preventDefault();
     uiDragMode = 'move';
     uiStartX = e.clientX; uiStartY = e.clientY;
@@ -2891,12 +3025,16 @@ function importActionPresets() {
       } else {
         const maxTop = window.innerHeight - bottomOffset - 50;
         const nt = Math.max(10, Math.min(maxTop, uiStartTop + dy));
+        const hh = Math.max(120, window.innerHeight - nt - bottomOffset);
         uiPanel.style.left = '0';
         uiPanel.style.right = '0';
         uiPanel.style.width = '100%';
         uiPanel.style.top = nt + 'px';
         uiPanel.style.bottom = bottomOffset + 'px'; // 精准贴底
-        uiPanel.style.maxHeight = Math.max(120, window.innerHeight - nt - bottomOffset) + 'px';
+        /* 未开自由缩放时，顶部把手只改展开高度：面板继续贴底，高度不再锁死 50vh。 */
+        uiPanel.style.height = hh + 'px';
+        uiPanel.style.maxHeight = hh + 'px';
+        uiHeightDragged = true;
       }
       uiPanelDragged = true;
     } else {
@@ -2944,16 +3082,29 @@ function importActionPresets() {
     uiPanel.classList.toggle('ui-resizable', uiResizable);
     
     if (!uiResizable) {
-      /* v7.9.4-fix：关闭自由缩放必须同时清掉「拖过」标记，
-         否则 resize() 会按旧 top 把面板重新算到半空。 */
-      uiPanelDragged = false;
-      uiPanel.style.width = '';
-      uiPanel.style.height = '';
-      uiPanel.style.maxHeight = '';
-      uiPanel.style.left = ''; 
-      uiPanel.style.right = ''; 
-      uiPanel.style.top = ''; 
-      uiPanel.style.bottom = ''; 
+      if (uiHeightDragged && isMobile) {
+        /* 顶部把手拖出的高度不锁回 50vh；面板仍贴底，只保留 top/height。 */
+        const topPx = parseFloat(uiPanel.style.top);
+        if (Number.isFinite(topPx)) {
+          const hh = Math.max(120, window.innerHeight - topPx);
+          uiPanel.style.left = '0';
+          uiPanel.style.right = '0';
+          uiPanel.style.width = '100%';
+          uiPanel.style.bottom = '0px';
+          uiPanel.style.height = hh + 'px';
+          uiPanel.style.maxHeight = hh + 'px';
+        }
+      } else {
+        /* 关闭自由缩放时清掉自由缩放留下的拖过标记，回到移动端默认贴底高度。 */
+        uiPanelDragged = false;
+        uiPanel.style.width = '';
+        uiPanel.style.height = '';
+        uiPanel.style.maxHeight = '';
+        uiPanel.style.left = '';
+        uiPanel.style.right = '';
+        uiPanel.style.top = '';
+        uiPanel.style.bottom = '';
+      }
       refreshTimelineDockOffsets();
       resize();
     } else if (uiCustomSize) {
@@ -3015,6 +3166,11 @@ function importActionPresets() {
         return;
       }
       uiResizable = !uiResizable;
+      if (!uiResizable) {
+        /* 从自由缩放切回普通贴底：清掉自由缩放的位置/高度，避免误当成把手拖出的高度。 */
+        uiPanelDragged = false;
+        uiHeightDragged = false;
+      }
               localStorage.setItem('skfe_ui_resizable', uiResizable ? '1' : '0'); // 保存状态到浏览器
               syncResizeUI();
             };
@@ -3091,6 +3247,8 @@ function importActionPresets() {
       e.preventDefault(); e.stopPropagation();
       uiCustomSize = null;
       uiCustomTop = null; /* v7.2.1：位置也一并复位，否则双击后还悬在半空 */
+      uiPanelDragged = false;
+      uiHeightDragged = false;
       localStorage.removeItem('skfe_ui_size_v1');
       localStorage.removeItem('skfe_ui_top_v1');
       uiPanel.style.width = '';
@@ -3892,6 +4050,11 @@ function importActionPresets() {
   /* v7.8.1：默认名 = 每种类型独立递增的纯数字（1、2、3…），按添加时间。
      不用 uid（插帧也会消耗 uid，会跳号）。 */
   function generateName(obj) {
+    /* 2D 摄像机是固定单例元件，默认名固定为「2D 摄像机」，不参与数字编号。 */
+    if (obj && obj.type === 'camera') {
+      obj.name = '2D 摄像机';
+      return;
+    }
     const key = nameTypeKey(obj && obj.type);
     const n = (nameSeqByType[key] || 0) + 1;
     nameSeqByType[key] = n;
@@ -3918,15 +4081,25 @@ function importActionPresets() {
       const n = (perType[key] || 0) + 1;
       perType[key] = n;
       nameSeqByType[key] = Math.max(nameSeqByType[key] || 0, n);
-      const nm = (typeof o.name === 'string') ? o.name.trim() : '';
-      if (!nm || DEFAULT_NAME_RE.test(nm) || /^\d+$/.test(nm)) {
-        const newName = String(n);
-        for (const tid in tracks) {
-          const frames = tracks[tid] && tracks[tid].frames;
-          if (!frames) continue;
-          frames.forEach(slot => { if (KF.isReal(slot) && slot.id === o.id) slot.name = newName; });
-        }
+    const nm = (typeof o.name === 'string') ? o.name.trim() : '';
+    /* 2D 摄像机默认名固定为「2D 摄像机」：老工程里的数字 / CameraN / camera 都归一化，
+       用户自己起的其它名字照旧保留。 */
+    if (o.type === 'camera' && (!nm || /^\d+$/.test(nm) || /^camera\d*$/i.test(nm))) {
+      for (const tid in tracks) {
+        const frames = tracks[tid] && tracks[tid].frames;
+        if (!frames) continue;
+        frames.forEach(slot => { if (KF.isReal(slot) && slot.id === o.id) slot.name = '2D 摄像机'; });
       }
+      return;
+    }
+    if (!nm || DEFAULT_NAME_RE.test(nm) || /^\d+$/.test(nm)) {
+      const newName = String(n);
+      for (const tid in tracks) {
+        const frames = tracks[tid] && tracks[tid].frames;
+        if (!frames) continue;
+        frames.forEach(slot => { if (KF.isReal(slot) && slot.id === o.id) slot.name = newName; });
+      }
+    }
     });
   }
 
@@ -8229,6 +8402,7 @@ function importActionPresets() {
   function getTrackObjectsAt(idx) {
     const list = [];
     for (const id in AppState.tracks) {
+      if (isCamera3DTrackId(id)) continue;
       const data = getTrackFrame(id, idx);
       if (data) list.push(data);
     }
@@ -8241,13 +8415,18 @@ function importActionPresets() {
     for (const id in AppState.tracks) {
       const data = getTrackFrame(id, idx);
       /* v6.1.0：轨道里理论上不该有参考视频；万一有（老项目文件），也不要重复加入 */
-      if (data && data !== videoObj) list.push(data);
+      /* 3D 摄像机是工程级虚拟轨，不参与 2D 画布对象列表与渲染。 */
+      if (data && data.type !== 'camera3d' && data !== videoObj) list.push(data);
     }
     return list;
   }
 
   function getObjectsForFrameAt(idx, trackId) {
     if (trackId != null && trackId !== TRACK_ALL_ID) {
+      if (isCamera3DTrackId(String(trackId))) {
+        const data3d = getTrackFrame(String(trackId), idx);
+        return data3d ? [data3d] : [];
+      }
       if (isCameraTrackId(String(trackId))) return getTrackObjectsAt(idx);
       const data = getTrackFrame(String(trackId), idx);
       return data ? [data] : [];
@@ -8669,6 +8848,8 @@ function importActionPresets() {
       }
     }
     renderCanvas(false);
+    /* 阶段 2：3D 默认关闭；关闭时这个调用是空操作，不影响原 2D 路径。 */
+    if (SKFE.systems.space3d && SKFE.systems.space3d.isEnabled()) SKFE.systems.space3d.renderFrame();
     updateLayerList();
     updateFrameBar();
     updateCoordDisplay();
@@ -8706,15 +8887,27 @@ function importActionPresets() {
     return (typeof o.layer === 'number') ? o.layer : 0;
   }
 
+  /* 是否处于 3D 界面：面板展开即算，不要求 3D 渲染模式已开启。
+     切换模式只由面板顶部开关控制，因此元件列表按“界面”过滤更准确。 */
+  function isIn3DUIPanel() {
+    /* 以当前展开的分区为准，hidden 属性和内部状态在切面板过程中可能还没同步刷新。 */
+    const sheet = document.getElementById('sheetSpace3d');
+    const tab = document.querySelector('#uiBottomBar .ui-tab[data-sheet="space3d"]');
+    return !!(sheet && !sheet.hidden) || !!(tab && tab.classList.contains('active')) || is3DModeActive();
+  }
+
   /* 当前帧、可参与排序的元件（参考视频不参与，和图层列表保持一致） */
   function getLayerUIObjects() {
     /* 元件列表严格跟随当前帧：直接从当前帧轨道槽取对象，不再依赖可能被其它流程重建过的 AppState.objects。 */
     const G = SKFE.systems.group;
     const editingGid = G ? G.getEditingGroupId() : null;
-    return getTrackObjectsAt(AppState.currentFrameIndex)
+    const in3D = isIn3DUIPanel();
+    const rows = getTrackObjectsAt(AppState.currentFrameIndex)
       .map((o, i) => ({ o, i }))
       .filter(x => {
         if (!x.o || x.o.type === 'video') return false;
+        /* 2D 摄像机元件只在 2D 界面出现；3D 界面只显示独立 3D 摄像机。 */
+        if (x.o.type === 'camera' && in3D) return false;
         const isGroup = !!(G && G.isGroup(x.o));
         const gid = x.o.groupId != null ? String(x.o.groupId) : null;
         /* 进组：只显示这一组的成员原样；组外：只显示组载体，成员不外露 */
@@ -8723,6 +8916,14 @@ function importActionPresets() {
       })
       .sort((a, b) => layerSortVal(b.o) - layerSortVal(a.o) || a.i - b.i)
       .map(x => x.o);
+
+    /* 3D 摄像机不是画布元件，但在 3D 界面必须出现在元件列表里，
+       否则无法选中它、也无法落关键帧。 */
+    if (in3D) {
+      const cam3d = getCamera3DObject();
+      if (cam3d && cam3d.type === 'camera3d') rows.unshift(cam3d);
+    }
+    return rows;
   }
 
   /* 元件类型 → 图标 id（原来是 emoji，现在是 SVG，统一交给 ic() 渲染） */
@@ -8735,7 +8936,7 @@ function importActionPresets() {
     if (o.type === 'shape') return 'square';
     if (o.type === 'bubble') return 'comment-one';
     if (o.type === 'ink') return 'pencil';
-    if (o.type === 'camera') return 'videocamera';
+    if (o.type === 'camera' || o.type === 'camera3d') return 'videocamera';
     if (o.type === 'group') return 'group';
     return 'help';
   }
@@ -8748,7 +8949,7 @@ function importActionPresets() {
     let url = null;
     try {
       const off = renderFrameToDataURL(AppState.currentFrameIndex, 96, 96, {
-        transparent: true, ignoreCamera: true, onlyId: o.id, includeHidden: true, noRotate: true
+        force2D: true, transparent: true, ignoreCamera: true, onlyId: o.id, includeHidden: true, noRotate: true
       });
       url = off.toDataURL('image/png');
     } catch (_) { url = null; }
@@ -8888,9 +9089,12 @@ function importActionPresets() {
     if (layerPopCountEl) layerPopCountEl.textContent = list.length + tr2('layerPop.countSuffix', ' 个');
     layerPopListEl.innerHTML = '';
     list.forEach((o) => {
+      const isCam3D = o.type === 'camera3d';
+      const isActive = (o === AppState.selected) ||
+        (isCam3D && AppState.selected && String(AppState.selected.id) === String(o.id));
       const item = document.createElement('div');
       item.className = 'lp-item'
-        + (o === AppState.selected ? ' active' : '')
+        + (isActive ? ' active' : '')
         + (o.hidden ? ' hidden-obj' : '');
       item.dataset.id = String(o.id);
 
@@ -8914,6 +9118,8 @@ function importActionPresets() {
       const rail = document.createElement('div');
       rail.className = 'lp-rail';
 
+      /* 3D 摄像机是单例虚拟轨，不提供显隐 / 锁定 / 删除 / 拖拽排序，只保留选中入口。 */
+      if (!isCam3D) {
       const eye = document.createElement('button');
       eye.type = 'button';
       eye.className = 'lp-eye' + (o.hidden ? ' on' : '');
@@ -8967,6 +9173,7 @@ function importActionPresets() {
       handle.title = tr2('layerPop.dragTip', tr2('layerPop.dragTip', '拖动排序，按当前帧图层顺序写入（全局属性开启时同步所有帧）'));
       attachLayerDragHandle(handle, o, item);
       rail.appendChild(handle);
+      }
 
       item.appendChild(rail);
 
@@ -8981,6 +9188,8 @@ function importActionPresets() {
         if (e.target.closest('.lp-eye') || e.target.closest('.lp-drag') || e.target.closest('.lp-lock') || e.target.closest('.lp-del')) return;
         const additive = !!(groupMultiSelectOn || e.ctrlKey || e.metaKey);
         if (additive) {
+          /* 3D 摄像机是虚拟轨单例，不参与多选 / 编组。 */
+          if (String(o.id) === CAMERA3D_TRACK_ID) return;
           const id = String(o.id);
           if (multiSelectedIds.has(id)) multiSelectedIds.delete(id);
           else multiSelectedIds.add(id);
@@ -8989,6 +9198,8 @@ function importActionPresets() {
         }
         multiSelectedIds.clear();
         select(o);
+        /* 3D 摄像机不是画布元件，点它应直接切到摄像机参数页并允许 K 帧。 */
+        if (isCam3D && isIn3DUIPanel()) set3DPanelMode('camera', false);
         EventBus.emit('need:render');
         renderLayerPop();
       });
@@ -9211,19 +9422,25 @@ function importActionPresets() {
     /* v7.9.0：组外只显示组载体；点进组后只显示该组成员（原样），外部元件与载体都不显示 */
     const G = SKFE.systems.group;
     const editingGid = G ? G.getEditingGroupId() : null;
-    let listSource = AppState.objects;
-    if (editingGid && G) {
+    const in3D = isIn3DUIPanel();
+    /* 3D 界面与纵向元件列表共用同一数据源，避免虚拟轨只补到一边。 */
+    let listSource = in3D ? getLayerUIObjects() : AppState.objects;
+    if (!in3D && editingGid && G) {
       const memberIds = new Set(G.membersOf(editingGid).map(m => String(m.id)));
       listSource = AppState.objects.filter(o => memberIds.has(String(o && o.id)));
-    } else {
+    } else if (!in3D) {
       listSource = AppState.objects.filter(o => {
         if (!o) return false;
         if (G && G.isGroup(o)) return true;
         return o.groupId == null;
       });
     }
-    /* v7.8.1：按添加时间（id/uid 升序）排列，序号就是 name；不再按 layer 高低倒排 */
-    const sorted = [...listSource].sort((a, b) => (a.id || 0) - (b.id || 0));
+    /* v7.8.1：按添加时间（id/uid 升序）排列，序号就是 name；3D 摄像机固定排最前。 */
+    const sorted = [...listSource].sort((a, b) => {
+      if (a && a.type === 'camera3d') return -1;
+      if (b && b.type === 'camera3d') return 1;
+      return (a.id || 0) - (b.id || 0);
+    });
     sorted.forEach(o => {
       /* v6.1.0：参考视频在 AppState.objects 里也会出现一份（渲染合并视图需要它），
          但列表顶部已经单独渲染了 🎥 那一行。这里必须跳过，否则会多出一个
@@ -9231,9 +9448,13 @@ function importActionPresets() {
       if (o.type === 'video' || o === videoObj) return;
       /* v7.8.1：音频元件不进元件列表，只在轨道模式里出现并置底 */
       if (o.type === 'audioClip') return;
+      /* 3D 界面只认独立 3D 摄像机，2D 摄像机不出现在横向条里。 */
+      if (in3D && o.type === 'camera') return;
       if (o.locked === undefined) o.locked = false;
       const btn = document.createElement('div');
-      btn.className = 'layer-btn' + (o === AppState.selected ? ' active' : '') + (o.locked ? ' locked' : '');
+      const isActive = (o === AppState.selected) ||
+        (o.type === 'camera3d' && AppState.selected && String(AppState.selected.id) === String(o.id));
+      btn.className = 'layer-btn' + (isActive ? ' active' : '') + (o.locked ? ' locked' : '');
       let icon = 'help';
       if (o.type === 'figure') icon = 'stickman';
       else if (o.type === 'acc') icon = 'add-picture';
@@ -9242,18 +9463,24 @@ function importActionPresets() {
       else if (o.type === 'shape') icon = 'square';
       else if (o.type === 'bubble') icon = 'comment-one';
       else if (o.type === 'ink') icon = 'pencil'; // brush-v5.1.0: §6.3.9
-      else if (o.type === 'camera') icon = 'videocamera';
+      else if (o.type === 'camera' || o.type === 'camera3d') icon = 'videocamera';
       else if (o.type === 'group') icon = 'group'; /* v7.9.0：编组载体 */
       else if (o.type === 'video') icon = 'video'; /* 兜底：万一别处把视频带进来，也不要显示问号 */
       btn.setAttribute('data-obj-id', String(o.id));
       btn.innerHTML = `<span>${ic(icon)}</span>`;
       attachLayerName(btn, o);
       if (o.hidden) { btn.classList.add('hidden-obj'); btn.title = (o.name || '') + tr2('layerPop.hiddenTag', '（已隐藏）'); }
-      btn.onclick = () => { select(o); EventBus.emit('need:render'); };
+      btn.onclick = () => {
+        select(o);
+        /* 点横向条里的 3D 摄像机，和点纵向列表一样切到摄像机参数页。 */
+        if (o.type === 'camera3d' && isIn3DUIPanel()) set3DPanelMode('camera', false);
+        EventBus.emit('need:render');
+      };
       layerListEl.appendChild(btn);
     });
 
-    if (AppState.selected && btnToggleLock) {
+    /* 3D 摄像机是虚拟轨单例，没有锁定语义，隐藏横向条右端锁定按钮。 */
+    if (AppState.selected && AppState.selected.type !== 'camera3d' && btnToggleLock) {
       btnToggleLock.style.display = 'inline-flex';
       if (AppState.selected.locked) {
         btnToggleLock.innerHTML = ic('unlock');   /* 只留图标，文字走 title / aria-label */
@@ -9425,8 +9652,13 @@ function importActionPresets() {
   }
 
   function getTrackFrame(trackId, idx) {
+    const t = AppState.tracks[trackId];
     const slot = getTrackSlot(trackId, idx);
-    if (!KF.isDerived(slot)) return slot || null;
+    /* 摄像机轨贯通全片：即使中间槽位仍是普通帧，只要落在两颗关键帧之间，
+       也按派生帧求值。这样“两关键帧自动补帧”不依赖 reconcile 是否跑过。 */
+    const cameraSegment = !!(t && t.frames && isCameraTrackId(trackId) &&
+      KF.locate(t.frames, idx).kind === 'derived');
+    if (!KF.isDerived(slot) && !cameraSegment) return slot || null;
     return evaluateDerived(trackId, idx);
   }
 
@@ -9516,7 +9748,10 @@ function importActionPresets() {
   }
 
   function collectTrackEntries() {
-    return Object.keys(AppState.tracks).map(id => ({ id, name: AppState.tracks[id].name || id }));
+    /* v7.9.5：摄像机轨不进时间轴下拉列表，避免从下拉框进入摄像机视角。 */
+    return Object.keys(AppState.tracks)
+      .filter(id => !isCameraTrackId(id))
+      .map(id => ({ id, name: AppState.tracks[id].name || id }));
   }
 
   function updateOtherTracksVisibilityUI() {
@@ -9535,8 +9770,11 @@ function importActionPresets() {
     if (!sel) return;
     const entries = collectTrackEntries();
     const sig = entries.map(e => e.id + '\u0001' + e.name).join('\u0002');
-    const exists = entries.some(e => e.id === AppState.activeTrackId);
-    if (AppState.activeTrackId !== TRACK_ALL_ID && !exists) {
+    /* 摄像机视角由右上角按钮显式控制：2D / 3D 摄像机轨都不进下拉列表，但不能被这里复位。 */
+    const camSelected = !!(AppState.selected && (AppState.selected.type === 'camera' || AppState.selected.type === 'camera3d'));
+    const camTrackKept = !!((isCameraViewActiveNow() || camSelected) && isCameraTrackId(AppState.activeTrackId));
+    const exists = camTrackKept || entries.some(e => e.id === AppState.activeTrackId);
+    if (!camTrackKept && AppState.activeTrackId !== TRACK_ALL_ID && !exists) {
       AppState.activeTrackId = TRACK_ALL_ID;
       if (AppState.selected && !AppState.objects.includes(AppState.selected)) AppState.selected = null;
     }
@@ -9555,9 +9793,11 @@ function importActionPresets() {
         sel.appendChild(opt);
       });
     }
-    sel.value = exists ? AppState.activeTrackId : TRACK_ALL_ID;
-    sel.classList.toggle('sub-track-active', isSubTrackMode());
+    /* 摄像机视角时下拉框显示全局轨，但内部 activeTrackId 仍指向摄像机轨。 */
+    sel.value = camTrackKept ? TRACK_ALL_ID : (exists ? AppState.activeTrackId : TRACK_ALL_ID);
+    sel.classList.toggle('sub-track-active', isSubTrackMode() && !camTrackKept);
     updateOtherTracksVisibilityUI();
+    syncCameraViewEntryUI();
   }
 
   function syncSubTrackSelection() {
@@ -9579,10 +9819,16 @@ function importActionPresets() {
   }
 
   function setActiveTrack(id) {
+    /* 时间轴下拉框不再接受摄像机轨；摄像机视角只能由右上角浮窗按钮切换。 */
+    if (isCameraTrackId(id)) {
+      refreshSubTrackOptions();
+      return;
+    }
     AppState.activeTrackId = (id == null) ? TRACK_ALL_ID : String(id);
     /* 切换轨道时重置摄像机视角的缩放/偏移 */
     camViewZoom = 1;
     camViewOffset = { x: 0, y: 0 };
+    syncCamera2DState();
     refreshSubTrackOptions();
     AppState.canvasSelected = false;
     drag = null;
@@ -9662,6 +9908,8 @@ function importActionPresets() {
   function syncFrameRef() {
     const idx = AppState.currentFrameIndex;
     if (isSubTrackMode()) {
+      /* 3D 摄像机虚拟轨不进 AppState.objects，不能按「本帧不在场」写回或清空。 */
+      if (isCamera3DTrackId(AppState.activeTrackId)) return;
       const t = AppState.tracks[AppState.activeTrackId];
       if (!t) return;
       if (!t.frames) t.frames = [];
@@ -9694,6 +9942,8 @@ function importActionPresets() {
     }
     for (const id in AppState.tracks) {
       if (present.has(id)) continue;
+      /* 3D 摄像机虚拟轨永远视为在场，不能被本帧清理逻辑抹掉。 */
+      if (isCamera3DTrackId(id)) continue;
       const arr = AppState.tracks[id].frames;
       if (!arr || idx >= arr.length) continue;
       if (KF.isDerived(arr[idx])) continue;        /* 派生槽位不能被抹成空白 */
@@ -9721,6 +9971,8 @@ function importActionPresets() {
     }
     drag = null; isPanning = false; AppState.canvasSelected = false;
     cancelTransformBoxDrag(); anchorModeOn = false;
+    applyCamera3DFrameToState(i);
+    syncCameraElementToExportCamera();
     seekVideoToFrame(AppState.currentFrameIndex);
     updateTweenEaseLabel();   /* v7.4.5：跨进/跨出段时，标签栏的曲线跟着换 */
     EventBus.emit('need:render'); EventBus.emit('need:syncUI');
@@ -9795,7 +10047,7 @@ function importActionPresets() {
     try {
       const cv = getThumbCanvas();
       renderFrameToDataURL(task.fr, THUMB_SIZE, THUMB_SIZE,
-        { transparent: true, ignoreCamera: !!task.ignoreCamera },
+        { force2D: true, transparent: true, ignoreCamera: !!task.ignoreCamera },
         task.isSub ? task.trackId : undefined, cv);
       const finish = (u) => {
         if (u && (task.v !== thumbVersion || thumbTokenOf(task.key) !== task.token)) {
@@ -10781,6 +11033,8 @@ function importActionPresets() {
   function play() {
     if (isPlaying || AppState.frames.length < 2) return;
     syncFrameRef();
+    /* 播放起点也按 3D 摄像机虚拟轨求值，避免停在旧机位。 */
+    applyCamera3DFrameToState(AppState.currentFrameIndex);
     isPlaying = true;
     AppState.selected = null; drag = null; AppState.canvasSelected = false;
     cancelTransformBoxDrag(); anchorModeOn = false;
@@ -10853,6 +11107,8 @@ function importActionPresets() {
     if (changed) {
       AppState.objects = getCombinedObjectsForRenderAt(st.idx);
       AppState.currentFrameIndex = st.idx;
+      /* 3D 摄像机也跟其他元件一样逐帧求值，否则播放时机位会停在起点。 */
+      applyCamera3DFrameToState(st.idx);
       if (!refVideoPlaying) seekVideoToFrame(AppState.currentFrameIndex);
       /* v7.7.6：帧推进时同步视频元件——段落外停音，段落内按段内时间继续。 */
       if (videoClipSources.size) playVideoClips(st.idx);
@@ -11888,6 +12144,12 @@ function importActionPresets() {
         if (o1.img) obj.img = o1.img;
         if (obj.ax === undefined) obj.ax = 0;
         if (obj.ay === undefined) obj.ay = 0;
+        /* 旧批量补间与派生帧共用 3D 数据层插值，避免两种补间结果不一致。 */
+        if (window.SKFE && window.SKFE.systems.space3dData && SKFE.systems.space3dData.interpolateInto) {
+          try {
+            SKFE.systems.space3dData.interpolateInto(obj, o1, o2, (part) => partProgress(o1.id, part, tt));
+          } catch (_) {}
+        }
 
         if (obj.type === 'figure') {
           obj.x = lerp(o1.x, o2.x, partProgress(o1.id, 'x', tt));
@@ -12194,6 +12456,7 @@ function importActionPresets() {
     shouldSkipCameraForExport,
     getPageBgColor: () => pageBgColor,
     getDefaultFPS: () => defaultFPS,
+    getCamera3DFrame: (i) => getCamera3DFrameAt(i),
     getCtx: () => ctx,
     setCtx: (c) => { ctx = c; },
     renderScene,
@@ -12423,6 +12686,7 @@ function importActionPresets() {
   function pruneEmptyTracks() {
     let removed = 0;
     for (const tid in AppState.tracks) {
+      if (String(tid) === CAMERA3D_TRACK_ID) continue;
       const t = AppState.tracks[tid];
       if (!t || !t.frames) { delete AppState.tracks[tid]; removed++; continue; }
       if (!t.frames.some(d => d != null)) {
@@ -12442,6 +12706,7 @@ function importActionPresets() {
   function trimTrailingEmptyFrames() {
     /* 每条 track 从尾部弹出连续空白帧，至少保留 1 帧 */
     for (const id in AppState.tracks) {
+      if (String(id) === CAMERA3D_TRACK_ID) continue;
       const t = AppState.tracks[id];
       if (!t || !t.frames) continue;
       while (t.frames.length > 1 && t.frames[t.frames.length - 1] == null) t.frames.pop();
@@ -12505,6 +12770,46 @@ function importActionPresets() {
     return !sameObjectData(cur, live);
   }
 
+  /* v7.9.6：2D 摄像机元件与 3D 摄像机参数完全独立。
+     2D 摄像机只负责 2D 取景；3D 导出相机只读 camera3d / 3D 摄像机虚拟轨。 */
+  function syncCameraElementToExportCamera() {
+    return;
+  }
+
+  /* 摄像机关键帧作用域：自由视角 / 摄像机视角都能落帧。
+     2D 看显式 2D 视角、选中 2D 摄像机或当前活动轨是摄像机轨；
+     3D 额外认摄像机参数面板（s3PanelMode === 'camera'）与 3D 摄像机虚拟轨。 */
+  function isCameraKeyframeScope() {
+    const S3 = window.SKFE && SKFE.systems && SKFE.systems.space3d;
+    const in3D = !!(S3 && typeof S3.isEnabled === 'function' && S3.isEnabled());
+    const camSelected = !!(AppState.selected && ['camera', 'camera3d'].indexOf(AppState.selected.type) !== -1);
+    if (in3D) {
+      const inCamView = typeof S3.isCameraView === 'function' && S3.isCameraView();
+      return !!(inCamView || camSelected || s3PanelMode === 'camera' || isCameraTrackId(AppState.activeTrackId));
+    }
+    return !!(cameraView2DActive || camSelected || isCameraTrackId(AppState.activeTrackId));
+  }
+
+  /* 3D 摄像机视角下点「关键帧」，目标必须是摄像机元件本身。
+     摄像机也是元件：若工程里还没有摄像机，先补一个默认摄像机再落帧。 */
+  function cameraViewKeyframeTarget() {
+    const S3 = window.SKFE && SKFE.systems.space3d;
+    const in3D = !!(S3 && typeof S3.isEnabled === 'function' && S3.isEnabled());
+    if (!isCameraKeyframeScope()) return null;
+    /* 3D 模式只落在独立的 3D 摄像机虚拟轨，绝不借用 2D 摄像机元件。 */
+    if (in3D) {
+      ensureCamera3DTrack();
+      return getCamera3DObject();
+    }
+    let cam = getCurrentCameraObject();
+    if (!cam) {
+      const addBtn = document.getElementById('btnCamera');
+      if (addBtn) addBtn.click();
+      cam = getCurrentCameraObject();
+    }
+    return cam || null;
+  }
+
   /* R1 / R6 / D9 / D10：点击当前帧设为 / 取消关键帧。
      子轨作用域 = 只锁该元件（origin='sub'）；
      主轨作用域 = 广播，规则是「保留手动、只补变了参数的」：
@@ -12516,9 +12821,18 @@ function importActionPresets() {
     const idx = AppState.currentFrameIndex;
     if (isPlaying) pause();
     syncFrameRef();
+    /* 摄像机视角的 K 键 / 关键帧按钮落在摄像机轨上，避免“没反应”。 */
+    const camTarget = cameraViewKeyframeTarget();
+    if (camTarget) {
+      AppState.activeTrackId = String(camTarget.id);
+      refreshSubTrackOptions();
+    }
     const sub = isSubTrackMode();
     const ids = currentScopeTrackIds();
-    const liveOf = (id) => AppState.objects.find(o => o && o.type !== 'video' && String(o.id) === String(id)) || null;
+    const liveOf = (id) => {
+      if (isCamera3DTrackId(id)) return makeCamera3DFrame();
+      return AppState.objects.find(o => o && o.type !== 'video' && String(o.id) === String(id)) || null;
+    };
 
     /* 子轨：单件开关，保持旧语义 */
     if (sub) {
@@ -12649,6 +12963,13 @@ function importActionPresets() {
   function syncTweenButtonLabel() {
     const btn = document.getElementById('btnTween');
     if (!btn) return;
+    /* 摄像机轨自动铺满全片，只靠关键帧 + 曲线补间；插 N 帧 / 切割补帧都不允许。 */
+    btn.disabled = isCameraKeyframeScope();
+    btn.removeAttribute('data-i18n-title');
+    if (btn.disabled) {
+      btn.title = tr2('track.cameraNoTween', '摄像机轨道自动铺满，不能插入帧；请只调整关键帧曲线。');
+      return;
+    }
     const span = btn.querySelector('[data-i18n="timeline.insertFrames"],[data-i18n="timeline.tweenFrames"]');
     if (!span) return;
     const idx = AppState.currentFrameIndex;
@@ -12689,6 +13010,15 @@ function importActionPresets() {
         if (segmentAhead(t.frames, idx)) {
           /* 这条轨道后面还有关键帧 → 继续插派生帧，别把它的插值烘死成静态画面 */
           t.frames.splice(insertPos, 0, KF.DERIVED_SLOT);
+        } else if (isCamera3DTrackId(id)) {
+          /* 3D 摄像机是工程级虚拟轨，不会出现在 frames[i].objects 里。
+             段外补间若从 nf.objects 取源帧会得到 null，补完这条轨就断了。 */
+          const src = (t.frames[idx] && t.frames[idx].type === 'camera3d')
+            ? t.frames[idx] : makeCamera3DFrame();
+          const c = cloneObjectKeepImg(src);
+          c.id = src.id;
+          /* stripFrameMarks 会剥掉 __k / __d，补出来的帧是普通帧，不是关键帧 */
+          t.frames.splice(insertPos, 0, KF.stripFrameMarks(c));
         } else {
           const src = nf.objects ? (nf.objects.find(o => String(o.id) === id) || null) : null;
           /* stripFrameMarks 会剥掉 __k / __d，补出来的帧是普通帧，不是关键帧 */
@@ -12764,6 +13094,10 @@ function importActionPresets() {
   if (btnKeyframe) btnKeyframe.onclick = () => toggleKeyframeAtCurrent();
 
   document.getElementById('btnTween').onclick = () => {
+    if (isCameraKeyframeScope()) {
+      showHistoryToast(tr2('track.cameraNoTween', '摄像机轨道自动铺满，不能插入帧；请只调整关键帧曲线。'), undefined, 1900);
+      return;
+    }
     const count = parseInt(document.getElementById('tweenCount').value) || 5;
     if (count < 1 || count > 60) { alert(tr2('alert.insertCount', '插入帧数需在 1-60 之间')); return; }
     insertFramesInSegment(count);
@@ -12913,13 +13247,26 @@ function importActionPresets() {
   function getExportSize() {
     const el = document.getElementById('hd1080p');
     const is1080 = !!(el && el.checked);
-    const cam = shouldSkipCameraForExport() ? null : (getCurrentCameraObject() || getCameraAtFrame(0));
-    let base = 400;
-    if (is1080) base = 1920;
-    else {
-      const is3x = document.getElementById('gifHD3x').checked;
-      base = is3x ? 1200 : 400;
+    const hd3xEl = document.getElementById('gifHD3x');
+    const is3x = !!(hd3xEl && hd3xEl.checked);
+    const base = is1080 ? 1920 : (is3x ? 1200 : 400);
+
+    /* 3D 模式：GIF / PNG 序列必须按 3D 摄像机宽高比导出。
+       这里不能读 2D 摄像机：3D 模式下 getCurrentCameraObject() 会跳过 2D 相机，
+       旧逻辑拿不到 cam.w/h，就直接退回固定正方形。 */
+    const S3X = window.SKFE && window.SKFE.systems && SKFE.systems.space3dExport;
+    if (S3X && typeof S3X.isActive === 'function' && S3X.isActive()) {
+      const cam3 = getCamera3DFrameAt(0) || getCamera3DObject();
+      const cw = Math.max(1, Number(cam3 && cam3.width) || 1920);
+      const ch = Math.max(1, Number(cam3 && cam3.height) || 1080);
+      const a = cw / ch;
+      let w = base, h = base;
+      if (a >= 1) { w = base; h = Math.round(base / a); }
+      else { h = base; w = Math.round(base * a); }
+      return { w: Math.max(2, w - (w % 2)), h: Math.max(2, h - (h % 2)) };
     }
+
+    const cam = shouldSkipCameraForExport() ? null : (getCurrentCameraObject() || getCameraAtFrame(0));
     let w = base, h = base;
     if (cam && cam.w > 0 && cam.h > 0) {
       const a = cam.w / cam.h;
@@ -13064,6 +13411,26 @@ function importActionPresets() {
   /* perf-v7.5.1: 末参 outCanvas 可选 —— 复用同一张离屏画布，避免每帧分配 canvas */
   function renderFrameToDataURL(frame, outW, outH, options, trackId, outCanvas) {
     options = options || {};
+
+    /* 阶段 4：3D 模式下只在这里前置分流；PNG / JPG / GIF / 序列帧仍沿用原编码器。
+       force2D 用于 UI 缩略图：缩略图若走 3D 会临时把 WebGL renderer 改成 96×96 再恢复，
+       调关节时每改一次就重建一次 drawing buffer，表现为 3D 视口闪一下。 */
+    const S3X = window.SKFE && window.SKFE.systems.space3dExport;
+    if (!options.force2D && S3X && typeof S3X.isActive === 'function' && S3X.isActive()) {
+      const s3Idx = (typeof frame === 'number') ? frame : AppState.frames.indexOf(frame);
+      const s3Options = Object.assign({}, options, {
+        bgColor: pageBgColor,
+        showGrid: s3ExportGridEnabled(),
+        /* GIF / PNG 序列也要逐帧读 3D 摄像机虚拟轨，否则镜头关键帧不会进导出。 */
+        camera3dFrame: getCamera3DFrameAt(s3Idx >= 0 ? s3Idx : AppState.currentFrameIndex)
+      });
+      const s3Canvas = S3X.renderFrameToDataURL(
+        s3Idx >= 0 ? s3Idx : AppState.currentFrameIndex,
+        outW, outH, s3Options, trackId, outCanvas
+      );
+      if (s3Canvas) return s3Canvas;
+    }
+
     const transparent = !!options.transparent;
     const idx = (typeof frame === 'number') ? frame : AppState.frames.indexOf(frame);
     const safeIdx = idx >= 0 ? idx : AppState.currentFrameIndex;
@@ -13146,7 +13513,9 @@ function importActionPresets() {
   let maskEditMode = false;
 
   function updateStickyHeaderHeight() {
-    const sh = document.querySelector('.sticky-header');
+    let sh = document.querySelector('.sticky-header');
+    /* 独立浮窗里的元件条不属于控制面板，不能参与面板吸顶偏移计算。 */
+    if (sh && sh.closest('#objStripFloat')) sh = null;
     if (!uiPanel) return;
     /* v7.0.5：元件列表搬到「元件」分区后会处于隐藏状态，隐藏时 offsetHeight 是 0，
        但 offsetParent 也会是 null —— 用它区分"隐藏"和"真的没高度"，避免把 0 写进变量。 */
@@ -13269,6 +13638,8 @@ function importActionPresets() {
         }
       }
       if (mp4BgColorInput && !mp4BgColorInput.dataset.manual) mp4BgColorInput.value = pageBgColor;
+      /* 阶段 2：3D 不提供独立颜色控件，直接跟随 SKFE 当前主题。 */
+      if (SKFE.systems.space3d && SKFE.systems.space3d.applyTheme) SKFE.systems.space3d.applyTheme(cfg);
 
       EventBus.emit('need:render');
     },
@@ -13499,8 +13870,9 @@ function importActionPresets() {
       else if (target === 'legL_f') deg = ((AppState.selected.a.legL.f - (-0.05)) * 180 / Math.PI);
       else if (target === 'legR_u') deg = ((AppState.selected.a.legR.u - (Math.PI - 0.10)) * 180 / Math.PI);
       else if (target === 'legR_f') deg = ((AppState.selected.a.legR.f - 0.05) * 180 / Math.PI);
-      else if (target === 'waist') deg = ((AppState.selected.a.waist || 0) * 180 / Math.PI);
-      else if (target === 'neck') deg = ((AppState.selected.headAngle - (AppState.selected.a.torso + (AppState.selected.a.waist || 0))) * 180 / Math.PI);
+      /* 关节语义与画布节点对齐：腰部=骨盆→腰（a.torso），颈部=腰→颈（a.waist），头部=颈→头（headAngle）。 */
+      else if (target === 'waist') deg = ((AppState.selected.a.torso - (-Math.PI / 2)) * 180 / Math.PI);
+      else if (target === 'neck') deg = ((AppState.selected.a.waist || 0) * 180 / Math.PI);
       else if (target === 'extL') { if (AppState.selected.extremity) deg = (AppState.selected.extremity.armAngleL * 180 / Math.PI); }
       else if (target === 'extR') { if (AppState.selected.extremity) deg = (AppState.selected.extremity.armAngleR * 180 / Math.PI); }
       else if (target === 'extLegL') { if (AppState.selected.extremity) deg = (AppState.selected.extremity.legAngleL * 180 / Math.PI); }
@@ -13550,11 +13922,21 @@ function importActionPresets() {
         else if (target === 'legL_f') AppState.selected.a.legL.f += delta;
         else if (target === 'legR_u') AppState.selected.a.legR.u += delta;
         else if (target === 'legR_f') AppState.selected.a.legR.f += delta;
-        else if (target === 'waist') { if (AppState.selected.a.waist === undefined) AppState.selected.a.waist = 0; AppState.selected.a.waist += delta; }
-        else if (target === 'neck') AppState.selected.headAngle += delta;
+        /* 腰部滑条转动骨盆→腰这段；和画布腰部节点一致，腿的世界角度保持不动。 */
+        else if (target === 'waist') {
+          const oldTorso = AppState.selected.a.torso;
+          AppState.selected.a.torso = norm(oldTorso + delta);
+          const applied = norm(AppState.selected.a.torso - oldTorso);
+          AppState.selected.a.legL.u = norm(AppState.selected.a.legL.u - applied);
+          AppState.selected.a.legR.u = norm(AppState.selected.a.legR.u - applied);
+        }
+        /* 颈部滑条转动腰→颈这段；和画布颈部节点一致。 */
+        else if (target === 'neck') {
+          if (AppState.selected.a.waist === undefined) AppState.selected.a.waist = 0;
+          AppState.selected.a.waist = norm(AppState.selected.a.waist + delta);
+        }
         else if (target === 'extL') { if (AppState.selected.extremity) AppState.selected.extremity.armAngleL += delta; }
         else if (target === 'extR') { if (AppState.selected.extremity) AppState.selected.extremity.armAngleR += delta; }
-        else if (target === 'extLegL') { if (AppState.selected.extremity) AppState.selected.extremity.legAngleL += delta; }
         else if (target === 'extLegL') { if (AppState.selected.extremity) AppState.selected.extremity.legAngleL += delta; }
         else if (target === 'extLegR') { if (AppState.selected.extremity) AppState.selected.extremity.legAngleR += delta; }
         enforcePins(AppState.selected);
@@ -13754,6 +14136,7 @@ function importActionPresets() {
         pinnedView.offset.x = AppState.viewOffset.x;
         pinnedView.offset.y = AppState.viewOffset.y;
         pinnedView.scale = AppState.viewScale;
+        saveViewPinState();
       }
 
       EventBus.emit('need:render');
@@ -13779,6 +14162,7 @@ function importActionPresets() {
         viewPinned = false;
         pinnedView = null;
       }
+      saveViewPinState();
       syncPinViewBtn();
       EventBus.emit('need:render');
     });
@@ -14274,6 +14658,8 @@ function importActionPresets() {
       if (!node) return;
       const id = node.getAttribute('data-obj-id');
       if (id == null) return;
+      /* 3D 摄像机是虚拟轨单例，不参与多选 / 编组。 */
+      if (String(id) === CAMERA3D_TRACK_ID) return;
       if (e.ctrlKey || e.metaKey || groupMultiSelectOn) {
         if (multiSelectedIds.has(String(id))) multiSelectedIds.delete(String(id));
         else multiSelectedIds.add(String(id));
@@ -14504,7 +14890,8 @@ function togglePin(part) {
     const isIndep = !!(isFig && AppState.selected.bodyScale.armL !== undefined);
 
     document.getElementById('btnSavePreset').disabled = !isFig;
-    document.getElementById('presetNameInput').disabled = !isFig;
+    /* 本地预设名称输入框始终可编辑，未选中火柴人时只禁用保存按钮。 */
+    document.getElementById('presetNameInput').disabled = false;
     colorInput.disabled = !isFig;
     lwInput.disabled = !isFig;
     /* v6.4.0：头型行只对火柴人出现 */
@@ -14520,8 +14907,9 @@ function togglePin(part) {
     legExtRatio.disabled = !isFig;
     foreArmRatioInput.disabled = !isFig || isIndep;
     shinRatioInput.disabled = !isFig || isIndep;
-    armInput.disabled = !isFig || isIndep;
-    legInput.disabled = !isFig || isIndep;
+    /* 四肢独立时手臂/腿长切换为相对倍率滑条，必须保持可拖动。 */
+    armInput.disabled = !isFig;
+    legInput.disabled = !isFig;
     headInput.disabled = !isFig;
     torsoInput.disabled = !isFig;
     btnGlow.disabled = !isFig;
@@ -14765,8 +15153,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       legExtRatioVal.textContent = AppState.selected.extremity.legRatio.toFixed(2);
 
       headInput.value = AppState.selected.bodyScale.head; headVal.textContent = AppState.selected.bodyScale.head.toFixed(2);
-      armInput.value = AppState.selected.bodyScale.arm; armVal.textContent = AppState.selected.bodyScale.arm.toFixed(2);
-      legInput.value = AppState.selected.bodyScale.leg; legVal.textContent = AppState.selected.bodyScale.leg.toFixed(2);
+      setLimbMasterSliderMode(isIndep, AppState.selected);
       torsoInput.value = AppState.selected.bodyScale.torso; torsoVal.textContent = AppState.selected.bodyScale.torso.toFixed(2);
       const fa = AppState.selected.bodyScale.foreArm !== undefined ? AppState.selected.bodyScale.foreArm : 0.37;
       foreArmRatioInput.value = fa; foreArmRatioVal.textContent = fa.toFixed(2);
@@ -14823,6 +15210,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       // 已删除 objScale.value = k; objScaleVal.textContent = k.toFixed(2);
       objAlpha.value = 1; objAlphaVal.textContent = '1.00';
       objAlpha.disabled = true;
+      resetSpace3dInputs();
       if (objXInput) { 
         objXInput.value = Math.round(AppState.canvasBounds.x + AppState.canvasBounds.w / 2); 
         objXInput.disabled = false; 
@@ -14845,6 +15233,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       objAlpha.value = AppState.selected.alpha; objAlphaVal.textContent = AppState.selected.alpha.toFixed(2);
       objAlpha.disabled = false;
       updatePosInputs();
+      updateSpace3dInputs();
       objPanel.style.display = 'block';
       
       // 新增拉伸开关状态同步
@@ -14862,12 +15251,16 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       updateAnchorUI();
     } else {
       objPanel.style.display = 'none';
+      resetSpace3dInputs();
       btnUp.disabled = true; btnDown.disabled = true; btnTop.disabled = true; btnBottom.disabled = true;
       if (objRotationInput) objRotationInput.disabled = true;
       btnAnchorToggle.style.display = 'none';
       objAnchorRow.style.display = 'none';
       anchorModeOn = false;
     }
+
+    /* 3D 面板跟随当前选中对象 / 工程取景设置刷新；未展开时也会安全更新隐藏 DOM。 */
+    updateSpace3DPanel();
 
     /* v4.7.0 变换框 / 自由拉伸按钮状态 */
     const btnTBox = document.getElementById('btnTransformBox');
@@ -15005,13 +15398,25 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   }
 
   function select(f) {
-    /* 子轨道下从图层列表等位置选择其他元件时，自动把轨道切到该元件，保持隔离 */
-    if (isSubTrackMode() && f && String(f.id) !== AppState.activeTrackId) {
+    /* 子轨道下从图层列表等位置选择其他元件时，自动把轨道切到该元件，保持隔离。
+       v7.9.5：摄像机轨不再由点选自动进入；摄像机视角只能从右上角浮窗按钮切换。 */
+    const pickingCameraTrack = !!(f && f.type === 'camera' && isCameraTrackId(String(f.id)));
+    /* 3D 摄像机是虚拟轨元件：从元件列表点它时要把作用域切到 3D 摄像机轨，才能直接 K 帧。 */
+    const pickingCamera3D = !!(f && f.type === 'camera3d');
+    if (pickingCamera3D) {
+      ensureCamera3DTrack();
+      AppState.activeTrackId = CAMERA3D_TRACK_ID;
+      refreshSubTrackOptions();
+    }
+    if (isSubTrackMode() && f && !pickingCameraTrack && !pickingCamera3D && String(f.id) !== AppState.activeTrackId) {
       AppState.activeTrackId = (f.type === 'video') ? TRACK_ALL_ID : String(f.id);
       refreshSubTrackOptions();
     }
     AppState.canvasSelected = false;
     AppState.selected = f;
+    /* 选中 3D 摄像机必须切到摄像机参数页，否则 object 页的 3D 滑条写的是 space3d 属性，
+       看起来就是「摄像机参数面板改不动摄像机」。 */
+    if (pickingCamera3D && isIn3DUIPanel()) set3DPanelMode('camera', false);
     isolatedJointName = null; // 切换对象自动退出隔离模式
     cancelTransformBoxDrag();
     SKFE.systems.distort.cancelDrag(); // v5.2.0 切换对象时放弃未完成的扭曲拖拽
@@ -15226,6 +15631,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) {
       drag = null; isPanning = false;
+      /* v7.9.5：第二根手指落下时，橡皮正在画的那半笔必须整笔撤销，
+         否则会一边缩放视图一边继续往元件上擦，表现为移动端「断触 / 乱擦」。 */
+      if (SKFE.systems.eraser.isOn() && SKFE.systems.eraser.isDragging() &&
+          typeof SKFE.systems.eraser.cancelStroke === 'function') {
+        SKFE.systems.eraser.cancelStroke();
+      }
       const pts = Array.from(pointers.values());
       lastDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       lastMid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
@@ -15257,10 +15668,16 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     const subTrackMode = isSubTrackMode();
     const subTrackObj = subTrackMode ? getActiveTrackObject() : null;
 
-    /* 橡皮擦优先：直接开始一笔矢量擦除，拦截掉所有的点击 */
+    /* 橡皮擦优先：直接开始一笔矢量擦除，拦截掉所有的点击。
+       v7.9.5：触摸只要真正起笔就立刻 return，不再继续走点选 / 拖动逻辑，
+       否则同一个手指会同时进入「擦除」和「拖元件」，移动端表现为擦到一半断掉。 */
     if (SKFE.systems.eraser.isOn()) {
-      SKFE.systems.eraser.startStroke(p, e); // 哪怕没点中也会在里面去尝试绑定当前选中对象
-      if (e.pointerType === 'mouse' && e.button === 0) return; // 鼠标彻底禁止平移与穿透选中画布
+      const eraserStarted = SKFE.systems.eraser.startStroke(p, e); // 哪怕没点中也会在里面去尝试绑定当前选中对象
+      if (eraserStarted || (e.pointerType === 'mouse' && e.button === 0)) {
+        drag = null;
+        isPanning = false;
+        return;
+      }
     }
 
     /* 摄像机子轨道：取景框内拖动 = 平移摄像机；取景框外拖动 = 平移视图（避开 UI 面板） */
@@ -15607,13 +16024,76 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     return res;
   }
 
+  /* 关节拖拽的统一计算入口：2D 画布与 3D 关节手柄都走这里，避免两套语义漂移。
+     pLocal 必须是火柴人内部坐标系的点；2D 入口负责逆变换与逆扭曲，3D 入口由面片 UV 反算。 */
+  function updateFigureJointFromDrag(o, part, pLocal, startFixedJ) {
+    if (jointStretchOn && part !== 'pelvis' && part !== 'head' && part !== 'neck') {
+      stretchJoint(o, part, pLocal);
+    } else if (part === 'waist') {
+      const j0 = startFixedJ || jointData(o);
+      const newTorso = norm(Math.atan2(pLocal.y - j0.pelvis.y, pLocal.x - j0.pelvis.x));
+      const deltaTorso = norm(newTorso - o.a.torso);
+      o.a.torso = newTorso;
+      o.a.legL.u = norm(o.a.legL.u - deltaTorso);
+      o.a.legR.u = norm(o.a.legR.u - deltaTorso);
+    } else if (part === 'neck') {
+      const newJ = jointData(o);
+      o.a.waist = norm(Math.atan2(pLocal.y - newJ.waistPoint.y, pLocal.x - newJ.waistPoint.x) - o.a.torso);
+    } else if (part === 'head') {
+      const newJ = jointData(o);
+      o.headAngle = Math.atan2(pLocal.y - newJ.neck.y, pLocal.x - newJ.neck.x);
+    } else if (part === 'elbowL') {
+      const newJ = jointData(o);
+      o.a.armL.u = norm(Math.atan2(pLocal.y - newJ.neck.y, pLocal.x - newJ.neck.x) - (o.a.torso + o.a.waist));
+    } else if (part === 'handL') {
+      if (o.ikEnabled && o.pinned && o.pinned.handL) o.pinnedPos.handL = { x: pLocal.x, y: pLocal.y };
+      const newJ = jointData(o);
+      o.a.armL.f = norm(Math.atan2(pLocal.y - newJ.elbowL.y, pLocal.x - newJ.elbowL.x) - (o.a.torso + o.a.waist + o.a.armL.u));
+    } else if (part === 'elbowR') {
+      const newJ = jointData(o);
+      o.a.armR.u = norm(Math.atan2(pLocal.y - newJ.neck.y, pLocal.x - newJ.neck.x) - (o.a.torso + o.a.waist));
+    } else if (part === 'handR') {
+      if (o.ikEnabled && o.pinned && o.pinned.handR) o.pinnedPos.handR = { x: pLocal.x, y: pLocal.y };
+      const newJ = jointData(o);
+      o.a.armR.f = norm(Math.atan2(pLocal.y - newJ.elbowR.y, pLocal.x - newJ.elbowR.x) - (o.a.torso + o.a.waist + o.a.armR.u));
+    } else if (part === 'kneeL') {
+      const newJ = jointData(o);
+      o.a.legL.u = norm(Math.atan2(pLocal.y - newJ.pelvis.y, pLocal.x - newJ.pelvis.x) - o.a.torso);
+    } else if (part === 'footL') {
+      if (o.ikEnabled && o.pinned && o.pinned.footL) o.pinnedPos.footL = { x: pLocal.x, y: pLocal.y };
+      const newJ = jointData(o);
+      o.a.legL.f = norm(Math.atan2(pLocal.y - newJ.thighL.y, pLocal.x - newJ.thighL.x) - (o.a.torso + o.a.legL.u));
+    } else if (part === 'kneeR') {
+      const newJ = jointData(o);
+      o.a.legR.u = norm(Math.atan2(pLocal.y - newJ.pelvis.y, pLocal.x - newJ.pelvis.x) - o.a.torso);
+    } else if (part === 'footR') {
+      if (o.ikEnabled && o.pinned && o.pinned.footR) o.pinnedPos.footR = { x: pLocal.x, y: pLocal.y };
+      const newJ = jointData(o);
+      o.a.legR.f = norm(Math.atan2(pLocal.y - newJ.thighR.y, pLocal.x - newJ.thighR.x) - (o.a.torso + o.a.legR.u));
+    } else if (part === 'wristL') {
+      const newJ = jointData(o);
+      o.extremity.armAngleL = norm(Math.atan2(pLocal.y - newJ.handL.y, pLocal.x - newJ.handL.x) - (o.a.torso + o.a.waist + o.a.armL.u + o.a.armL.f));
+    } else if (part === 'wristR') {
+      const newJ = jointData(o);
+      o.extremity.armAngleR = norm(Math.atan2(pLocal.y - newJ.handR.y, pLocal.x - newJ.handR.x) - (o.a.torso + o.a.waist + o.a.armR.u + o.a.armR.f));
+    } else if (part === 'toeL') {
+      const newJ = jointData(o);
+      o.extremity.legAngleL = norm(Math.atan2(pLocal.y - newJ.footL.y, pLocal.x - newJ.footL.x) - (o.a.torso + o.a.legL.u + o.a.legL.f));
+    } else if (part === 'toeR') {
+      const newJ = jointData(o);
+      o.extremity.legAngleR = norm(Math.atan2(pLocal.y - newJ.footR.y, pLocal.x - newJ.footR.x) - (o.a.torso + o.a.legR.u + o.a.legR.f));
+    }
+    enforcePins(o);
+  }
+
   function onPointerMove(e) {
     if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     /* v5.2.0 扭曲控制点拖拽期间，画布不响应移动（防止误触发平移/悬停高亮） */
     if (SKFE.systems.distort.isDragging()) return;
 
-    if (SKFE.systems.eraser.isDragging()) {
+    /* v7.9.5：双指缩放 / 平移优先于橡皮拖拽，避免第二根手指被当成擦除继续采样。 */
+    if (pointers.size < 2 && SKFE.systems.eraser.isDragging()) {
       SKFE.systems.eraser.updateStroke(getPos(e));
       return;
     }
@@ -15741,6 +16221,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
           camViewOffset.x += (midX - cx) * (1 - k);
           camViewOffset.y += (midY - cy) * (1 - k);
           camViewZoom = newZoom;
+          syncCamera2DState();
         }
         lastDist = dist; lastMid = mid;
         EventBus.emit('need:render'); return;
@@ -15837,67 +16318,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
            整体平移（pelvis）仍用原始 p，因为平移对象时变形结果也是平移，天然 1:1。 */
         const pSrc = distortInvWorld(o, p);
         const pLocal = (o.rot || o.mirror) ? worldToFigureLocal(o, pSrc) : pSrc;
-        
-        //完全由 stretchJoint 接管位置和角度
-        if (jointStretchOn && drag.part !== 'pelvis' && drag.part !== 'head' && drag.part !== 'neck') {
-          stretchJoint(o, drag.part, pLocal);
-        } else {
-          if (drag.part === 'waist') {
-            const newTorso = norm(Math.atan2(pLocal.y - drag.startFixedJ.pelvis.y, pLocal.x - drag.startFixedJ.pelvis.x));
-            const deltaTorso = norm(newTorso - o.a.torso);
-            o.a.torso = newTorso;
-            o.a.legL.u = norm(o.a.legL.u - deltaTorso);
-            o.a.legR.u = norm(o.a.legR.u - deltaTorso);
-          } else if (drag.part === 'neck') {
-            const newJ = jointData(o);
-            o.a.waist = norm(Math.atan2(pLocal.y - newJ.waistPoint.y, pLocal.x - newJ.waistPoint.x) - o.a.torso);
-          } else if (drag.part === 'head') {
-            const newJ = jointData(o);
-            o.headAngle = Math.atan2(pLocal.y - newJ.neck.y, pLocal.x - newJ.neck.x);
-          } else if (drag.part === 'elbowL') {
-            const newJ = jointData(o);
-            o.a.armL.u = norm(Math.atan2(pLocal.y - newJ.neck.y, pLocal.x - newJ.neck.x) - (o.a.torso + o.a.waist));
-          } else if (drag.part === 'handL') {
-            if (o.ikEnabled && o.pinned && o.pinned.handL) o.pinnedPos.handL = { x: pLocal.x, y: pLocal.y };
-            const newJ = jointData(o);
-            o.a.armL.f = norm(Math.atan2(pLocal.y - newJ.elbowL.y, pLocal.x - newJ.elbowL.x) - (o.a.torso + o.a.waist + o.a.armL.u));
-          } else if (drag.part === 'elbowR') {
-            const newJ = jointData(o);
-            o.a.armR.u = norm(Math.atan2(pLocal.y - newJ.neck.y, pLocal.x - newJ.neck.x) - (o.a.torso + o.a.waist));
-          } else if (drag.part === 'handR') {
-            if (o.ikEnabled && o.pinned && o.pinned.handR) o.pinnedPos.handR = { x: pLocal.x, y: pLocal.y };
-            const newJ = jointData(o);
-            o.a.armR.f = norm(Math.atan2(pLocal.y - newJ.elbowR.y, pLocal.x - newJ.elbowR.x) - (o.a.torso + o.a.waist + o.a.armR.u));
-          } else if (drag.part === 'kneeL') {
-            const newJ = jointData(o);
-            o.a.legL.u = norm(Math.atan2(pLocal.y - newJ.pelvis.y, pLocal.x - newJ.pelvis.x) - o.a.torso);
-          } else if (drag.part === 'footL') {
-            if (o.ikEnabled && o.pinned && o.pinned.footL) o.pinnedPos.footL = { x: pLocal.x, y: pLocal.y };
-            const newJ = jointData(o);
-            o.a.legL.f = norm(Math.atan2(pLocal.y - newJ.thighL.y, pLocal.x - newJ.thighL.x) - (o.a.torso + o.a.legL.u));
-          } else if (drag.part === 'kneeR') {
-            const newJ = jointData(o);
-            o.a.legR.u = norm(Math.atan2(pLocal.y - newJ.pelvis.y, pLocal.x - newJ.pelvis.x) - o.a.torso);
-          } else if (drag.part === 'footR') {
-            if (o.ikEnabled && o.pinned && o.pinned.footR) o.pinnedPos.footR = { x: pLocal.x, y: pLocal.y };
-            const newJ = jointData(o);
-            o.a.legR.f = norm(Math.atan2(pLocal.y - newJ.thighR.y, pLocal.x - newJ.thighR.x) - (o.a.torso + o.a.legR.u));
-          } else if (drag.part === 'wristL') {
-            const newJ = jointData(o);
-            o.extremity.armAngleL = norm(Math.atan2(pLocal.y - newJ.handL.y, pLocal.x - newJ.handL.x) - (o.a.torso + o.a.waist + o.a.armL.u + o.a.armL.f));
-          } else if (drag.part === 'wristR') {
-            const newJ = jointData(o);
-            o.extremity.armAngleR = norm(Math.atan2(pLocal.y - newJ.handR.y, pLocal.x - newJ.handR.x) - (o.a.torso + o.a.waist + o.a.armR.u + o.a.armR.f));
-          } else if (drag.part === 'toeL') {
-            const newJ = jointData(o);
-            o.extremity.legAngleL = norm(Math.atan2(pLocal.y - newJ.footL.y, pLocal.x - newJ.footL.x) - (o.a.torso + o.a.legL.u + o.a.legL.f));
-          } else if (drag.part === 'toeR') {
-            const newJ = jointData(o);
-            o.extremity.legAngleR = norm(Math.atan2(pLocal.y - newJ.footR.y, pLocal.x - newJ.footR.x) - (o.a.torso + o.a.legR.u + o.a.legR.f));
-          }
-        }
+        updateFigureJointFromDrag(o, drag.part, pLocal, drag.startFixedJ);
       }
-      enforcePins(o);
     } else if (o.type === 'group') {
       if (drag.part === 'move') {
         let tx = p.x + drag.dx;
@@ -15956,7 +16378,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     /* v5.2.0 扭曲控制点的 pointerup 由控制点自己接管，画布不做收尾 */
     if (SKFE.systems.distort.isDragging()) return;
     if (SKFE.systems.eraser.isDragging()) {
-      SKFE.systems.eraser.finishStroke();
+      /* 双指手势中不允许把半笔擦除提交；正常单指擦除才收笔。 */
+      if (pointers.size >= 2 && typeof SKFE.systems.eraser.cancelStroke === 'function') {
+        SKFE.systems.eraser.cancelStroke();
+      } else {
+        SKFE.systems.eraser.finishStroke();
+      }
       pointers.delete(e.pointerId);
       try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
       return;
@@ -15969,6 +16396,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       if (isPan) {
         markCurrentFrameModified();
         EventBus.emit('history:save', '移动摄像机');
+      } else {
+        syncCamera2DState();
       }
       EventBus.emit('need:render');
       return;
@@ -15993,6 +16422,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       /* 双指缩放摄像机结束 → 保存历史并刷新缩略图 */
       if (twoFingerMode === 'camera') {
         twoFingerMode = 'view';
+        syncCamera2DState();
         if (camWheelThumbTimer) { clearTimeout(camWheelThumbTimer); camWheelThumbTimer = null; }
         invalidateAllFrameThumbs();
         updateFrameBar();
@@ -16146,7 +16576,1065 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   const _pY = document.getElementById('posYSlider');
   const _pS = document.getElementById('posScaleSlider');
   const _pR = document.getElementById('posRotSlider');
-  
+
+  /* ==================== 3D 面板（阶段 3 UI 改造） ====================
+     所有 3D 控件集中到底部栏「3D」分区；数值写绝对量，滑条按相对量工作。 */
+  const s3Panel = document.getElementById('sheetSpace3d');
+  const s3ModeBtn = document.getElementById('btnSpace3DMode');
+  const s3Empty = document.getElementById('s3ObjectEmpty');
+  const s3ObjectControls = document.getElementById('s3ObjectControls');
+  const s3ObjectPane = document.getElementById('s3ObjectPane');
+  const s3CameraPane = document.getElementById('s3CameraPane');
+  const s3BillboardBtn = document.getElementById('s3Billboard');
+  const s3TargetSel = document.getElementById('s3CamTarget');
+  const s3CamPerspectiveBtn = document.getElementById('s3CamPerspective');
+  const s3CamOrthographicBtn = document.getElementById('s3CamOrthographic');
+  const s3CameraBtn = document.getElementById('btnSpace3DCamera');
+  const s3GizmoMoveBtn = document.getElementById('s3GizmoMove');
+  const s3GizmoRotateBtn = document.getElementById('s3GizmoRotate');
+
+  const S3_OBJ_PROPS = ['posX', 'posY', 'posZ', 'rotY', 'rotX', 'rotZ', 'scale'];
+  const S3_STEP = { posX: 1, posY: 1, posZ: 1, rotY: 1, rotX: 1, rotZ: 1, scale: 0.01 };
+  let s3SliderDrag = null;
+  let s3TargetSignature = '';
+  let s3PanelMode = 'object';
+
+  function s3Data() {
+    return (window.SKFE && window.SKFE.systems.space3dData) || null;
+  }
+
+  function s3Format(v, digits) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '0';
+    return digits ? n.toFixed(digits) : String(Math.round(n));
+  }
+
+  /* 属性面板的横向元件条在 3D 面板里复用同一份 DOM；高级设置还能把它移到独立浮窗。 */
+  function isObjStripFloatOn() {
+    const cb = document.getElementById('objStripFloatCheck');
+    return !!(cb && cb.checked);
+  }
+
+  /* v8.0.0：两条浮条的右端缩放把手默认隐藏；按下浮条 / 拖动把手时才显示。 */
+  function showStripResize(el) { if (el) el.classList.add('show-resize'); }
+  function hideStripResize(el) { if (el) el.classList.remove('show-resize'); }
+
+  function placeObjStripForSheet(key, prevKey) {
+    const strip = document.getElementById('objStrip');
+    if (!strip) return;
+    const floatBody = document.getElementById('objStripFloatBody');
+
+    /* 独立浮窗开着时，任何面板切换都不把元件条抢回面板。 */
+    if (isObjStripFloatOn()) {
+      if (floatBody && strip.parentElement !== floatBody) floatBody.appendChild(strip);
+      updateStickyHeaderHeight();
+      return;
+    }
+
+    /* 关闭独立浮窗后，先从浮窗里拿回原位，再按当前分区重新摆放。 */
+    if (floatBody && strip.parentElement === floatBody) {
+      if (objStripHome && objStripHome.parent) {
+        const homeRef = objStripHome.next && objStripHome.next.parentNode === objStripHome.parent ? objStripHome.next : null;
+        objStripHome.parent.insertBefore(strip, homeRef);
+      }
+    }
+
+    if (key === 'space3d' && uiSheetEls.space3d) {
+      const head = uiSheetEls.space3d.querySelector('.ui-sheet-head');
+      uiSheetEls.space3d.insertBefore(strip, head ? head.nextSibling : uiSheetEls.space3d.firstChild);
+    } else if (prevKey === 'space3d' && objStripHome && objStripHome.parent) {
+      const ref = objStripHome.next && objStripHome.next.parentNode === objStripHome.parent ? objStripHome.next : null;
+      objStripHome.parent.insertBefore(strip, ref);
+    }
+    updateStickyHeaderHeight();
+  }
+
+  /* ---------------- 元件浮条独立窗口 ---------------- */
+  const OBJ_STRIP_FLOAT_RECT_KEY = 'skfe_objstrip_float_rect_v1';
+  const OBJ_STRIP_FLOAT_ON_KEY = 'skfe_objstrip_float_on_v1';
+  let objStripFloatDrag = null;
+  let objStripFloatResize = null;
+
+  function ofClamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function applyObjStripFloatRect(el, rect) {
+    if (!el || !rect) return;
+    const w = ofClamp(Number(rect.w) || 420, 240, Math.max(240, window.innerWidth - 16));
+    /* 用户要求：独立元件浮条只允许横向拉长，高度固定为一条细横条。 */
+    const h = 34;
+    el.style.width = w + 'px';
+    el.style.height = h + 'px';
+    el.style.left = ofClamp(Number(rect.left) || 0, 0, Math.max(0, window.innerWidth - w)) + 'px';
+    el.style.top = ofClamp(Number(rect.top) || 0, 0, Math.max(0, window.innerHeight - h)) + 'px';
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+  }
+
+  function saveObjStripFloatRect(el) {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    try {
+      localStorage.setItem(OBJ_STRIP_FLOAT_RECT_KEY, JSON.stringify({
+        left: r.left, top: r.top, w: r.width, h: r.height
+      }));
+    } catch (_) {}
+  }
+
+  function ensureObjStripFloatRect(el) {
+    let rect = null;
+    try { rect = JSON.parse(localStorage.getItem(OBJ_STRIP_FLOAT_RECT_KEY)); } catch (_) {}
+    if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top)) {
+      rect = { left: Math.max(12, window.innerWidth - 440), top: 110, w: 420, h: 34 };
+    }
+    applyObjStripFloatRect(el, rect);
+  }
+
+  function setObjStripFloat(on) {
+    const el = document.getElementById('objStripFloat');
+    if (!el) return;
+    if (on) {
+      ensureObjStripFloatRect(el);
+      el.hidden = false;
+      el.style.display = 'block';
+    } else {
+      el.hidden = true;
+      el.style.display = 'none';
+    }
+    /* 开关状态写入缓存，刷新 / 重开后恢复。 */
+    try { localStorage.setItem(OBJ_STRIP_FLOAT_ON_KEY, on ? '1' : '0'); } catch (_) {}
+    /* 开着时留在浮窗里，关掉时按当前分区放回属性 / 3D 面板。 */
+    placeObjStripForSheet(activeUiSheet, null);
+  }
+
+  function initObjStripFloat() {
+    const el = document.getElementById('objStripFloat');
+    const cb = document.getElementById('objStripFloatCheck');
+    const grip = document.getElementById('objStripFloatGrip');
+    const resize = document.getElementById('objStripFloatResize');
+    if (!el || !cb) return;
+
+    /* 恢复上次缓存的开关；rect 已有独立缓存，这里只恢复 on/off。 */
+    let savedOn = false;
+    try { savedOn = localStorage.getItem(OBJ_STRIP_FLOAT_ON_KEY) === '1'; } catch (_) {}
+    cb.checked = savedOn;
+    setObjStripFloat(savedOn);
+    syncAdvToggles();
+
+    /* 关闭入口只在高级面板里，浮窗上不再放关闭按钮。 */
+    cb.addEventListener('change', () => setObjStripFloat(cb.checked));
+
+    el.addEventListener('pointerdown', () => showStripResize(el), true);
+    el.addEventListener('pointerleave', () => { if (!objStripFloatResize) hideStripResize(el); });
+    document.addEventListener('pointerup', () => { if (!objStripFloatResize) hideStripResize(el); }, true);
+
+    if (grip) {
+      grip.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        const r = el.getBoundingClientRect();
+        objStripFloatDrag = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, w: r.width };
+        try { grip.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      grip.addEventListener('pointermove', (e) => {
+        if (!objStripFloatDrag) return;
+        applyObjStripFloatRect(el, {
+          left: objStripFloatDrag.left + e.clientX - objStripFloatDrag.x,
+          top: objStripFloatDrag.top + e.clientY - objStripFloatDrag.y,
+          w: objStripFloatDrag.w
+        });
+      });
+      const endDrag = (e) => {
+        if (!objStripFloatDrag) return;
+        objStripFloatDrag = null;
+        saveObjStripFloatRect(el);
+        try { grip.releasePointerCapture(e.pointerId); } catch (_) {}
+      };
+      grip.addEventListener('pointerup', endDrag);
+      grip.addEventListener('pointercancel', endDrag);
+    }
+
+    if (resize) {
+      resize.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        const r = el.getBoundingClientRect();
+        showStripResize(el);
+        objStripFloatResize = { x: e.clientX, left: r.left, top: r.top, w: r.width };
+        try { resize.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      resize.addEventListener('pointermove', (e) => {
+        if (!objStripFloatResize) return;
+        /* 只改宽度，高度由 CSS / applyObjStripFloatRect 固定。 */
+        applyObjStripFloatRect(el, {
+          left: objStripFloatResize.left,
+          top: objStripFloatResize.top,
+          w: objStripFloatResize.w + e.clientX - objStripFloatResize.x
+        });
+      });
+      const endResize = (e) => {
+        if (!objStripFloatResize) return;
+        objStripFloatResize = null;
+        hideStripResize(el);
+        saveObjStripFloatRect(el);
+        try { resize.releasePointerCapture(e.pointerId); } catch (_) {}
+      };
+      resize.addEventListener('pointerup', endResize);
+      resize.addEventListener('pointercancel', endResize);
+    }
+  }
+
+  /* ---------------- 自定义按键浮条（快捷方式） ---------------- */
+  const CUSTOM_STRIP_RECT_KEY = 'skfe_custom_strip_rect_v1';
+  const SHORTCUT_KEYS_KEY = 'skfe_custom_shortcuts_v1';
+  let customStripDrag = null;
+  let customStripResize = null;
+
+  function loadShortcutKeys() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(SHORTCUT_KEYS_KEY));
+      return Array.isArray(arr) ? arr.filter(k => typeof k === 'string') : [];
+    } catch (_) { return []; }
+  }
+
+  function saveShortcutKeys(keys) {
+    try { localStorage.setItem(SHORTCUT_KEYS_KEY, JSON.stringify(keys)); } catch (_) {}
+  }
+
+  function shortcutKeyOf(btn, i18nKey, label, index) {
+    if (btn.id) return '#' + btn.id;
+    if (i18nKey) return 'i18n:' + i18nKey;
+    return 'btn:' + label + '#' + index;
+  }
+
+  function shortcutLabelOf(btn) {
+    const i18nEl = btn.dataset.i18n ? btn : btn.querySelector('[data-i18n]');
+    const i18nKey = i18nEl && i18nEl.dataset.i18n;
+    let label = i18nKey ? tr2(i18nKey, '') : '';
+    if (!label) label = btn.getAttribute('title') || btn.getAttribute('aria-label') || '';
+    if (!label) label = (btn.textContent || '').trim();
+    if (!label) label = btn.id || '';
+    return String(label).replace(/\s+/g, ' ').trim().slice(0, 22);
+  }
+
+  function shortcutGroupOf(btn) {
+    const head = btn.closest('.ui-sheet-head');
+    if (head) return (head.textContent || '').trim() || tr2('adv.grpOther', '其他');
+    if (btn.closest('#historyControls')) return tr2('history.title', '历史');
+    if (btn.closest('#timeline')) return tr2('timeline.advTitle', '帧动画面板');
+    if (btn.closest('#uiBottomBar')) return tr2('panel.shortcutBar', '底部栏');
+    return tr2('adv.grpOther', '其他');
+  }
+
+  function collectShortcutButtons() {
+    const all = Array.prototype.slice.call(document.querySelectorAll('button'));
+    const used = new Set();
+    const list = [];
+    all.forEach((btn, index) => {
+      if (btn.closest('#customButtonStrip') || btn.closest('#shortcutPickerFloat')) return;
+      if (btn.closest('.help-float') || btn.closest('.ease-editor-overlay')) return;
+      const label = shortcutLabelOf(btn) || ('按钮 ' + (index + 1));
+      const i18nEl = btn.dataset.i18n ? btn : btn.querySelector('[data-i18n]');
+      const i18nKey = i18nEl && i18nEl.dataset.i18n;
+      let key = shortcutKeyOf(btn, i18nKey, label, index);
+      if (used.has(key)) key = key + ':' + index;
+      used.add(key);
+      btn.dataset.shortcutKey = key;
+      list.push({ key: key, label: label, group: shortcutGroupOf(btn), btn: btn });
+    });
+    return list;
+  }
+
+  function renderCustomShortcutItems() {
+    const box = document.getElementById('customButtonStripItems');
+    if (!box) return;
+    box.innerHTML = '';
+    const byKey = {};
+    collectShortcutButtons().forEach(x => { byKey[x.key] = x; });
+    loadShortcutKeys().forEach(key => {
+      const item = byKey[key];
+      if (!item) return;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cbs-item';
+      b.textContent = item.label;
+      b.title = tr2('shortcut.clickTip', '点击执行') + '：' + item.label;
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        item.btn.click();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function renderShortcutPicker() {
+    const body = document.getElementById('shortcutPickerBody');
+    if (!body) return;
+    body.innerHTML = '';
+    const selected = new Set(loadShortcutKeys());
+    const groups = {};
+    collectShortcutButtons().forEach(x => {
+      groups[x.group] = groups[x.group] || [];
+      groups[x.group].push(x);
+    });
+    Object.keys(groups).forEach(name => {
+      const title = document.createElement('div');
+      title.className = 'shortcut-group-title';
+      title.textContent = name;
+      body.appendChild(title);
+      const grid = document.createElement('div');
+      grid.className = 'shortcut-grid';
+      groups[name].forEach(x => {
+        const label = document.createElement('label');
+        label.className = 'shortcut-option';
+        label.title = x.label;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = x.key;
+        cb.checked = selected.has(x.key);
+        const span = document.createElement('span');
+        span.textContent = x.label;
+        label.appendChild(cb);
+        label.appendChild(span);
+        grid.appendChild(label);
+      });
+      body.appendChild(grid);
+    });
+  }
+
+  function applyCustomStripRect(left, top, w) {
+    const el = document.getElementById('customButtonStrip');
+    if (!el) return;
+    const width = ofClamp(Number(w) || 420, 160, Math.max(160, window.innerWidth - 24));
+    el.style.width = width + 'px';
+    el.style.left = ofClamp(Number(left) || 0, 0, Math.max(0, window.innerWidth - width)) + 'px';
+    el.style.top = ofClamp(Number(top) || 0, 0, Math.max(0, window.innerHeight - 40)) + 'px';
+    el.style.bottom = 'auto';
+    el.style.right = 'auto';
+  }
+
+  function ensureCustomStripRect() {
+    let rect = null;
+    try { rect = JSON.parse(localStorage.getItem(CUSTOM_STRIP_RECT_KEY)); } catch (_) {}
+    if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top)) {
+      rect = { left: 20, top: Math.max(80, window.innerHeight - 180), w: 420 };
+    }
+    applyCustomStripRect(rect.left, rect.top, rect.w);
+  }
+
+  function saveCustomStripRect() {
+    const el = document.getElementById('customButtonStrip');
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    try {
+      localStorage.setItem(CUSTOM_STRIP_RECT_KEY, JSON.stringify({ left: r.left, top: r.top, w: r.width }));
+    } catch (_) {}
+  }
+
+  function setCustomStripVisible(on) {
+    const el = document.getElementById('customButtonStrip');
+    if (!el) return;
+    if (on) {
+      ensureCustomStripRect();
+      el.hidden = false;
+      renderCustomShortcutItems();
+    } else {
+      el.hidden = true;
+    }
+  }
+
+  function positionShortcutPicker() {
+    const float = document.getElementById('shortcutPickerFloat');
+    if (!float || float.hidden) return;
+    float.style.width = '';
+    float.style.height = '';
+    float.style.left = '15vw';
+    float.style.top = '15vh';
+    const w = float.offsetWidth || Math.round(window.innerWidth * 0.7);
+    const h = float.offsetHeight || Math.round(window.innerHeight * 0.4);
+    float.style.left = Math.round((window.innerWidth - w) / 2) + 'px';
+    float.style.top = Math.round((window.innerHeight - h) / 2) + 'px';
+  }
+
+  function openShortcutPicker() {
+    const float = document.getElementById('shortcutPickerFloat');
+    if (!float) return;
+    ['quickHelpFloat', 'changeLogFloat', 'globalEditHelpFloat', 'brushTypeFloat'].forEach(id => {
+      const other = document.getElementById(id);
+      if (other) other.hidden = true;
+    });
+    renderShortcutPicker();
+    float.hidden = false;
+    positionShortcutPicker();
+  }
+
+  function initCustomButtonStrip() {
+    const cb = document.getElementById('customStripCheck');
+    const el = document.getElementById('customButtonStrip');
+    const grip = document.getElementById('customButtonStripGrip');
+    const resize = document.getElementById('customButtonStripResize');
+    const addBtn = document.getElementById('btnOpenShortcutPicker');
+    const picker = document.getElementById('shortcutPickerFloat');
+    const close = document.getElementById('shortcutPickerClose');
+    const clear = document.getElementById('shortcutPickerClear');
+    const done = document.getElementById('shortcutPickerDone');
+    if (!cb || !el) return;
+
+    cb.addEventListener('change', () => setCustomStripVisible(cb.checked));
+
+    el.addEventListener('pointerdown', () => showStripResize(el), true);
+    el.addEventListener('pointerleave', () => { if (!customStripResize) hideStripResize(el); });
+    document.addEventListener('pointerup', () => { if (!customStripResize) hideStripResize(el); }, true);
+
+    if (addBtn) addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openShortcutPicker();
+    });
+    if (close) close.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (picker) picker.hidden = true;
+    });
+    if (clear) clear.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (picker) picker.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = false; });
+    });
+    if (done) done.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const keys = [];
+      if (picker) picker.querySelectorAll('input[type="checkbox"]:checked').forEach(c => keys.push(c.value));
+      saveShortcutKeys(keys);
+      if (picker) picker.hidden = true;
+      renderCustomShortcutItems();
+    });
+    if (picker) {
+      document.addEventListener('pointerdown', (e) => {
+        if (picker.hidden) return;
+        if (e.target.closest('#shortcutPickerFloat') || e.target.closest('#btnOpenShortcutPicker')) return;
+        picker.hidden = true;
+      }, true);
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !picker.hidden) picker.hidden = true;
+      });
+      window.addEventListener('resize', positionShortcutPicker);
+    }
+
+    if (grip) {
+      grip.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        const r = el.getBoundingClientRect();
+        customStripDrag = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, w: r.width };
+        try { grip.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      grip.addEventListener('pointermove', (e) => {
+        if (!customStripDrag) return;
+        applyCustomStripRect(
+          customStripDrag.left + e.clientX - customStripDrag.x,
+          customStripDrag.top + e.clientY - customStripDrag.y,
+          customStripDrag.w
+        );
+      });
+      const endDrag = (e) => {
+        if (!customStripDrag) return;
+        customStripDrag = null;
+        saveCustomStripRect();
+        try { grip.releasePointerCapture(e.pointerId); } catch (_) {}
+      };
+      grip.addEventListener('pointerup', endDrag);
+      grip.addEventListener('pointercancel', endDrag);
+    }
+
+    if (resize) {
+      resize.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'mouse' && e.button !== 0) return;
+        const r = el.getBoundingClientRect();
+        showStripResize(el);
+        customStripResize = { x: e.clientX, left: r.left, top: r.top, w: r.width };
+        try { resize.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      resize.addEventListener('pointermove', (e) => {
+        if (!customStripResize) return;
+        applyCustomStripRect(
+          customStripResize.left,
+          customStripResize.top,
+          customStripResize.w + e.clientX - customStripResize.x
+        );
+      });
+      const endResize = (e) => {
+        if (!customStripResize) return;
+        customStripResize = null;
+        hideStripResize(el);
+        saveCustomStripRect();
+        try { resize.releasePointerCapture(e.pointerId); } catch (_) {}
+      };
+      resize.addEventListener('pointerup', endResize);
+      resize.addEventListener('pointercancel', endResize);
+    }
+
+    window.SKFE_REFRESH_SHORTCUT_STRIP = function () {
+      renderCustomShortcutItems();
+      if (picker && !picker.hidden) renderShortcutPicker();
+    };
+  }
+
+  function setSpace3DEnabled(on) {
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    if (!S3 || !S3.setEnabled) return;
+    /* 进出 3D 时不允许 2D 摄像机视角残留。 */
+    if (on && cameraView2DActive) setCameraView2D(false);
+    if (on) {
+      fillCamera3DTrackToFullLength(false);
+      syncCamera3DTrackFromState();
+    }
+    if (!!S3.isEnabled() === !!on) {
+      updateSpace3DPanel();
+      syncCameraViewEntryUI();
+      scheduleRenderLayerPop();
+      return;
+    }
+    S3.setEnabled(!!on);
+    updateSpace3DPanel();
+    syncCameraViewEntryUI();
+    scheduleRenderLayerPop();
+
+    /* SVG 是 2D 矢量录制器，3D 面片无法无损转 SVG；3D 下直接禁用入口。 */
+    const svgSeqBtn = document.getElementById('btnExportSVGSeq');
+    if (svgSeqBtn) {
+      svgSeqBtn.disabled = !!on;
+      svgSeqBtn.title = on ? '3D 模式不支持 SVG 序列导出' : '';
+    }
+  }
+
+  /* 进入 3D 面板时必须有可编辑对象，否则“元件参数”区域会是空的。
+     默认取当前帧第一个可渲染元件；已有有效选中时保持不动。 */
+  function ensure3DObjectSelection() {
+    const list = getLayerUIObjects()
+      .filter(o => o && !o.hidden && o.type !== 'camera' && o.type !== 'camera3d' && o.type !== 'audioClip' && o.type !== 'video');
+    if (!list.length) return;
+    const cur = AppState.selected;
+    if (cur && !AppState.canvasSelected && list.indexOf(cur) !== -1) return;
+    select(list[0]);
+  }
+
+  function enter3DPanel() {
+    /* 每次从底部栏进入 3D 分区，默认回到元件参数。摄像机按钮随后会切成摄像机参数。 */
+    s3PanelMode = 'object';
+    const D = s3Data();
+    /* 进入 3D 自动补一份默认摄像机视角设置；不新增作品相机元件，也不写关键帧。 */
+    if (D && typeof D.ensureCamera3D === 'function') D.ensureCamera3D();
+    fillCamera3DTrackToFullLength(false);
+    /* 只准备 3D 数据与界面；是否进入 3D 渲染模式由顶部总开关决定。 */
+    ensure3DObjectSelection();
+    updateSpace3DPanel();
+    scheduleRenderLayerPop();
+  }
+
+  function openUiSheet(key) {
+    if (activeUiSheet !== key) switchUiSheet(key);
+  }
+
+  function set3DPanelMode(mode, enterCameraView) {
+    s3PanelMode = mode === 'camera' ? 'camera' : 'object';
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    if (s3PanelMode === 'camera') {
+      const D = s3Data();
+      if (D && typeof D.ensureCamera3D === 'function') D.ensureCamera3D();
+      syncCameraElementToExportCamera();
+      /* 打开摄像机参数不切换 2D / 3D；只有顶部总开关能切模式。 */
+      if (is3DModeActive() && enterCameraView !== false && S3 && S3.alignViewToExportCamera) S3.alignViewToExportCamera();
+    } else if (enterCameraView !== false && S3 && S3.resetView && S3.isCameraView && S3.isCameraView()) {
+      S3.resetView();
+    }
+    updateSpace3DPanel();
+  }
+
+  function syncGizmoModeUI() {
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    const mode = (S3 && S3.getGizmoMode && S3.getGizmoMode()) || 'translate';
+    if (s3GizmoMoveBtn) s3GizmoMoveBtn.classList.toggle('on', mode === 'translate');
+    if (s3GizmoRotateBtn) s3GizmoRotateBtn.classList.toggle('on', mode === 'rotate');
+  }
+
+  function changeGizmoMode(mode) {
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    if (!S3 || !S3.setGizmoMode || !S3.isEnabled || !S3.isEnabled()) return;
+    S3.setGizmoMode(mode === 'rotate' ? 'rotate' : 'translate');
+    syncGizmoModeUI();
+  }
+
+  function get3DObjectProp(prop) {
+    const o = AppState.selected;
+    if (!o) return 0;
+    if (prop === 'posX' || prop === 'posY') {
+      const p = getObjectWorldPos(o);
+      return prop === 'posX' ? p.x : displayY(p.y);
+    }
+    const s = s3Data();
+    const st = s ? s.readObjectState(o) : { z: 0, rx: 0, ry: 0 };
+    if (prop === 'posZ') return st.z;
+    if (prop === 'rotY') return st.ry * 180 / Math.PI;
+    if (prop === 'rotX') return st.rx * 180 / Math.PI;
+    if (prop === 'rotZ') return Number(o.rot) || 0;
+    if (prop === 'scale') return Number(o.scale) || 1;
+    return 0;
+  }
+
+  function apply3DGlobalPosition(o, prevPos, prevWorld) {
+    if (prevPos) applyGlobalPositionDelta(o, prevPos);
+    else if (prevWorld) applyGlobalPositionDeltaForObject(o, prevWorld);
+    if (isBoundObj(o)) {
+      setGlobalPropForBound(o, 'offX', o.offX);
+      setGlobalPropForBound(o, 'offY', o.offY);
+    }
+  }
+
+  function set3DObjectProp(prop, rawValue) {
+    const o = AppState.selected;
+    const D = s3Data();
+    if (!o || o.locked || !D) return;
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) return;
+
+    if (prop === 'posX' || prop === 'posY') {
+      const p = getObjectWorldPos(o);
+      const prevPos = o.type === 'figure' ? { x: o.x, y: o.y } : null;
+      const prevWorld = prevPos ? null : { x: p.x, y: p.y };
+      setObjectWorldPos(o, prop === 'posX' ? value : p.x, prop === 'posY' ? -value : p.y);
+      apply3DGlobalPosition(o, prevPos, prevWorld);
+    } else if (prop === 'posZ') {
+      D.ensureObjectState(o).z = value;
+      setGlobalProp(o, 'space3d.z', value);
+    } else if (prop === 'rotY' || prop === 'rotX') {
+      const field = prop === 'rotY' ? 'ry' : 'rx';
+      const rad = value * Math.PI / 180;
+      D.ensureObjectState(o)[field] = rad;
+      setGlobalProp(o, 'space3d.' + field, rad);
+    } else if (prop === 'rotZ') {
+      o.rot = value;
+      if (isBoundObj(o)) setGlobalPropForBound(o, 'rot', value);
+      else setGlobalProp(o, 'rot', value);
+    } else if (prop === 'scale') {
+      o.scale = Math.max(0.01, Math.min(100, value));
+      if (isBoundObj(o)) setGlobalPropForBound(o, 'scale', o.scale);
+      else setGlobalProp(o, 'scale', o.scale);
+    }
+
+    EventBus.emit('need:render');
+    markCurrentFrameModified();
+  }
+
+  function get3DCamValue(path) {
+    const D = s3Data();
+    const cam = D ? D.getProjectState().camera3d : null;
+    if (!cam) return 0;
+    /* 跟随目标时，位置框显示当前实际机位，而不是滞后的基准值。 */
+    if (path.indexOf('position.') === 0 && cam.targetId) {
+      const S3 = window.SKFE && window.SKFE.systems.space3d;
+      if (S3 && S3.getEffectiveCameraPosition) {
+        const p = S3.getEffectiveCameraPosition(cam);
+        const axis = path.split('.')[1];
+        if (p && p[axis] != null) return p[axis];
+      }
+    }
+    const parts = path.split('.');
+    let cur = cam;
+    for (const part of parts) {
+      if (cur == null || typeof cur !== 'object') return 0;
+      cur = cur[part];
+    }
+    return cur == null ? 0 : cur;
+  }
+
+  function set3DCamValue(path, rawValue) {
+    const D = s3Data();
+    if (!D) return;
+    const state = D.getProjectState();
+    const cam = state.camera3d;
+    const parts = path.split('.');
+    let cur = cam;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
+      cur = cur[parts[i]];
+    }
+    const value = Number(rawValue);
+    /* 跟随目标时改位置，实际改的是相对目标的偏移；同时同步显示机位，保证下次手势从当前画面继续。 */
+    if (path.indexOf('position.') === 0 && cam.targetId) {
+      const axis = parts[1];
+      const S3 = window.SKFE && window.SKFE.systems.space3d;
+      const target = S3 && S3.getObjectWorldPosition ? S3.getObjectWorldPosition(cam.targetId) : null;
+      if (target && target[axis] != null) {
+        if (!cam.position || typeof cam.position !== 'object') cam.position = {};
+        cam.position[axis] = value;
+        if (!cam.targetOffset || typeof cam.targetOffset !== 'object') cam.targetOffset = {};
+        cam.targetOffset[axis] = value - target[axis];
+        D.setProjectState(state);
+        syncCamera3DTrackFromState();
+        const S3Apply = window.SKFE && window.SKFE.systems.space3d;
+        if (S3Apply && S3Apply.applyExportCameraLive) S3Apply.applyExportCameraLive();
+        markCurrentFrameModified();
+        EventBus.emit('need:render');
+        EventBus.emit('need:syncUI');
+        return;
+      }
+    }
+    cur[parts[parts.length - 1]] = value;
+    D.setProjectState(state);
+    syncCamera3DTrackFromState();
+    /* 摄像机视角参数必须实时带动 3D 相机，而不是只改数据等下一次对齐。 */
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    if (S3 && S3.applyExportCameraLive) S3.applyExportCameraLive();
+    markCurrentFrameModified();
+    EventBus.emit('need:render');
+    EventBus.emit('need:syncUI');
+  }
+
+  function set3DCamMode(mode) {
+    const D = s3Data();
+    if (!D) return;
+    const state = D.getProjectState();
+    state.camera3d.mode = mode === 'orthographic' ? 'orthographic' : 'perspective';
+    D.setProjectState(state);
+    syncCamera3DTrackFromState();
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    if (S3 && S3.applyExportCameraLive) S3.applyExportCameraLive();
+    updateSpace3DPanel();
+    EventBus.emit('need:render');
+  }
+
+  /* 3D 摄像机比例：与 2D 一样只切宽高比，位置 / 旋转 / 关键帧数据保留。 */
+  function set3DCamRatio(ratio) {
+    const D = s3Data();
+    if (!D) return;
+    const parts = String(ratio || '16:9').split(':').map(Number);
+    const rw = Math.max(1, parts[0] || 16);
+    const rh = Math.max(1, parts[1] || 9);
+    const longSide = 1920;
+    let w, h;
+    if (rw >= rh) { w = longSide; h = Math.round(longSide * rh / rw); }
+    else { h = longSide; w = Math.round(longSide * rw / rh); }
+
+    const state = D.getProjectState();
+    if (!state.camera3d) return;
+    state.camera3d.width = w;
+    state.camera3d.height = h;
+    D.setProjectState(state);
+
+    /* 整条 3D 摄像机轨一起改比例，避免切帧后取景框比例跳回旧值。 */
+    const t = AppState.tracks[CAMERA3D_TRACK_ID];
+    if (t && t.frames) {
+      t.frames.forEach(fr => {
+        if (fr && fr.type === 'camera3d') { fr.width = w; fr.height = h; }
+      });
+    }
+    syncCamera3DTrackFromState();
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    if (S3 && S3.applyExportCameraLive) S3.applyExportCameraLive();
+    updateSpace3DPanel();
+    EventBus.emit('need:render');
+    EventBus.emit('history:save', '切换 3D 摄像机比例');
+  }
+
+  function targetOptionsSignature() {
+    try {
+      const list = getObjectsForFrameAt(AppState.currentFrameIndex) || [];
+      return list.map(o => String(o.id) + ':' + String(o.name || o.type)).join('|');
+    } catch (_) { return ''; }
+  }
+
+  function refresh3DTargetOptions(currentId) {
+    if (!s3TargetSel) return;
+    const sig = targetOptionsSignature();
+    if (sig === s3TargetSignature && s3TargetSel.options.length) return;
+    s3TargetSignature = sig;
+    s3TargetSel.innerHTML = '<option value="">不跟随</option>';
+    try {
+      const list = getObjectsForFrameAt(AppState.currentFrameIndex) || [];
+      list.forEach(o => {
+        if (!o || ['camera', 'audioClip', 'video'].includes(o.type)) return;
+        const opt = document.createElement('option');
+        opt.value = String(o.id);
+        opt.textContent = o.name || ((o.type === 'figure' ? '火柴人' : o.type === 'group' ? '编组' : '元件') + ' ' + o.id);
+        s3TargetSel.appendChild(opt);
+      });
+    } catch (_) {}
+    s3TargetSel.value = currentId == null ? '' : String(currentId);
+  }
+
+  function updateSpace3DPanel() {
+    if (!s3Panel) return;
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    const D = s3Data();
+    const enabled = !!(S3 && S3.isEnabled && S3.isEnabled());
+
+    const svgSeqBtn = document.getElementById('btnExportSVGSeq');
+    if (svgSeqBtn) {
+      svgSeqBtn.disabled = enabled;
+      svgSeqBtn.title = enabled ? '3D 模式不支持 SVG 序列导出' : '';
+    }
+
+    const s3GridToggle = document.getElementById('btnS3ExportGrid');
+    if (s3GridToggle) s3GridToggle.style.display = enabled ? '' : 'none';
+
+    if (s3ModeBtn) {
+      s3ModeBtn.textContent = enabled ? '关闭 3D（返回 2D）' : '开启 3D';
+      s3ModeBtn.classList.toggle('on', enabled);
+      s3ModeBtn.disabled = !(S3 && S3.setEnabled);
+    }
+    syncCameraViewEntryUI();
+
+    syncGizmoModeUI();
+
+    const cameraPaneOn = s3PanelMode === 'camera';
+    const hasObject = !!AppState.selected && !AppState.canvasSelected;
+    if (s3ObjectPane) s3ObjectPane.hidden = cameraPaneOn;
+    if (s3CameraPane) s3CameraPane.hidden = !cameraPaneOn;
+    if (s3Empty) s3Empty.hidden = cameraPaneOn || hasObject;
+    if (s3ObjectControls) s3ObjectControls.hidden = cameraPaneOn || !hasObject;
+    if (hasObject) {
+      const st = D ? D.readObjectState(AppState.selected) : { billboard: false };
+      S3_OBJ_PROPS.forEach(prop => {
+        const num = s3Panel.querySelector('[data-s3-num="' + prop + '"]');
+        const range = s3Panel.querySelector('[data-s3-prop="' + prop + '"]');
+        if (num && document.activeElement !== num) {
+          num.value = s3Format(get3DObjectProp(prop), prop === 'scale' ? 2 : 0);
+        }
+        if (range) range.value = 0;
+      });
+      if (s3BillboardBtn) {
+        s3BillboardBtn.textContent = st.billboard ? '开启' : '关闭';
+        s3BillboardBtn.classList.toggle('on', !!st.billboard);
+      }
+    }
+
+    if (!D) return;
+    const cam = D.getProjectState().camera3d;
+    const isOrtho = cam.mode === 'orthographic';
+    if (s3CamPerspectiveBtn) s3CamPerspectiveBtn.classList.toggle('on', !isOrtho);
+    if (s3CamOrthographicBtn) s3CamOrthographicBtn.classList.toggle('on', isOrtho);
+    const camRatioKey = Math.max(1, cam.width || 1920) + ':' + Math.max(1, cam.height || 1080);
+    s3Panel.querySelectorAll('.s3-cam-ratio-btn').forEach(btn => {
+      btn.classList.toggle('on', btn.dataset.ratio === camRatioKey);
+    });
+    s3Panel.querySelectorAll('[data-s3-cam]').forEach(range => {
+      /* 摄像机滑条直接表示绝对参数：手势改视角后也要实时跟随。 */
+      const v = Number(get3DCamValue(range.dataset.s3Cam));
+      if (Number.isFinite(v) && document.activeElement !== range) range.value = String(v);
+    });
+    s3Panel.querySelectorAll('[data-s3-cam-num]').forEach(num => {
+      if (document.activeElement === num) return;
+      num.value = s3Format(get3DCamValue(num.dataset.s3CamNum), 0);
+    });
+    refresh3DTargetOptions(cam.targetId);
+  }
+
+  /* 旧调用点保留为轻量别名，避免遗漏时找不到函数。 */
+  function updateSpace3dInputs() { updateSpace3DPanel(); }
+  function resetSpace3dInputs() { updateSpace3DPanel(); }
+
+  function begin3DSliderDrag(prop) {
+    const o = AppState.selected;
+    if (!o || o.locked) return;
+    pushPreSnapshot(getSnapshot(), '调整 3D 属性');
+    s3SliderDrag = { prop: prop, base: get3DObjectProp(prop) };
+  }
+
+  S3_OBJ_PROPS.forEach(prop => {
+    const range = s3Panel ? s3Panel.querySelector('[data-s3-prop="' + prop + '"]') : null;
+    const num = s3Panel ? s3Panel.querySelector('[data-s3-num="' + prop + '"]') : null;
+
+    if (range) {
+      range.addEventListener('pointerdown', () => begin3DSliderDrag(prop));
+      range.addEventListener('input', () => {
+        if (!AppState.selected) return;
+        if (!s3SliderDrag || s3SliderDrag.prop !== prop) begin3DSliderDrag(prop);
+        const delta = Number(range.value) || 0;
+        const factor = prop === 'scale' ? 0.01 : 1;
+        set3DObjectProp(prop, s3SliderDrag.base + delta * factor);
+        if (num && document.activeElement !== num) num.value = s3Format(get3DObjectProp(prop), prop === 'scale' ? 2 : 0);
+      });
+      const end = () => {
+        if (s3SliderDrag && s3SliderDrag.prop === prop) {
+          s3SliderDrag = null;
+          range.value = 0;
+          markCurrentFrameModified();
+          EventBus.emit('need:syncUI');
+        }
+      };
+      range.addEventListener('change', end);
+      range.addEventListener('pointerup', end);
+      range.addEventListener('pointercancel', end);
+    }
+
+    if (num) {
+      const commit = () => {
+        const v = Number(num.value);
+        if (!Number.isFinite(v)) { updateSpace3DPanel(); return; }
+        pushPreSnapshot(getSnapshot(), '输入 3D 属性');
+        set3DObjectProp(prop, v);
+        num.value = s3Format(get3DObjectProp(prop), prop === 'scale' ? 2 : 0);
+        markCurrentFrameModified();
+        EventBus.emit('need:syncUI');
+      };
+      num.addEventListener('change', commit);
+      num.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); num.blur(); }
+      });
+      num.addEventListener('wheel', e => {
+        e.preventDefault();
+        const step = S3_STEP[prop] || 1;
+        const dir = e.deltaY > 0 ? -1 : 1;
+        const v = Number(num.value);
+        num.value = s3Format((Number.isFinite(v) ? v : get3DObjectProp(prop)) + dir * step, prop === 'scale' ? 2 : 0);
+        commit();
+      }, { passive: false });
+    }
+  });
+
+  if (s3ModeBtn) {
+    s3ModeBtn.addEventListener('click', () => {
+      const S3 = window.SKFE && window.SKFE.systems.space3d;
+      if (!S3 || !S3.setEnabled) return;
+      setSpace3DEnabled(!S3.isEnabled());
+    });
+  }
+
+  if (s3CameraBtn) {
+    s3CameraBtn.addEventListener('click', () => {
+      const S3 = window.SKFE && window.SKFE.systems.space3d;
+      const in3D = !!(S3 && typeof S3.isEnabled === 'function' && S3.isEnabled());
+      if (!in3D) {
+        /* 2D：有摄像机时由同一个右上角按钮切换 2D 摄像机视角。 */
+        setCameraView2D(!cameraView2DActive);
+        return;
+      }
+      if (!S3 || !S3.alignViewToExportCamera) return;
+      openUiSheet('space3d');
+      if (S3.isCameraView && S3.isCameraView()) set3DPanelMode('object');
+      else set3DPanelMode('camera', true);
+      syncCameraViewEntryUI();
+    });
+  }
+
+  if (layerListEl) {
+    layerListEl.addEventListener('click', (e) => {
+      if (activeUiSheet !== 'space3d' || s3PanelMode !== 'camera') return;
+      /* 点 3D 摄像机本身要留在摄像机参数页；点其他元件才回到元件参数页。
+         横向浮条是 .layer-btn，纵向列表是 .lp-item，两边都要识别，
+         否则横向点 3D 摄像机会先切到摄像机页又被这里弹回元件页。 */
+      const item = e.target.closest('.lp-item, .layer-btn');
+      const id = item ? (item.dataset.id || item.getAttribute('data-obj-id')) : null;
+      const pickingCam3D = !!(id && String(id) === String(CAMERA3D_TRACK_ID));
+      if (!pickingCam3D) set3DPanelMode('object');
+    });
+  }
+
+  if (s3GizmoMoveBtn) s3GizmoMoveBtn.addEventListener('click', () => changeGizmoMode('translate'));
+  if (s3GizmoRotateBtn) s3GizmoRotateBtn.addEventListener('click', () => changeGizmoMode('rotate'));
+
+  if (s3BillboardBtn) {
+    s3BillboardBtn.addEventListener('click', () => {
+      if (!AppState.selected || AppState.selected.locked) return;
+      const D = s3Data();
+      if (!D) return;
+      pushPreSnapshot(getSnapshot(), '切换 Billboard');
+      const st = D.ensureObjectState(AppState.selected);
+      st.billboard = !st.billboard;
+      setGlobalProp(AppState.selected, 'space3d.billboard', st.billboard);
+      markCurrentFrameModified();
+      updateSpace3DPanel();
+      EventBus.emit('need:render');
+    });
+  }
+
+  if (s3CamPerspectiveBtn) s3CamPerspectiveBtn.addEventListener('click', () => set3DCamMode('perspective'));
+  if (s3CamOrthographicBtn) s3CamOrthographicBtn.addEventListener('click', () => set3DCamMode('orthographic'));
+  if (s3Panel) {
+    s3Panel.querySelectorAll('.s3-cam-ratio-btn').forEach(btn => {
+      btn.addEventListener('click', () => set3DCamRatio(btn.dataset.ratio));
+    });
+  }
+
+  if (s3Panel) {
+    s3Panel.querySelectorAll('[data-s3-cam]').forEach(range => {
+      const path = range.dataset.s3Cam;
+      const num = s3Panel.querySelector('[data-s3-cam-num="' + path + '"]');
+      /* 滑条 = 绝对机位 / 角度，不再做相对累计；松手也不归零。 */
+      range.addEventListener('pointerdown', () => {
+        pushPreSnapshot(getSnapshot(), '调整摄像机视角');
+      });
+      range.addEventListener('input', () => {
+        const v = Number(range.value);
+        if (!Number.isFinite(v)) return;
+        set3DCamValue(path, v);
+        if (num && document.activeElement !== num) num.value = s3Format(get3DCamValue(path), 0);
+      });
+    });
+    s3Panel.querySelectorAll('[data-s3-cam-num]').forEach(num => {
+      const path = num.dataset.s3CamNum;
+      const commit = () => {
+        const v = Number(num.value);
+        if (!Number.isFinite(v)) { updateSpace3DPanel(); return; }
+        set3DCamValue(path, v);
+        num.value = s3Format(get3DCamValue(path), 0);
+      };
+      num.addEventListener('change', commit);
+      num.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); num.blur(); }
+      });
+      num.addEventListener('wheel', e => {
+        e.preventDefault();
+        const step = Number(num.step) || 1;
+        const dir = e.deltaY > 0 ? -1 : 1;
+        const v = Number(num.value);
+        num.value = s3Format((Number.isFinite(v) ? v : get3DCamValue(path)) + dir * step, 0);
+        commit();
+      }, { passive: false });
+    });
+  }
+
+  /* 3D 数值框沿用属性面板 X/Y 的原生 number 微调箭头，不额外生成 ± 按钮。 */
+
+  if (s3TargetSel) {
+    s3TargetSel.addEventListener('change', () => {
+      const S3 = window.SKFE && window.SKFE.systems.space3d;
+      if (S3 && S3.bindExportCameraTarget) {
+        /* 绑定目标时锁住当前机位与目标之间的相对偏移，切换目标不会跳镜头。 */
+        S3.bindExportCameraTarget(s3TargetSel.value || null);
+      }
+      EventBus.emit('need:render');
+    });
+  }
+
+  const s3AlignBtn = document.getElementById('s3AlignView');
+  if (s3AlignBtn) {
+    /* 摄像机参数入口保留，但不再切进摄像机视角；视角只能由右上角按钮切换。 */
+    s3AlignBtn.textContent = '摄像机参数';
+    s3AlignBtn.addEventListener('click', () => {
+      openUiSheet('space3d');
+      set3DPanelMode('camera', false);
+    });
+  }
+
+  const s3ResetCamBtn = document.getElementById('s3ResetCamera');
+  if (s3ResetCamBtn) {
+    s3ResetCamBtn.addEventListener('click', () => {
+      const D = s3Data();
+      if (!D) return;
+      const state = D.getProjectState();
+      state.camera3d = D.projectDefaults().camera3d;
+      D.setProjectState(state);
+      syncCamera3DTrackFromState();
+      const S3 = window.SKFE && window.SKFE.systems.space3d;
+      if (S3 && S3.applyExportCameraLive) S3.applyExportCameraLive();
+      updateSpace3DPanel();
+      EventBus.emit('need:render');
+    });
+  }
+
   if (_pX) {
     _pX.addEventListener('pointerdown', onPosSliderStart);
     _pX.addEventListener('input', () => onPosSliderMove('x'));
@@ -16549,6 +18037,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
 
   function cloneSelected() {
     if (!AppState.selected || AppState.selected.type === 'video') return;
+    if (AppState.selected.type === 'camera3d') { alert(tr2('alert.cameraSingle', '3D 摄像机是单例，不能复制。')); return; }
     if (AppState.selected.type === 'camera') { alert(tr2('alert.cameraSingle', '摄像机只能存在一个。')); return; }
     const newId = cloneWholeClip(AppState.selected);
     if (!newId) {
@@ -16604,8 +18093,22 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     return true;
   }
 
+  /* 3D 的摄像机轨道是工程必需轨：只能通过「添加摄像机」整轨替换，不允许删除。 */
+  function s3ModeActiveNow() {
+    const S3 = window.SKFE && SKFE.systems.space3d;
+    return !!(S3 && typeof S3.isEnabled === 'function' && S3.isEnabled());
+  }
+
   function deleteSelected() {
     if (!AppState.selected) return;
+    if (AppState.selected.type === 'camera3d') {
+      alert(tr2('track.camera3dNoDelete', '3D 摄像机轨道不能删除，只能在 3D 摄像机面板里调整或重置。'));
+      return;
+    }
+    if (AppState.selected.type === 'camera' && s3ModeActiveNow()) {
+      alert(tr2('track.camera3dNoDelete', '3D 模式下摄像机轨道不能删除，请点击摄像机按钮替换。'));
+      return;
+    }
     if (AppState.selected.type === 'video') {
       /* v6.1.0：选中参考视频时删除 = 移除参考视频（以前是直接 return，删不掉） */
       removeReferenceVideo();
@@ -16666,6 +18169,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     syncMainLengthFromTracks();
     trimTrailingEmptyFrames();
     AppState.objects = getCombinedObjectsForRender();
+    if (cameraView2DActive && !getCurrentCameraObject()) cameraView2DActive = false;
     if (isSubTrackMode()) AppState.selected = getActiveTrackObject();
     refreshSubTrackOptions();
     invalidateAllFrameThumbs();
@@ -16858,6 +18362,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         camViewOffset.x += (mouseX - cx) * (1 - k);
         camViewOffset.y += (mouseY - cy) * (1 - k);
         camViewZoom = newZoom;
+        syncCamera2DState();
         EventBus.emit('need:render');
       }
       return;
@@ -17363,10 +18868,113 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   armExtRatio.addEventListener('change', () => EventBus.emit('history:save', '调整手脚比例'));
   legExtRatio.addEventListener('change', () => EventBus.emit('history:save', '调整手脚比例'));
 
+  function limbMasterEls(kind) {
+    return kind === 'arm'
+      ? { generalKey: 'arm', sideKeys: ['armL', 'armR'], input: armInput, val: armVal,
+          sides: [[armLenLInput, armLenLVal], [armLenRInput, armLenRVal]] }
+      : { generalKey: 'leg', sideKeys: ['legL', 'legR'], input: legInput, val: legVal,
+          sides: [[legLenLInput, legLenLVal], [legLenRInput, legLenRVal]] };
+  }
+
+  function fmtMasterPct(v) {
+    return (v > 0 ? '+' : '') + Math.round(v) + '%';
+  }
+
+  /* 四肢独立开启后，上方手臂/腿长滑条真正切换为相对滑条：
+     0% 为按下时的基准，松手归零；只等比缩放左右总长，不改小臂/小腿占比与手脚比例。 */
+  function setLimbMasterSliderMode(enabled, fig) {
+    ['arm', 'leg'].forEach(kind => {
+      const cfg = limbMasterEls(kind);
+      if (!cfg.input) return;
+      if (enabled) {
+        cfg.input.min = '-90';
+        cfg.input.max = '200';
+        cfg.input.step = '1';
+        cfg.input.title = kind === 'arm' ? '四肢独立时的手臂总长相对倍率' : '四肢独立时的腿长相对倍率';
+        if (!limbMasterDrag[kind]) cfg.input.value = 0;
+        if (cfg.val) cfg.val.textContent = fmtMasterPct(+cfg.input.value);
+      } else {
+        cfg.input.min = '0.1';
+        cfg.input.max = '2';
+        cfg.input.step = '0.01';
+        cfg.input.title = kind === 'arm' ? '手臂总长' : '腿总长';
+        const bs = fig && fig.bodyScale;
+        cfg.input.value = bs && isFinite(bs[cfg.generalKey]) ? bs[cfg.generalKey] : 1;
+        if (cfg.val) cfg.val.textContent = (+cfg.input.value).toFixed(2);
+      }
+    });
+  }
+
+  function beginLimbMasterDrag(kind) {
+    const fig = AppState.selected;
+    if (!fig || fig.type !== 'figure' || !hasIndepLimbs(fig.bodyScale)) return;
+    const cfg = limbMasterEls(kind);
+    const bs = fig.bodyScale;
+    limbMasterDrag[kind] = {
+      general: isFinite(bs[cfg.generalKey]) ? bs[cfg.generalKey] : 1,
+      sides: cfg.sideKeys.map(k => getBodyVal(bs, k))
+    };
+  }
+
+  function applyLimbMaster(kind, raw) {
+    const fig = AppState.selected;
+    if (!fig || fig.type !== 'figure') return;
+    const bs = fig.bodyScale;
+    const cfg = limbMasterEls(kind);
+
+    if (!hasIndepLimbs(bs)) {
+      const value = Math.max(0.1, Math.min(2, raw));
+      bs[cfg.generalKey] = value;
+      if (cfg.val) cfg.val.textContent = value.toFixed(2);
+      setGlobalProp(fig, 'bodyScale.' + cfg.generalKey, value);
+      return;
+    }
+
+    if (!limbMasterDrag[kind]) beginLimbMasterDrag(kind);
+    const st = limbMasterDrag[kind];
+    if (!st) return;
+    const delta = Math.max(-90, Math.min(200, raw));
+    const factor = Math.max(0.1, 1 + delta / 100);
+    const [lo, hi] = BODY_SCALE_RANGES[cfg.sideKeys[0]];
+
+    cfg.sideKeys.forEach((key, i) => {
+      const next = Math.round(Math.max(lo, Math.min(hi, st.sides[i] * factor)) * 100) / 100;
+      bs[key] = next;
+      setGlobalProp(fig, 'bodyScale.' + key, next);
+      const pair = cfg.sides[i];
+      if (pair && pair[0]) pair[0].value = next;
+      if (pair && pair[1]) pair[1].textContent = next.toFixed(2);
+    });
+    const gen = Math.round(Math.max(0.1, Math.min(2, st.general * factor)) * 100) / 100;
+    bs[cfg.generalKey] = gen;
+    setGlobalProp(fig, 'bodyScale.' + cfg.generalKey, gen);
+    if (cfg.val) cfg.val.textContent = fmtMasterPct(delta);
+  }
+
+  function endLimbMasterDrag(kind) {
+    if (!limbMasterDrag[kind]) return;
+    limbMasterDrag[kind] = null;
+    const cfg = limbMasterEls(kind);
+    if (cfg.input) cfg.input.value = 0;
+    if (cfg.val) cfg.val.textContent = '+0%';
+    EventBus.emit('need:syncUI');
+  }
+
   /* 比例 */
   headInput.addEventListener('input', e => { if (AppState.selected && AppState.selected.type === 'figure') { AppState.selected.bodyScale.head = +e.target.value; headVal.textContent = AppState.selected.bodyScale.head.toFixed(2); setGlobalProp(AppState.selected, 'bodyScale.head', AppState.selected.bodyScale.head); EventBus.emit('need:render'); markCurrentFrameModified(); } });
-  armInput.addEventListener('input', e => { if (AppState.selected && AppState.selected.type === 'figure') { AppState.selected.bodyScale.arm = +e.target.value; armVal.textContent = AppState.selected.bodyScale.arm.toFixed(2); setGlobalProp(AppState.selected, 'bodyScale.arm', AppState.selected.bodyScale.arm); EventBus.emit('need:render'); markCurrentFrameModified(); } });
-  legInput.addEventListener('input', e => { if (AppState.selected && AppState.selected.type === 'figure') { AppState.selected.bodyScale.leg = +e.target.value; legVal.textContent = AppState.selected.bodyScale.leg.toFixed(2); setGlobalProp(AppState.selected, 'bodyScale.leg', AppState.selected.bodyScale.leg); EventBus.emit('need:render'); markCurrentFrameModified(); } });
+  [['arm', armInput], ['leg', legInput]].forEach(([kind, input]) => {
+    if (!input) return;
+    input.addEventListener('pointerdown', () => beginLimbMasterDrag(kind));
+    input.addEventListener('input', e => {
+      if (!AppState.selected || AppState.selected.type !== 'figure') return;
+      applyLimbMaster(kind, +e.target.value);
+      EventBus.emit('need:render'); markCurrentFrameModified();
+    });
+    const end = () => endLimbMasterDrag(kind);
+    input.addEventListener('change', end);
+    input.addEventListener('pointerup', end);
+    input.addEventListener('pointercancel', end);
+  });
   torsoInput.addEventListener('input', e => { if (AppState.selected && AppState.selected.type === 'figure') { AppState.selected.bodyScale.torso = +e.target.value; torsoVal.textContent = AppState.selected.bodyScale.torso.toFixed(2); setGlobalProp(AppState.selected, 'bodyScale.torso', AppState.selected.bodyScale.torso); EventBus.emit('need:render'); markCurrentFrameModified(); } });
   foreArmRatioInput.addEventListener('input', e => { if (AppState.selected && AppState.selected.type === 'figure') { AppState.selected.bodyScale.foreArm = +e.target.value; foreArmRatioVal.textContent = AppState.selected.bodyScale.foreArm.toFixed(2); setGlobalProp(AppState.selected, 'bodyScale.foreArm', AppState.selected.bodyScale.foreArm); EventBus.emit('need:render'); markCurrentFrameModified(); } });
   shinRatioInput.addEventListener('input', e => { if (AppState.selected && AppState.selected.type === 'figure') { AppState.selected.bodyScale.shin = +e.target.value; shinRatioVal.textContent = AppState.selected.bodyScale.shin.toFixed(2); setGlobalProp(AppState.selected, 'bodyScale.shin', AppState.selected.bodyScale.shin); EventBus.emit('need:render'); markCurrentFrameModified(); } });
@@ -17388,6 +18996,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       delete bs.legL; delete bs.legR;
       delete bs.shinL; delete bs.shinR;
     }
+    limbMasterDrag.arm = null; limbMasterDrag.leg = null;
+    setLimbMasterSliderMode(e.target.checked, AppState.selected);
     EventBus.emit('need:syncUI'); EventBus.emit('need:render'); markCurrentFrameModified();
     EventBus.emit('history:save', '四肢独立');
   });
@@ -17967,6 +19577,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     btnExportMP4.onclick = () => SKFE.features.export.exportMP4();
   }
 
+  /* 阶段 4：3D 地面网格是导出辅助层，单独受导出面板开关控制。 */
+  function s3ExportGridEnabled() {
+    const cb = document.getElementById('s3ExportGrid');
+    return !cb || !!cb.checked;
+  }
+
   /* 导出图片 */
   function exportImage(format) {
     const hd = exportHDCheckbox.checked;
@@ -18003,16 +19619,35 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     const origStyleW = canvas.style.width, origStyleH = canvas.style.height;
     let dataURL = null;
     try {
-      canvas.width = Math.round(cssW * exportScale);
-      canvas.height = Math.round(cssH * exportScale);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.scale(exportScale, exportScale);
-      ctx.translate(cssW / 2, cssH / 2);
-      if (cropRot) ctx.rotate(-cropRot);
-      ctx.translate(-cropCX, -cropCY);
-      window.exportFormat = format;
-      renderCanvas(true);
-      dataURL = format === 'png' ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92);
+      /* 阶段 4：单帧 PNG / JPG 过去直接改主 2D canvas，绕开了 renderFrameToDataURL()。
+         3D 模式下必须在这里也前置分流，否则会导出旧的 2D 摄像机裁切。 */
+      const S3X = window.SKFE && window.SKFE.systems && SKFE.systems.space3dExport;
+      if (S3X && typeof S3X.isActive === 'function' && S3X.isActive()) {
+        const rect = canvas.getBoundingClientRect();
+        const baseW = Math.max(1, Math.round(rect.width || canvas.clientWidth || window.innerWidth));
+        const baseH = Math.max(1, Math.round(rect.height || canvas.clientHeight || window.innerHeight));
+        const outW = Math.max(1, Math.round(baseW * exportScale));
+        const outH = Math.max(1, Math.round(baseH * exportScale));
+        const transparentPng = format === 'png' && !!document.getElementById('gifTransparent')?.checked;
+        const off = S3X.renderFrameToDataURL(AppState.currentFrameIndex, outW, outH, {
+          transparent: transparentPng,
+          bgColor: pageBgColor,
+          showGrid: s3ExportGridEnabled()
+        });
+        if (!off) throw new Error('3D 导出画布创建失败');
+        dataURL = format === 'png' ? off.toDataURL('image/png') : off.toDataURL('image/jpeg', 0.92);
+      } else {
+        canvas.width = Math.round(cssW * exportScale);
+        canvas.height = Math.round(cssH * exportScale);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(exportScale, exportScale);
+        ctx.translate(cssW / 2, cssH / 2);
+        if (cropRot) ctx.rotate(-cropRot);
+        ctx.translate(-cropCX, -cropCY);
+        window.exportFormat = format;
+        renderCanvas(true);
+        dataURL = format === 'png' ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92);
+      }
     } catch (err) {
       alert(tr2('export.fail', '导出失败：') + err.message);
     } finally {
@@ -18070,13 +19705,14 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
      搬迁用 appendChild 把原 DOM 节点移进分区容器 —— 事件监听绑在元素自身上，搬家不会丢。 */
   const uiSheetEls = {};        /* key -> 容器 */
   let activeUiSheet = null;     /* 当前分区 key；null = 全关（只剩底部栏） */
+  let objStripHome = null;      /* 属性面板的横向元件条原位，3D 面板展开时临时搬过去 */
 
   function uiSheetTitle(key) {
-    return ({ props: '属性', objects: '元件', brush: '画笔', canvas: '画布', advanced: '高级', project: '项目', export: '导出', theme: '主题', plugins: '插件' })[key] || '';
+    return ({ props: '属性', space3d: '3D', objects: '元件', brush: '画笔', canvas: '画布', advanced: '高级', project: '项目', export: '导出', theme: '主题', plugins: '插件' })[key] || '';
   }
 
   function mountUiSheets() {
-    const keys = ['objects', 'brush', 'canvas', 'advanced', 'project', 'export', 'theme', 'plugins'];
+    const keys = ['space3d', 'objects', 'brush', 'canvas', 'advanced', 'project', 'export', 'theme', 'plugins'];
     keys.forEach(k => {
       uiSheetEls[k] = document.getElementById('sheet' + k.charAt(0).toUpperCase() + k.slice(1));
     });
@@ -18085,6 +19721,11 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     /* v7.3.0：属性区（#uiMain）也是分区之一，key 直接叫 props，跟底部栏 data-sheet="props" 对上 */
     const propsBox = document.getElementById('uiMain');
     if (propsBox) uiSheetEls.props = propsBox;
+
+    const objStripEl = document.getElementById('objStrip');
+    if (objStripEl && objStripEl.parentElement) {
+      objStripHome = { parent: objStripEl.parentElement, next: objStripEl.nextSibling };
+    }
 
     const move = (el, box) => { if (el && box) box.appendChild(el); };
     const rowOf = (el) => (el ? el.closest('.row') : null);
@@ -18106,13 +19747,14 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       const head = document.createElement('div');
       head.className = 'ui-sheet-head';
       const tEl = document.createElement('span');
-      tEl.dataset.i18n = 'tab.' + k;        /* 标题跟着语言切换 */
+      /* 3D 是固定功能名，按用户要求不翻译、不写 data-i18n。 */
+      if (k !== 'space3d') tEl.dataset.i18n = 'tab.' + k;
       tEl.textContent = uiSheetTitle(k);
       head.appendChild(tEl);
       if (placeAtTop) box.insertBefore(head, box.firstChild);
       else box.appendChild(head);
     };
-    keys.forEach(k => addHead(uiSheetEls[k], k, false));
+    keys.forEach(k => addHead(uiSheetEls[k], k, k === 'space3d'));
     /* 属性区的标题必须插到最前面（水印、面板标题行都在它后面），否则会跑到属性列表末尾 */
     addHead(propsBox, 'props', true);
 
@@ -18193,8 +19835,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         uiSheetEls.advanced.appendChild(title);
         uiSheetEls.advanced.appendChild(row);
       };
-      /* 导出参数三个开关只影响导出结果，收集后统一放进「导出」分区 */
-      ['gifTransparent', 'gifHD3x', 'hd1080p'].forEach(cbId => {
+      /* 导出参数开关只影响导出结果，收集后统一放进「导出」分区 */
+      ['gifTransparent', 's3ExportGrid', 'gifHD3x', 'hd1080p'].forEach(cbId => {
         const b = advRow1 && advRow1.querySelector('.adv-toggle[data-toggle="' + cbId + '"]');
         if (b) expToggleEls.push(b);
       });
@@ -18212,7 +19854,13 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         '#btnTimelineDock'
       ]);
       makeAdvGroup('adv.grpFrames', '帧操作', ['#btnClearAllFrames', '#btnClearOtherFrames']);
+      /* 用户要求：把“元件浮条 / 自定义按键浮条”放到高级面板“其他”下面，作为快捷浮条入口。 */
+      makeAdvGroup('adv.grpShortcut', '快捷浮条', [
+        '.adv-toggle[data-toggle="objStripFloatCheck"]',
+        '.adv-toggle[data-toggle="customStripCheck"]'
+      ]);
       /* 剩下的零散控件若还有，原样成一组兜底，避免丢失 */
+      let otherRow = null;
       if (advRow1 && advRow1.children.length) {
         const rest = document.createElement('div');
         rest.className = 'adv-row adv-group-row';
@@ -18220,7 +19868,15 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         if (rest.children.length) {
           uiSheetEls.advanced.appendChild(advSub('adv.grpOther', '其他'));
           uiSheetEls.advanced.appendChild(rest);
+          otherRow = rest;
         }
+      }
+      /* 快捷浮条组固定排在“其他”组后面。 */
+      const shortcutTitleEl = uiSheetEls.advanced.querySelector('[data-i18n="adv.grpShortcut"]');
+      const shortcutRowEl = shortcutTitleEl && shortcutTitleEl.nextElementSibling;
+      if (shortcutTitleEl) {
+        uiSheetEls.advanced.appendChild(shortcutTitleEl);
+        if (shortcutRowEl && shortcutRowEl.classList.contains('adv-group-row')) uiSheetEls.advanced.appendChild(shortcutRowEl);
       }
       /* v7.1.0：全局属性修改 + 它的说明面板搬到控制面板顶部（全屏旁边），不再进「高级」分区 */
 
@@ -18233,7 +19889,17 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         const mp4 = document.getElementById('btnExportMP4');
         if (mp4) expVideoBtns.push(mp4);
         expBgLabel = rows[2].querySelector('.adv-color-label'); /* label 内含 mp4BgColor */
-        move(rows[2], uiSheetEls.advanced);                     /* 剩下的导入视频 / 显隐 / 播放 */
+        /* 用户要求：导入参考视频（含显隐 / 播放）放回“其他”分组，导出按钮仍抽给导出分区。 */
+        if (rows[2].children.length) {
+          if (!otherRow) {
+            otherRow = document.createElement('div');
+            otherRow.className = 'adv-row adv-group-row';
+            uiSheetEls.advanced.insertBefore(advSub('adv.grpOther', '其他'), shortcutTitleEl || null);
+            uiSheetEls.advanced.insertBefore(otherRow, shortcutRowEl || null);
+          }
+          while (rows[2].firstElementChild) otherRow.appendChild(rows[2].firstElementChild);
+          rows[2].remove();
+        }
       }
 
       /* 工程存档 / 动作库 / 项目库统一在下方「项目分区」里按顺序搬入，
@@ -18377,12 +20043,21 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (key && !uiSheetEls[key]) key = null;
 
     const wasCollapsed = panel.classList.contains('collapsed');
+    const prevUiSheet = activeUiSheet;
     activeUiSheet = key;
+
+    /* 底部栏 3D 只负责展开面板，不切换 2D / 3D 渲染模式。
+       模式切换只允许通过面板顶部总开关 #btnSpace3DMode。 */
+    if (key === 'space3d' && prevUiSheet !== 'space3d') enter3DPanel();
 
     Object.keys(uiSheetEls).forEach(k => {
       const box = uiSheetEls[k];
       if (box) box.hidden = (k !== key);
     });
+    placeObjStripForSheet(key, prevUiSheet);
+    /* 元件条是同一份 DOM 在 2D / 3D 面板间搬动：进入或离开 3D 分区都要重建列表，
+       否则会残留上一分区缓存的 2D 摄像机，3D 摄像机也不会出现。 */
+    if (key === 'objects' || key === 'space3d' || prevUiSheet === 'space3d') scheduleRenderLayerPop();
 
     panel.classList.toggle('collapsed', !key);
 
@@ -18410,6 +20085,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     }
     /* 分区内容高度一变，纵向滚动条可能出现 / 消失，横条右端要跟着重算。 */
     syncUiScrollbarWidth();
+    if (key === 'space3d') updateSpace3DPanel();
 
     EventBus.emit('need:render');
   }
@@ -18494,15 +20170,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
 
     // 移动端底部抽屉
     if (isMobile && ui) {
-      /* v7.9.4-fix：未开自由缩放时，无论之前是否拖过，都强制回到贴底。
-         只清状态和内联位置，宽高交给下面的 CSS 50vh / collapsed 内容高。 */
-      if (!uiResizable && uiPanelDragged) {
-        uiPanelDragged = false;
-        ui.style.top = '';
-        ui.style.left = '';
-        ui.style.right = '';
-        ui.style.width = '';
-      }
+      /* v7.9.5：未开自由缩放时不再清掉拖动状态；顶部把手拖出的展开高度必须保留，
+         面板仍然通过 bottom:0 贴底，不会被拖离底部。 */
       /* v7.3.0：面板只有「全关（只剩底部栏）」和「打开某个分区」两种形态，不再整块隐藏 */
       const isCollapsed = ui.classList.contains('collapsed');
 
@@ -18604,6 +20273,193 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
   /* 摄像机视角的视图缩放与偏移（仅影响编辑时的取景框显示，不影响导出） */
   let camViewZoom = 1;
   let camViewOffset = { x: 0, y: 0 };
+  /* v7.9.5：2D 摄像机视角只允许由右上角浮窗按钮显式进入 / 退出。 */
+  let cameraView2DActive = false;
+
+  function is3DModeActive() {
+    const S3 = window.SKFE && window.SKFE.systems && window.SKFE.systems.space3d;
+    if (S3 && typeof S3.isEnabled === 'function') return !!S3.isEnabled();
+    const D = s3Data();
+    return !!(D && D.getProjectState && D.getProjectState().space3dMode);
+  }
+
+  function isCameraViewActiveNow() {
+    const S3 = window.SKFE && window.SKFE.systems && window.SKFE.systems.space3d;
+    return !!cameraView2DActive || !!(is3DModeActive() && S3 && typeof S3.isCameraView === 'function' && S3.isCameraView());
+  }
+
+  /* 3D 摄像机是工程级虚拟轨：只承载 camera3d 参数，不进画布渲染，不与 2D 摄像机共用轨。 */
+  function makeCamera3DFrame() {
+    const D = s3Data();
+    const state = D && typeof D.getProjectState === 'function' ? D.getProjectState() : null;
+    const src = (state && state.camera3d) || (D && typeof D.projectDefaults === 'function' ? D.projectDefaults().camera3d : {});
+    let out = {};
+    try { out = JSON.parse(JSON.stringify(src || {})); } catch (_) { out = Object.assign({}, src || {}); }
+    ['id', 'type', 'name', 'cameraMode', 'layer', 'eraser', 'hidden', '__k', '__d'].forEach(k => { delete out[k]; });
+    return Object.assign(out, {
+      id: CAMERA3D_TRACK_ID,
+      type: 'camera3d',
+      cameraMode: '3d',
+      name: CAMERA3D_TRACK_NAME,
+      layer: 9500,
+      hidden: false,
+      eraser: []
+    });
+  }
+
+  function ensureCamera3DTrack() {
+    const total = Math.max(1, AppState.frames.length);
+    let t = AppState.tracks[CAMERA3D_TRACK_ID];
+    if (!t || !t.frames) {
+      t = { name: CAMERA3D_TRACK_NAME, frames: new Array(total).fill(null) };
+      AppState.tracks[CAMERA3D_TRACK_ID] = t;
+    }
+    t.name = CAMERA3D_TRACK_NAME;
+    while (t.frames.length < total) t.frames.push(null);
+    return t;
+  }
+
+  /* 摄像机是单例镜头轨：补满所有空白帧，轨道上永远是一条贯通全片的长条。
+     已有帧（尤其关键帧）保留；force=true 只用于「替换为默认 3D 摄像机」。 */
+  function fillCamera3DTrackToFullLength(force) {
+    const total = Math.max(1, AppState.frames.length);
+    const t = ensureCamera3DTrack();
+    const base = makeCamera3DFrame();
+    for (let i = 0; i < total; i++) {
+      const prev = t.frames[i];
+      if (!force && prev && prev.type === 'camera3d') continue;
+      let fr;
+      try { fr = JSON.parse(JSON.stringify(base)); } catch (_) { fr = Object.assign({}, base); }
+      if (prev && prev.__k) fr.__k = prev.__k;
+      if (prev && prev.__d) fr.__d = prev.__d;
+      t.frames[i] = fr;
+    }
+    return t;
+  }
+
+  /* 3D 模式下点击「摄像机」= 重置工程级 camera3d，并重建贯通全片的 3D 摄像机轨。 */
+  function resetCamera3DToDefault() {
+    const D = s3Data();
+    if (!D || typeof D.getProjectState !== 'function') return null;
+    const defaults = (typeof D.projectDefaults === 'function' ? D.projectDefaults().camera3d : null) || {};
+    let cam;
+    try { cam = JSON.parse(JSON.stringify(defaults)); } catch (_) { cam = Object.assign({}, defaults); }
+    const state = D.getProjectState();
+    state.camera3d = cam;
+    D.setProjectState(state);
+    fillCamera3DTrackToFullLength(true);
+    const S3 = window.SKFE && window.SKFE.systems && window.SKFE.systems.space3d;
+    if (S3 && typeof S3.applyExportCameraLive === 'function') S3.applyExportCameraLive();
+    return makeCamera3DFrame();
+  }
+
+  /* 取指定帧的 3D 摄像机轨道求值结果；不包装成画布对象，专供播放 / 导出 / 关键帧使用。 */
+  function getCamera3DFrameAt(idx) {
+    const t = AppState.tracks[CAMERA3D_TRACK_ID];
+    if (!t || !t.frames || idx < 0 || idx >= t.frames.length) return null;
+    const fr = getTrackFrame(CAMERA3D_TRACK_ID, idx);
+    return (fr && fr.type === 'camera3d') ? fr : null;
+  }
+
+  function getCamera3DObject() {
+    return getCamera3DFrameAt(AppState.currentFrameIndex) || makeCamera3DFrame();
+  }
+
+  function syncCamera3DTrackFromState() {
+    if (!is3DModeActive()) return;
+    const t = ensureCamera3DTrack();
+    const idx = AppState.currentFrameIndex;
+    const prev = t.frames[idx];
+    const frame = makeCamera3DFrame();
+    if (prev && prev.__k) frame.__k = prev.__k;
+    t.frames[idx] = frame;
+    /* 当前槽位可能被改写成普通帧，派生帧缓存必须失效，否则改参数后落关键帧还会读到旧值。 */
+    bumpKfEval();
+  }
+
+  function applyCamera3DFrameToState(idx) {
+    const t = AppState.tracks[CAMERA3D_TRACK_ID];
+    if (!t || !t.frames || !t.frames[idx]) return;
+    const fr = getTrackFrame(CAMERA3D_TRACK_ID, idx);
+    if (!fr || fr.type !== 'camera3d') return;
+    const D = s3Data();
+    if (!D || typeof D.getProjectState !== 'function') return;
+    const state = D.getProjectState();
+    const patch = {};
+    try { Object.assign(patch, JSON.parse(JSON.stringify(fr))); } catch (_) { Object.assign(patch, fr); }
+    ['id', 'type', 'name', 'cameraMode', 'layer', 'eraser', 'hidden', '__k', '__d'].forEach(k => { delete patch[k]; });
+    state.camera3d = Object.assign({}, state.camera3d || {}, patch);
+    D.setProjectState(state);
+    const S3 = window.SKFE && window.SKFE.systems && window.SKFE.systems.space3d;
+    if (S3 && typeof S3.applyExportCameraLive === 'function') S3.applyExportCameraLive();
+  }
+
+  /* 2D 取景缩放 / 偏移同步到工程级 camera2d 槽位。 */
+  function syncCamera2DState() {
+    const D = window.SKFE && window.SKFE.systems.space3dData;
+    if (!D || typeof D.getProjectState !== 'function') return;
+    const state = D.getProjectState();
+    if (!state.camera2d || typeof state.camera2d !== 'object') {
+      state.camera2d = D.projectDefaults().camera2d;
+    }
+    state.camera2d.zoom = camViewZoom;
+    state.camera2d.offset = { x: camViewOffset.x, y: camViewOffset.y };
+    const cam = getCurrentCameraObject();
+    if (cam) state.camera2d.cameraId = cam.id;
+    D.setProjectState(state);
+  }
+
+  /* 右上角浮窗入口：只显示图标 + 2D / 3D；2D 没添加摄像机时完全不显示。 */
+  function syncCameraViewEntryUI() {
+    const S3 = window.SKFE && window.SKFE.systems.space3d;
+    const in3D = !!(S3 && typeof S3.isEnabled === 'function' && S3.isEnabled());
+    const in3DCam = !!(in3D && typeof S3.isCameraView === 'function' && S3.isCameraView());
+    const has2DCam = !!getCurrentCameraObject();
+    if (!in3D && !has2DCam && cameraView2DActive) cameraView2DActive = false;
+    document.body.classList.toggle('has-2d-camera', has2DCam && !in3D);
+
+    const btn = document.getElementById('btnSpace3DCamera');
+    if (!btn) return;
+    const active = in3DCam || cameraView2DActive;
+    const label = in3D ? '3D' : '2D';
+    btn.hidden = !(in3D || has2DCam);
+    btn.classList.toggle('on', active);
+    btn.innerHTML = ic('videocamera') + '<span>' + label + '</span>';
+    btn.title = (active ? '退出 ' : '进入 ') + label + ' 视角';
+    btn.setAttribute('aria-label', btn.title);
+  }
+
+  /* 2D 摄像机视角切换：只给右上角浮窗按钮调用。 */
+  function setCameraView2D(on) {
+    if (is3DModeActive()) return false;
+    const cam = getCurrentCameraObject();
+    if (on && !cam) return false;
+    cameraView2DActive = !!on;
+    if (cameraView2DActive) {
+      AppState.activeTrackId = String(cam.id);
+      AppState.selected = cam;
+      const D = window.SKFE && window.SKFE.systems.space3dData;
+      const state = D && typeof D.getProjectState === 'function' ? D.getProjectState() : null;
+      const cfg = state && state.camera2d;
+      if (cfg) {
+        camViewZoom = Number(cfg.zoom) > 0 ? Number(cfg.zoom) : 1;
+        camViewOffset = {
+          x: Number(cfg.offset && cfg.offset.x) || 0,
+          y: Number(cfg.offset && cfg.offset.y) || 0
+        };
+      }
+      if (SKFE.systems.camera && typeof SKFE.systems.camera.fitCameraViewToAvailableArea === 'function') {
+        SKFE.systems.camera.fitCameraViewToAvailableArea();
+      }
+    } else {
+      if (isCameraTrackId(AppState.activeTrackId)) AppState.activeTrackId = TRACK_ALL_ID;
+    }
+    refreshSubTrackOptions();
+    syncCamera2DState();
+    syncCameraViewEntryUI();
+    EventBus.emit('app:update');
+    return true;
+  }
   /* 双指缩放模式：'camera' = 缩放摄像机本身；'view' = 缩放页面视图 */
   let twoFingerMode = 'view';
   /* 滚轮缩放摄像机时，延迟刷新缩略图与历史（避免滚动过程卡顿） */
@@ -18623,14 +20479,17 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     getTrackObjectsAt,
     getTrackFrame,
     getSpawnPoint, addObjectToFrames, generateName, fillCameraToFullLength,
+    fillCamera3DTrackToFullLength, resetCamera3DToDefault, ensureCamera3DTrack,
     syncMainLengthFromTracks, refreshSubTrackOptions, setGlobalProp,
     isSubTrackMode,
+    is3DModeActive: () => is3DModeActive(),
     nextUid: () => ++uid,
     invalidateAllFrameThumbs, updateFrameBar, syncAdvToggles,
     drawGroundLine,
     getObjectsForFrameAt,
     isCameraTrackId,
     getCurrentCameraObject,
+    isCameraView2DActive: () => cameraView2DActive,
     getActiveViewScale: () => SKFE.systems.eraser.getActiveViewScale(),
     // 环境
     isMobile,
@@ -18654,20 +20513,115 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     resetView: () => { camViewZoom = 1; camViewOffset = { x: 0, y: 0 }; },
     getPageBgColor: () => pageBgColor,
     getPageBgAlpha: () => pageBgAlpha,
+    getThemeConfig: () => (SKFE.features.theme && SKFE.features.theme.getConfig) ? SKFE.features.theme.getConfig() : null,
+    syncCameraElementToExportCamera: () => syncCameraElementToExportCamera(),
+    render: () => render(),
     requestRender: () => EventBus.emit('need:render'),
     requestSyncUI: () => EventBus.emit('need:syncUI'),
   });
 
+  /* ---------------- 轻量 3D 模式（阶段 2：默认关闭，独立模块） ---------------- */
+  if (SKFE.systems.space3d && typeof SKFE.systems.space3d.init === 'function') {
+    SKFE.systems.space3d.init({
+      AppState,
+      EventBus,
+      isMobile,
+      getUiPanel: () => uiPanel,
+      getTimelineEl: () => timelineEl,
+      getTimelineDock: () => timelineDock,
+      getCanvas: () => canvas,
+      getCtx: () => ctx,
+      setCtx: (c) => { ctx = c; },
+      renderScene,
+      getObjectsForFrameAt,
+      getObjectBounds,
+      getPageBgColor: () => pageBgColor,
+      getPageBgAlpha: () => pageBgAlpha,
+      getThemeConfig: () => (SKFE.features.theme && SKFE.features.theme.getConfig) ? SKFE.features.theme.getConfig() : null,
+      getGroundLineY: () => groundLineY,
+      isGroundLineEnabled: () => groundLineEnabled,
+      getFigureFootY: (o) => {
+        try {
+          /* 与地面参考线完全同公式：不额外加线宽 pad。 */
+          const j = jointData(o);
+          const ys = [j.footL, j.footR, j.toeL, j.toeR].filter(Boolean).map(p => p.y);
+          return ys.length ? Math.max.apply(null, ys) : null;
+        } catch (_) {
+          return null;
+        }
+      },
+      requestRender: () => EventBus.emit('need:render'),
+      requestSyncUI: () => {
+        syncCamera3DTrackFromState();
+        EventBus.emit('need:syncUI');
+      },
+      getIsPlaying: () => isPlaying,
+      /* 阶段 5：3D 画布点击面片直接选中对应元件，复用 2D 同一套 select 流程。 */
+      select: (o) => select(o),
+      /* 阶段 5：3D 画布关节手柄复用 2D 的同一套关节计算，避免两套语义漂移。 */
+      getFigureHandles: (o) => {
+        try { return getHandles(jointData(o), o).map(h => ({ name: h.name, p: h.p })); } catch (_) { return []; }
+      },
+      beginFigureJointDrag: (o, part) => {
+        if (!o || o.type !== 'figure' || o.locked) return null;
+        return { o, part, startJ: JSON.parse(JSON.stringify(jointData(o))), pre: null };
+      },
+      applyFigureJointDrag: (state, pLocal) => {
+        if (!state || !state.o) return;
+        if (!state.pre) {
+          state.pre = getSnapshot();
+          pushPreSnapshot(state.pre, '调整 3D 关节');
+        }
+        updateFigureJointFromDrag(state.o, state.part, pLocal, state.startJ);
+        markCurrentFrameModified();
+        EventBus.emit('need:render');
+      },
+      endFigureJointDrag: () => {
+        EventBus.emit('need:syncUI');
+      },
+      /* 阶段 5：3D 变换手柄直接读写既有 3D 属性，不改独立数据格式。 */
+      getObject3DTransform: () => {
+        const o = AppState.selected;
+        if (!o || o.locked) return null;
+        return {
+          posX: get3DObjectProp('posX'), posY: get3DObjectProp('posY'), posZ: get3DObjectProp('posZ'),
+          rotX: get3DObjectProp('rotX'), rotY: get3DObjectProp('rotY'), rotZ: get3DObjectProp('rotZ')
+        };
+      },
+      setObject3DTransform: (patch) => {
+        if (!patch) return;
+        ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ'].forEach(k => {
+          if (patch[k] !== undefined && patch[k] !== null && Number.isFinite(patch[k])) set3DObjectProp(k, patch[k]);
+        });
+      },
+      begin3DTransformDrag: () => pushPreSnapshot(getSnapshot(), '3D 手柄变换'),
+      end3DTransformDrag: () => {
+        markCurrentFrameModified();
+        EventBus.emit('need:syncUI');
+      }
+    });
+  }
 
-
-  function isCameraTrackId(id) {
+  function isCamera2DTrackId(id) {
     if (id == null) return false;
     const t = AppState.tracks[String(id)];
     return !!(t && t.frames && t.frames.some(d => d && d.type === 'camera'));
   }
 
+  function isCamera3DTrackId(id) {
+    if (id == null) return false;
+    if (String(id) === CAMERA3D_TRACK_ID) return true;
+    const t = AppState.tracks[String(id)];
+    return !!(t && t.frames && t.frames.some(d => d && d.type === 'camera3d'));
+  }
+
+  function isCameraTrackId(id) {
+    return isCamera2DTrackId(id) || isCamera3DTrackId(id);
+  }
+
   function getCameraAtFrame(idx) {
     for (const id in AppState.tracks) {
+      if (isCamera3DTrackId(id)) continue;
       const d = getTrackFrame(id, idx);
       if (d && d.type === 'camera') return d;
     }
@@ -18740,7 +20694,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     generateName: (type) => { const tmp = { type }; generateName(tmp); return tmp.name; },
     addObjectToFrames,
     select: (o) => select(o),
-    getSnapshot, pushPreSnapshot,
+    getSnapshot, restoreSnapshot, pushPreSnapshot,
     markCurrentFrameModified, invalidateAllFrameThumbs, setGlobalProp,
     refreshUI: () => EventBus.emit('need:syncUI'),
     showToast: (msg, type, ms) => showHistoryToast(msg, type, ms),
@@ -18842,6 +20796,12 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     if (k === 'c') { e.preventDefault(); cloneSelected(); }
     else if (k === 'delete' || k === 'backspace') { e.preventDefault(); deleteSelected(); }
     else if (k === 'r') { e.preventDefault(); resetPose(); }
+    else if (k === 'g' && window.SKFE && window.SKFE.systems && window.SKFE.systems.space3d &&
+             window.SKFE.systems.space3d.isEnabled && window.SKFE.systems.space3d.isEnabled()) {
+      e.preventDefault();
+      const cur = window.SKFE.systems.space3d.getGizmoMode && window.SKFE.systems.space3d.getGizmoMode();
+      changeGizmoMode(cur === 'rotate' ? 'translate' : 'rotate');
+    }
     else if (k === ' ') { e.preventDefault(); togglePlay(); }
     else if (k === 'arrowleft') { e.preventDefault(); goToFrame(AppState.currentFrameIndex - 1); }
     else if (k === 'arrowright') { e.preventDefault(); goToFrame(AppState.currentFrameIndex + 1); }
@@ -18876,6 +20836,8 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     scheduleRenderLayerPop();
     /* 使用说明浮窗内容来自 README，按语言区分；切换语言后按新语言重取 */
     if (typeof window.SKFE_RELOAD_HELP_CONTENT === 'function') window.SKFE_RELOAD_HELP_CONTENT();
+    /* 自定义按键浮条的快捷按钮文字由 t() 动态生成，切语言后重画 */
+    if (typeof window.SKFE_REFRESH_SHORTCUT_STRIP === 'function') window.SKFE_REFRESH_SHORTCUT_STRIP();
   };
 
   /* ==================== 初始化 ==================== */
@@ -18911,6 +20873,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
 
     AppState.viewOffset.x = canvas.clientWidth / 2;
     AppState.viewOffset.y = canvas.clientHeight / 2;
+    loadViewPinState();
     AppState.frames = [{ id: 1, duration: Math.round(1000 / defaultFPS), isTween: false }];
     AppState.tracks = {};
     AppState.currentFrameIndex = 0;
@@ -18940,10 +20903,13 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
     EventBus.emit('need:render');
     updateUndoRedoButtons();
     syncPinViewBtn();
+    syncCameraViewEntryUI();
     syncResizeUI(); // 页面加载时，根据保存的状态刷新一下按钮文字和手柄
     /* v7.0.5：把控件搬进 6 个分区、绑定底部入口栏。必须在所有控件初始化之后做，
        否则负责量尺寸的代码（吸顶高度等）会算到搬迁前的布局。 */
     mountUiSheets();
+    initObjStripFloat();
+    initCustomButtonStrip();
     applyTranslations();
     if (typeof window.SKFE_REFRESH_I18N === 'function') window.SKFE_REFRESH_I18N();
     updateProjectListUI();
@@ -19005,6 +20971,9 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         return out;
       },
 
+      /* 摄像机轨（2D / 3D）在自由视角与摄像机视角都归 app.js 的关键帧路径处理。 */
+      isCameraKeyframeScope: () => isCameraKeyframeScope(),
+
       /* v7.9.0：当前选中的组载体 id（轨道工具栏据此显示「进入编组」） */
       selectedGroupId() {
         const G = SKFE.systems.group;
@@ -19048,7 +21017,7 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
         if (!fr) return null;
         let url = null;
         try {
-          const off = renderFrameToDataURL(fr, 96, 96, { transparent: true, ignoreCamera: !isCameraTrackId(n) }, n);
+          const off = renderFrameToDataURL(fr, 96, 96, { force2D: true, transparent: true, ignoreCamera: !isCameraTrackId(n) }, n);
           url = off ? off.toDataURL("image/png") : null;
         } catch (_) { url = null; }
         if (url) trackThumbCache.set(key, { v: thumbVersion, url });
@@ -19218,6 +21187,22 @@ const spatialGroupVals = spatialReadGroups(AppState.selected);
       makeAudioClip, playAudioClips, pauseAudioClips, disposeAudioClipSource,
       /* 编组 */
       deleteGroupById,
+      /* v8.0.0：画布 / 摄像机 / 3D 新功能全开放入口 */
+      getViewPinned, setViewPinned, setCanvasBoundsEnabled,
+      is3DModeActive, isCameraViewActiveNow, setCameraView2D,
+      CAMERA3D_TRACK_ID, CAMERA3D_TRACK_NAME,
+      makeCamera3DFrame, ensureCamera3DTrack, fillCamera3DTrackToFullLength,
+      resetCamera3DToDefault, getCamera3DFrameAt, getCamera3DObject,
+      syncCamera3DTrackFromState, applyCamera3DFrameToState,
+      getExportSize,
+      systems: {
+        brush: SKFE.systems.brush,
+        eraser: SKFE.systems.eraser,
+        camera: SKFE.systems.camera,
+        space3d: SKFE.systems.space3d,
+        space3dData: SKFE.systems.space3dData,
+        space3dExport: SKFE.systems.space3dExport
+      },
       /* 画布与轨道 UI */
       getCanvas: () => document.getElementById('c'),
       getTimelineEl: () => document.getElementById('timeline')

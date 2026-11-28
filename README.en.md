@@ -2,7 +2,7 @@
 
 Stickman keyframe animation editor — For the Alan Becker stick figure fandom.
 
-**Author**: binvwvnid　│　**QQ group**: 1121039855　│　**Version**: v7.9.3
+**Author**: binvwvnid　│　**QQ group**: 1121039855　│　**Version**: v8.0.0
 
 - Web app: https://binvwvnid.github.io/SKFE-StickmanKeyframeEditor/
 - Installers (Windows / Android): https://github.com/binvwvnid/SKFE-StickmanKeyframeEditor/releases
@@ -70,6 +70,7 @@ Stickman keyframe animation editor — For the Alan Becker stick figure fandom.
 - Properties, elements and more-settings areas use full-width title bars; the scrollbar on the right is thin, so content is never covered by the thumb.
 - The element list follows the current frame's layer order from top to bottom; dragging a row changes the order and writes it to the current frame's layers. With global property editing enabled, the order is synced to all frames of that element.
 - `Guide` to the right of the global property editing note opens a closable floating window covering the screen, showing the full text of the active README.
+- Advanced settings can enable an `Independent element strip`, moving the current horizontal element bar into a floating window. Its position and width can be dragged and cached, and the toggle is remembered too. The custom button strip works the same way. The right-side resize handle stays hidden by default and appears on hover or click.
 
 ### 2.3 Canvas settings
 
@@ -95,7 +96,7 @@ Under `＋ Add object` you can add:
 - **Import video**: a genuinely editable video element. It can be resized, positioned, rotated, made transparent, four-corner distorted and keyframed like an image, and can also be bound to a stickman. It is not the same thing as a `Reference video`.
 - **Import audio**: an element that carries sound only. It accepts audio files and video files. Importing a video as audio acts as "video to audio", but no real transcoding or real sampled waveform is generated.
 - **Dialogue bubble**: speech balloon text with editable text, color, gradient, size and tail direction.
-- **Camera**: controls the export framing and ratio and can be animated too.
+- **Camera**: the add button is always named `Camera` and is routed by the active mode. 2D mode adds a normal 2D camera element track; 3D mode adds a project-level 3D camera virtual track. The two cameras are fully independent and never appear in each other's mode. Camera tracks always fill the whole timeline: they cannot be split, stretched, shortened or padded with inserted frames. Derived frames are generated automatically between two keyframes.
 - **Built-in shapes**: circle, square and triangle.
 
 ### 3.2 Basic properties
@@ -136,6 +137,16 @@ After selecting an element you can adjust:
 - **Playback rule**: like video elements, audio sounds only within the frame range covered by its own track segment and is muted outside it.
 - **Operations**: it can be moved, stretched, shortened and split in the track; its audio source is released on deletion.
 
+### 3.6 3D Mode and Two Independent Cameras
+
+- 3D mode is toggled only by the master switch at the top of the bottom-bar 3D panel; opening the bottom panel itself does not switch modes.
+- The 2D camera appears only in 2D mode, and the 3D camera only in 3D mode. Both the vertical element list and the horizontal element strip show the camera for the active mode.
+- The camera-view entry lives only in the upper-right floating window. Its icon is labeled only `2D` or `3D`; the 2D entry is hidden until a 2D camera exists. Clicking a stickman, a joint or a 3D move anchor never switches to camera view by accident.
+- The 2D camera is a real element track. The 3D camera is a project-level virtual track (`__camera3d__`) carrying FOV, near / far clipping, orthographic height, output width / height, position, rotation, target and target offset.
+- 3D camera keyframes can be set in either free-orbit view or camera view, and in-between frames are interpolated automatically. The camera track cannot be split, stretched, shortened or padded with inserted frames; only its curve can be edited.
+- 3D export reads the camera track frame by frame, so PNG / JPG / GIF / MP4 / WebM output the full-track camera motion instead of the fixed view at export time. Output size follows the 3D camera's `width / height` ratio.
+- Joint points in 3D orbit view scale with the view while keeping a reasonable size relative to the stickman. Bound elements follow all 3D translation and rotation of the parent stickman, and their own parameters remain relative to the bind point.
+
 ---
 
 ## 4. Advanced Stickman Settings
@@ -168,8 +179,11 @@ After selecting an element you can adjust:
 
 - Pen strokes are saved as vector objects and can follow an object's movement, rotation and scale.
 - The eraser only affects the currently selected object, and erasures are also saved as vectors.
+- Pen, eraser and paint bucket are mutually exclusive; enabling one always disables the other two.
+- Three brush types are available: `Default`, `Leaf` and `Crayon`. Appearance and configuration are saved.
 - Straight-line mode and end snapping are supported; stopping at the end of a stroke can snap it into a standard shape.
-- Undo, clear erasures of the current frame and clear all erasures are available.
+- On mobile, two-finger zoom and pan work in pen, eraser and paint-bucket modes; the eraser touch-interruption issue is fixed.
+- Undo, clear erasures of the current frame and clear all erasures are available. The fixed view state and its saved viewpoint are stored in local cache.
 
 ---
 
@@ -329,7 +343,7 @@ Files can be dragged directly onto the SKFE window and are recognized automatica
 - Data-type and code-type plugins developed against the official interface are supported, as well as ZIP plugin packages imported by dragging them in.
 - Code-type plugins show a risk notice and are only loaded after confirmation.
 - On the Android client, "Download all (ZIP)" now uses native save / system share instead of relying on WebView `<a download>`.
-- Since v7.8.4, plugins use `window.SKFE.api` for full access: project data, runtime state, DOM UI, events, media, groups, loops, history and export. MCP plugins can call `api.mcp.call()` to operate the entire interface and dataset.
+- Since v8.0.0, plugins use `window.SKFE.api` for full access: project data, runtime state, DOM UI, events, media, groups, loops, history, export, pen, eraser, cameras, 3D mode and fixed-view state. The API version is `2.1.0`; existing interfaces remain compatible. MCP plugins can call every stable method through `api.mcp.call()`.
 - This is a fully trusted model with no sandbox. Only import plugins you trust.
 - Plugin authors should read `插件API参考.md` in the repository; the internal design draft is not published with the repository.
 
@@ -363,7 +377,9 @@ The export panel is grouped by purpose: **still images / video / sequences and G
 ### 9.4 Export options
 
 - Export range, canvas ratio, background color, transparent background and quality can be set.
-- When a camera exists, export uses the camera's framing first.
+- When a 2D camera exists, export uses its framing first.
+- In 3D mode, every frame is rendered from the 3D camera view. Camera keyframe motion is included in PNG / JPG sequences, GIF, MP4 and WebM, and the output size follows the 3D camera's `width / height` ratio.
+- GIF export draws the ground grid opaquely to prevent the 256-color palette from breaking thin lines into fragments.
 - Without canvas bounds, framing is calculated from the content or the default ratio.
 
 ---

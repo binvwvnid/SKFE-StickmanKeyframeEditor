@@ -168,6 +168,28 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     background: var(--color-primary); color: var(--color-primary-text); /* 主题色实底 */
   } /* 选中态结束 */
   .ui-tab.active:hover { background: var(--color-primary-hover); color: var(--color-primary-text); } /* 选中态悬停 */
+  .ui-tab-text { font-weight: 700; letter-spacing: .02em; } /* 3D 入口是纯文本标签，不用矢量图标，也不参与翻译 */
+  
+  /* 3D 面板：沿用底部栏分区与滑条行的统一配色，不额外加深色块。 */
+  .s3-subtitle { font-size: 12px; font-weight: 600; color: var(--text-main); margin: 0 0 6px; }
+  .row + .s3-subtitle { margin-top: 6px; }
+  .space3d-row .s3-num {
+    flex: 0 0 62px; width: 62px; min-width: 62px;
+    padding: 4px 6px; text-align: right;
+    color: var(--text-main); background: var(--bg-input);
+    border: 1px solid var(--border-color); border-radius: 8px;
+    outline: none; font-size: 12px; font-weight: 700;
+    /* 与属性面板 X/Y 输入一致：保留原生数字框上下微调箭头。 */
+    -moz-appearance: number-input;
+  }
+  .space3d-row .s3-num:hover { border-color: var(--color-primary); }
+  .space3d-row .s3-num:focus { border-color: var(--color-primary); box-shadow: var(--focus-ring); }
+  .space3d-row input[type="range"] { accent-color: var(--color-primary); }
+  .s3-target {
+    flex: 1; min-width: 0; max-width: 100%; font-size: 11.5px;
+    padding: 5px 7px; border: 1px solid var(--border-color);
+    border-radius: var(--radius-control); background: var(--bg-input); color: var(--text-main);
+  }
   
   #uiScroll::-webkit-scrollbar, /* v7.0.5：滚动区（原 #ui）的滚动条 */
   #ui::-webkit-scrollbar, /* 兼容旧结构 */
@@ -249,7 +271,18 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   } /* 历史记录按钮基础样式结束 */
   #historyControls button:hover:not(:disabled) { background: var(--btn-hover); color: var(--text-main); } /* 鼠标悬浮（非禁用状态）时改变背景色 */
   #historyControls button:disabled { opacity: .35; cursor: not-allowed; } /* 禁用状态下透明度变低，指针变为禁止 */
-
+  #btnSpace3DCamera { /* 摄像机视角唯一入口：藏在撤销/重做栏下方；3D 常驻，2D 有摄像机时显示 */
+    display: none; position: absolute; top: calc(100% + 6px); left: 5px;
+    min-width: 34px; min-height: 34px; padding: 6px 10px;
+    gap: 6px; font-size: 12px; white-space: nowrap;
+    box-shadow: var(--shadow-float);
+  }
+  body.space3d-mode #btnSpace3DCamera,
+  body.has-2d-camera #btnSpace3DCamera { display: flex; }
+  #btnSpace3DCamera[hidden] { display: none !important; }
+  #btnSpace3DCamera.on { background: var(--color-primary); color: var(--color-primary-text); }
+  /* 摄像机按钮在 2D / 3D 模式都保留；点击后按当前模式添加对应的 2D / 3D 摄像机。 */
+  
   #btnShowTimeline { /* 右下角的“展示时间轴”悬浮按钮 */
     position: fixed; bottom: 40px; right: 20px; /* 固定在右下角 */
     z-index: 30; border-radius: var(--radius-chip); /* 层级为 30，胶囊圆角 */
@@ -1518,6 +1551,13 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     border: 1px solid var(--border-color); border-radius: 6px; background: transparent;
   }
   .brush-tool-panel .btn-xs { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .brush-tool-panel #btnBrushType { display: flex; align-items: center; justify-content: center; gap: 4px; }
+  .brush-tool-panel #btnBrushType .brush-type-caption {
+    color: var(--text-sub); font-size: 10px; line-height: 1; flex: 0 0 auto;
+  }
+  .brush-tool-panel #btnBrushType #brushTypeLabel {
+    color: var(--text-main); font-size: 11px; font-weight: 600; line-height: 1; flex: 0 0 auto;
+  }
   .brush-slider input[type="range"] { flex: 1; min-width: 0; }
   .brush-slider .val { min-width: 22px; text-align: right; color: var(--text-sub); font-size: 11px; }
   .brush-grid-preset select { width: 100%; min-width: 0; }
@@ -1987,7 +2027,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
   #timeline.timeline-bottom #btnHideTimeline { /* 置底状态下的收起按钮 */
     top: -30px; bottom: auto; left: auto; right: 20px; /* 位置在时间轴上方偏右 */
   } /* 样式结束 */
-  .camera-ratio-btn.on { /* 选中的摄像机比例按钮 */
+  .camera-ratio-btn.on, .s3-cam-ratio-btn.on { /* 选中的摄像机比例按钮：2D / 3D 共用 */
     background: var(--color-primary); /* 主题色背景 */
     color: var(--color-primary-text); /* 白色文字 */
     border-color: transparent; /* 透明边框 */
@@ -2022,6 +2062,112 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     font-size: 10.5px; color: var(--text-sub); padding: 6px 4px 1px; /* 字号，次要色，内边距 */
     text-align: center; /* 居中 */
   } /* 提示样式结束 */
+
+  /* 高级设置：元件浮条独立窗口。复用 #objStrip 本体，压成一条细横条，只能横向拉长。 */
+  #objStripFloat {
+    position: fixed; z-index: 47; display: none; /* 默认隐藏，层级高于普通浮窗 */
+    width: 420px; min-width: 240px; max-width: calc(100vw - 24px); /* 默认 / 最小 / 最大宽度 */
+    height: 34px; min-height: 34px; max-height: 34px; /* 固定细条高度，不再纵向缩放 */
+    padding: 3px 10px 3px 4px; /* 左右留出把手与缩放区 */
+    background: var(--bg-panel); border: 1px solid var(--border-color); /* 面板配色 */
+    border-radius: 17px; box-shadow: var(--shadow-pop); /* 胶囊圆角与阴影 */
+    touch-action: none; /* 浮窗内拖动不触发页面手势 */
+  } /* 窗口基础样式结束 */
+  #objStripFloat[hidden] { display: none !important; } /* hidden 属性优先级最高 */
+  #objStripFloat .osf-body { /* 元件条挂载区：横向铺满 */
+    display: flex; align-items: center; gap: 2px; width: 100%; height: 100%; min-width: 0;
+  } /* 挂载区结束 */
+  #objStripFloat .osf-grip { /* 左侧细拖动把手 */
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 22px; color: var(--text-sub); cursor: move; opacity: .55;
+  } /* 拖动把手结束 */
+  #objStripFloat .osf-grip:hover { opacity: 1; } /* 悬浮加深 */
+  #objStripFloat #objStrip { /* 浮窗里不再吸顶，避免跟固定定位互相打架 */
+    position: relative; top: auto; z-index: auto; flex: 1 1 auto; min-width: 0;
+    margin: 0; padding: 0; background: transparent; /* 取消 sticky 行为与多余内边距 */
+    -webkit-backdrop-filter: none; backdrop-filter: none; /* 不要背景模糊 */
+  } /* 浮窗内元件条结束 */
+  #objStripFloat .osf-resize { /* 右侧横向缩放手柄：默认隐藏，交互时显示，只改宽度 */
+    position: absolute; right: 1px; top: 5px; bottom: 5px; width: 7px; /* 细竖条 */
+    cursor: ew-resize; touch-action: none; /* 左右缩放指针 */
+    border-radius: 4px; background: var(--text-sub); opacity: 0; pointer-events: none; /* 默认不可见 */
+  } /* 缩放手柄结束 */
+  #objStripFloat:hover .osf-resize,
+  #objStripFloat:focus-within .osf-resize,
+  #objStripFloat.show-resize .osf-resize { opacity: .55; pointer-events: auto; } /* 交互时显示 */
+  #objStripFloat .osf-resize:hover,
+  #objStripFloat.show-resize .osf-resize:hover { opacity: .9; } /* 悬浮加深 */
+
+  /* 高级设置：自定义按键浮条 + 按钮选择弹窗 */
+  #customButtonStrip {
+    position: fixed; z-index: 48; display: none; /* 默认隐藏，层级略高于元件浮条 */
+    left: 20px; bottom: 120px; height: 36px; min-height: 36px; /* 细横条 */
+    padding: 3px 14px 3px 8px; /* 右侧给缩放手柄留位 */
+    background: var(--bg-panel); border: 1px solid var(--border-color); /* 面板配色 */
+    border-radius: 18px; box-shadow: var(--shadow-pop); /* 胶囊圆角与阴影 */
+    align-items: center; gap: 4px; touch-action: none; /* 横向排列，禁用页面手势 */
+  } /* 浮条基础样式结束 */
+  #customButtonStrip[hidden] { display: none !important; } /* hidden 优先级最高 */
+  #customButtonStrip:not([hidden]) { display: flex; } /* 打开时横向弹性布局 */
+  #customButtonStrip .cbs-grip { /* 左侧拖动把手 */
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 24px; color: var(--text-sub); cursor: move; opacity: .55;
+  } /* 把手结束 */
+  #customButtonStrip .cbs-grip:hover { opacity: 1; } /* 悬浮加深 */
+  #customButtonStrip .cbs-items { /* 快捷按钮列表：横向滚动，不换行 */
+    display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0;
+    overflow-x: auto; scrollbar-width: none; /* 隐藏滚动条 */
+  } /* 列表结束 */
+  #customButtonStrip .cbs-items::-webkit-scrollbar { display: none; } /* Webkit 隐藏滚动条 */
+  #customButtonStrip .cbs-item { /* 单个快捷按钮 */
+    flex: 0 0 auto; min-height: 24px; padding: 3px 9px; /* 尺寸与图层按钮接近 */
+    border: 1px solid var(--border-color); border-radius: var(--radius-chip); /* 胶囊圆角 */
+    background: var(--btn-bg); color: var(--text-main); font-size: 11.5px; /* 普通按钮配色 */
+    white-space: nowrap; cursor: pointer; /* 不换行 */
+  } /* 快捷按钮结束 */
+  #customButtonStrip .cbs-item:hover { background: var(--btn-hover); } /* 悬浮反馈 */
+  #customButtonStrip .cbs-add { /* 右侧加号按钮：去掉底部色块底 */
+    flex: 0 0 auto; width: 24px; height: 24px; padding: 0; /* 固定尺寸 */
+    display: inline-flex; align-items: center; justify-content: center; /* 图标居中 */
+    border: 1px solid transparent; border-radius: 50%; /* 圆形按钮，无边框色块 */
+    background: transparent; color: var(--text-sub); cursor: pointer; /* 透明底 */
+  } /* 加号按钮结束 */
+  #customButtonStrip .cbs-add:hover { background: transparent; color: var(--color-primary); } /* 悬浮反馈 */
+  #customButtonStrip .cbs-resize { /* 右侧横向缩放手柄：默认隐藏，交互时显示，只改宽度 */
+    position: absolute; right: 1px; top: 5px; bottom: 5px; width: 7px; /* 细竖条 */
+    cursor: ew-resize; touch-action: none; /* 左右缩放指针 */
+    border-radius: 4px; background: var(--text-sub); opacity: 0; pointer-events: none; /* 默认不可见 */
+  } /* 缩放手柄结束 */
+  #customButtonStrip:hover .cbs-resize,
+  #customButtonStrip:focus-within .cbs-resize,
+  #customButtonStrip.show-resize .cbs-resize { opacity: .55; pointer-events: auto; } /* 交互时显示 */
+  #customButtonStrip .cbs-resize:hover,
+  #customButtonStrip.show-resize .cbs-resize:hover { opacity: .9; } /* 悬浮加深 */
+  .shortcut-picker-float { /* 沿用说明浮窗，仅改成自动高度 */
+    height: auto; max-height: 70vh; overflow: auto;
+  } /* 弹窗结束 */
+  .shortcut-picker-body { padding: 10px 14px 4px; } /* 内容区 */
+  .shortcut-group-title { /* 分组标题 */
+    margin: 8px 0 5px; font-size: 12px; font-weight: 600; color: var(--text-main);
+  } /* 分组标题结束 */
+  .shortcut-grid { /* 按钮网格 */
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px;
+  } /* 网格结束 */
+  .shortcut-option { /* 单个按钮勾选项 */
+    display: flex; align-items: center; gap: 7px; min-width: 0; padding: 6px 8px;
+    border: 1px solid var(--border-color); border-radius: 9px; background: #fff;
+    font-size: 11.5px; color: var(--text-main); cursor: pointer;
+  } /* 勾选项结束 */
+  .shortcut-option:hover { background: var(--btn-hover); } /* 悬浮反馈 */
+  .shortcut-option input { accent-color: var(--color-primary); flex: 0 0 auto; } /* 勾选框配色 */
+  .shortcut-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* 长标签省略 */
+  .shortcut-picker-foot { /* 底部操作栏 */
+    position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+    padding: 10px 12px; background: #ffffff; border-top: 1px solid var(--border-color);
+  } /* 操作栏结束 */
+  .shortcut-picker-tip { /* 底部提示 */
+    flex: 1 1 auto; font-size: 11px; color: var(--text-sub); line-height: 1.5;
+  } /* 提示结束 */
   #eraserCursor { /* 橡皮擦自定义光标 */
     position: fixed; left: 0; top: 0; width: 15px; height: 15px; /* 固定定位，初始尺寸 */
     border-radius: 50%; border: 2px solid rgba(239, 68, 68, .95); /* 圆形，红色边框 */
@@ -2127,8 +2273,8 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     /* v7.2.1：开了自由缩放后移动端面板不再固定贴底，可能被拖到屏幕中间，
        四角统一用大圆角（原来只留左下角是直角，浮在画布上很割裂）。 */
     #ui.ui-resizable { border-radius: var(--radius-panel) var(--radius-panel) 0 0; } /* 顶部圆角，底部贴边 */
-    /* v7.9.4-fix：没开自由缩放时面板永远贴底，顶部拖动条不再给「能拖走」的错觉 */
-    #ui:not(.ui-resizable) #uiDragHandle { display: none; }
+    /* v7.9.5：顶部拖拉把手常态显示；未开自由缩放时面板仍贴底，保留视觉入口。 */
+    #ui:not(.ui-resizable) #uiDragHandle { display: flex; }
   } /* 媒体查询结束 */
 /* ==================================================================================
    v7.4.0：轨道模式（新增功能）
@@ -2319,7 +2465,7 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     position: absolute; top: 13px; width: 6px; height: 6px; margin: -3px 0 0 -3px;
     background: #fff; border: 1px solid rgba(0, 0, 0, .45);
     transform: rotate(45deg); z-index: 2;
-    cursor: grab; touch-action: none;
+    cursor: pointer; touch-action: none;
   }
   .ts-key::before { content: ''; position: absolute; inset: -5px; }
   .ts-key:hover { background: #fffbe8; border-color: rgba(0, 0, 0, .7); }
@@ -2469,3 +2615,49 @@ svg.skfe-ic { /* 直接由 SKFEIcon() 拼进 innerHTML 时用（后面总跟着�
     align-items: center;
   }
   .settings-chips-wrapper .tool-chip { min-height: 24px; padding: 3px 9px; }
+
+  /* ==================== 阶段 2：轻量 3D 模式 ==================== */
+  #btnSpace3DMode {
+    padding: 0 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    color: var(--text-main);
+    background: var(--btn-bg);
+  }
+  #btnSpace3DMode:hover { background: var(--btn-hover); }
+  #btnSpace3DMode.on {
+    color: var(--color-primary-text);
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+
+  #space3dCanvas {
+    position: fixed;
+    z-index: 6;
+    display: none;
+    touch-action: none;
+    background: transparent;
+  }
+
+  #space3dCameraMask[hidden] { display: none; }
+  #space3dCameraMask {
+    position: fixed;
+    inset: 0;
+    z-index: 6;
+    display: block;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  body.space3d-mode #c { pointer-events: none; opacity: 0; }
+  body.space3d-mode #brushOverlay,
+  body.space3d-mode #transformBoxUI,
+  body.space3d-mode #anchorHandle,
+  body.space3d-mode #headMoveHandle {
+    display: none !important;
+  }
+
+  /* 阶段 3：3D 基础滑条只在 3D 查看模式显示，避免影响 2D 面板布局。 */
+  .space3d-row { display: none !important; }
+  body.space3d-mode .space3d-row { display: flex !important; }

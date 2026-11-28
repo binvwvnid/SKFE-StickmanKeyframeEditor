@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>SKFE 独立 3D 验证器 · 阶段 1</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">SKFE 独立 3D 验证器 <span>阶段 1</span></div>
+    <div class="chips">
+      <span id="chipMode">透视</span>
+      <span id="chipTheme">自定义主题色</span>
+      <span id="chipFps">FPS --</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage-wrap">
+      <div id="stage" class="stage">
+        <div id="canvasHost" class="canvas-host"></div>
+        <div class="stage-tip">
+          <div><b>单指 / 左键</b>：命中关节 → 选关节；命中面片 → 拖面片；空白 → 转视角</div>
+          <div><b>滚轮 / 双指</b>：缩放；<b>双指拖动</b>：平移视角</div>
+        </div>
+        <div id="hitBadge" class="hit-badge">未命中</div>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <div class="group">
+        <div class="group-title">相机模式</div>
+        <div class="btn-row">
+          <button id="btnPerspective" class="active">透视</button>
+          <button id="btnOrthographic">正交</button>
+          <button id="btnResetView">重置视角</button>
+        </div>
+        <div class="mini">验证正交 / 透视共用同一批面片，只切换取景参数。</div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">自定义主题色</div>
+        <label>空间背景 <input type="color" id="themeBg" value="#f7f5ea"><span id="themeBgVal">#f7f5ea</span></label>
+        <label>背景透明度 <input type="range" id="themeAlpha" min="0.2" max="1" step="0.01" value="1"><span id="themeAlphaVal">1.00</span></label>
+        <label>主题主色 <input type="color" id="themePrimary" value="#ed9e94"><span id="themePrimaryVal">#ed9e94</span></label>
+        <label>网格颜色 <input type="color" id="themeGrid" value="#b92d5d"><span id="themeGridVal">#b92d5d</span></label>
+        <label>文字颜色 <input type="color" id="themeText" value="#551029"><span id="themeTextVal">#551029</span></label>
+        <div class="btn-row">
+          <button id="btnApplyDemoTheme">套用 SKFE 默认色</button>
+          <button id="btnApplyDarkDemo">套用备用自定义</button>
+        </div>
+        <div class="mini">本阶段只验证自定义主题色，不做浅色 / 深色主题切换系统。</div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">面片对象</div>
+        <div id="objectList" class="object-list"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button id="btnGroupDemo">编组 / 解组</button>
+          <button id="btnRotateGroup">组旋转 15°</button>
+        </div>
+        <div class="kv"><span>编组状态</span><b id="groupState">未编组</b></div>
+        <div class="mini">编组对象位于不同深度；旋转组时相对位置与相对深度保持不变。</div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">命中状态</div>
+        <div class="kv"><span>选中面片</span><b id="selObject">无</b></div>
+        <div class="kv"><span>命中关节</span><b id="selJoint">无</b></div>
+        <div class="kv"><span>交互模式</span><b id="inputMode">待机</b></div>
+        <div class="kv"><span>UV</span><b id="uvText">--</b></div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">导出读回</div>
+        <div class="btn-row">
+          <button id="btnExportPng">导出 PNG</button>
+          <button id="btnClearSelection">清除选中</button>
+        </div>
+        <div class="mini">验证 WebGL canvas 能同步读回普通 canvas，供 GIF / PNG / MP4 管线使用。</div>
+      </div>
+
+      <div class="group">
+        <div class="group-title">运行环境</div>
+        <div class="kv"><span>设备</span><b id="deviceText">--</b></div>
+        <div class="kv"><span>DPR</span><b id="dprText">--</b></div>
+        <div class="kv"><span>抗锯齿</span><b id="aaText">--</b></div>
+        <div class="kv"><span>贴图上限</span><b id="texText">--</b></div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="./vendor/three.min.js"></script>
+  <script src="./validator.js"></script>
+</body>
+</html>

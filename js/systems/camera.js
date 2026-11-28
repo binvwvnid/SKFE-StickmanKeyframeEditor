@@ -6,11 +6,15 @@ SKFE.systems.camera = (function () {
   'use strict';
 
   let D = null;
+  /* 取景框外遮罩固定 70% 透明（即 30% 不透明）。
+     以前做成滑条只改变 pink 的深浅，因为遮罩下面根本没有内容，看起来像透明度失效；
+     现在 2D / 3D 都会先绘制取景框外的底层画面，再用这层 30% 遮罩压暗。 */
+  const CAMERA_MASK_ALPHA = 0.3;
   function init(deps) { D = deps; }
 
 function makeCamera(x, y) {
   return {
-    id: D.nextUid(), type: 'camera', name: 'Camera',
+    id: D.nextUid(), type: 'camera', cameraMode: '2d', name: '2D 摄像机',
     x, y, w: 640, h: 360, scale: 1, rot: 0, alpha: 1,
     locked: false, layer: 9000, eraser: []
   };
@@ -27,13 +31,12 @@ function findCameraObject() {
 }
 
 function getCameraViewObject() {
-  if (!D.isSubTrackMode()) return null;
-  const t = D.AppState.tracks[D.AppState.activeTrackId];
-  if (!t || !t.frames) return null;
-  const d = D.getTrackFrame(D.AppState.activeTrackId, D.AppState.currentFrameIndex);
-  if (d && d.type === 'camera') return d;
-  const any = t.frames.find(x => x && x.type === 'camera');
-  return any || null;
+  /* v7.9.5：摄像机视角只能由右上角浮窗按钮显式进入。
+     旧逻辑靠「当前是摄像机子轨道」推断，点元件 / 锚点时会被 select() 改轨道，
+     表现为“点一下就进了摄像机视角”。现在改成显式状态。 */
+  if (!D.isCameraView2DActive || !D.isCameraView2DActive()) return null;
+  const cam = D.getCurrentCameraObject && D.getCurrentCameraObject();
+  return (cam && cam.type === 'camera') ? cam : null;
 }
 
 function getCameraViewTransform(cam) {
@@ -124,7 +127,7 @@ function queueCamera(cam, isSel, isExporting, opts) {
       const fs = 13 / D.AppState.viewScale;
       D.getCtx().font = `600 ${fs}px system-ui, sans-serif`;
       D.getCtx().textAlign = 'left'; D.getCtx().textBaseline = 'middle';
-      const label = '🎥 ' + (cam.name || 'Camera');
+      const label = '🎥 ' + (cam.name || 'camera');
       const tw = D.getCtx().measureText(label).width;
       D.getCtx().fillStyle = 'rgba(15,23,42,.72)';
       D.getCtx().fillRect(-w / 2, -h / 2 - fs * 2.1, Math.min(w, tw + fs), fs * 1.7);
@@ -135,14 +138,65 @@ function queueCamera(cam, isSel, isExporting, opts) {
   });
 }
 
+/* 取景框外遮罩：2D 相机视角与 3D 相机视角共用同一套颜色 / 透明度 / 几何。 */
+function getCameraMaskPrimary() {
+  try {
+    const cfg = D.getThemeConfig && D.getThemeConfig();
+    if (cfg && cfg.primary) return cfg.primary;
+  } catch (_) {}
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--color-primary').trim();
+    if (v) return v;
+  } catch (_) {}
+  return '#ed9e94';
+}
+
+function cameraMaskFill(alpha) {
+  const cu = window.SKFE && SKFE.core && SKFE.core.colorUtils;
+  if (cu && typeof cu.themeHexToRgba === 'function') return cu.themeHexToRgba(getCameraMaskPrimary(), alpha);
+  return 'rgba(237,158,148,' + alpha + ')';
+}
+
+function drawCameraViewMask(ctx, cw, ch, rect, opts) {
+  if (!ctx || !rect) return;
+  const alpha = (opts && Number.isFinite(opts.alpha)) ? opts.alpha : getCameraMaskAlpha();
+  const outer = (opts && opts.bounds) || { left: 0, top: 0, width: cw, height: ch };
+  ctx.save();
+  ctx.fillStyle = cameraMaskFill(alpha);
+  ctx.beginPath();
+  ctx.rect(outer.left, outer.top, outer.width, outer.height);
+  ctx.rect(rect.left, rect.top, rect.width, rect.height);
+  ctx.fill('evenodd');
+  if (opts && opts.border) {
+    ctx.strokeStyle = getCameraMaskPrimary();
+    ctx.lineWidth = opts.borderWidth || 1;
+    ctx.strokeRect(rect.left, rect.top, rect.width, rect.height);
+  }
+  ctx.restore();
+}
+
+function getCameraMaskAlpha() {
+  return CAMERA_MASK_ALPHA;
+}
+
+/* 兼容旧调用：透明度现在固定，滑条已移除，不再读 / 写缓存。 */
+function setCameraMaskAlpha() {
+  return CAMERA_MASK_ALPHA;
+}
+
 function renderCameraViewScene(cam, trackAlphaOpts) {
   const t = getCameraViewTransform(cam);
   const list = D.getCombinedObjectsForRender().filter(o => o && o.type !== 'camera');
 
+  /* 摄像机视角就是整块画布的摄像机画面；取景框外只是同一画面的透明覆盖，
+     不是另一套编辑器画面。之前的外圈常规场景会让遮罩内外变成两个画面。 */
+  const cu = window.SKFE && SKFE.core && SKFE.core.colorUtils;
+  const bgAlpha = D.getPageBgAlpha();
   D.getCtx().save();
-  D.getCtx().beginPath();
-  D.getCtx().rect(t.left, t.top, t.viewW, t.viewH);
-  D.getCtx().clip();
+  D.getCtx().fillStyle = bgAlpha < 1 && cu && cu.themeHexToRgba
+    ? cu.themeHexToRgba(D.getPageBgColor(), bgAlpha)
+    : D.getPageBgColor();
+  D.getCtx().fillRect(0, 0, t.cw, t.ch);
   D.getCtx().translate(t.cx, t.cy);
   D.getCtx().rotate(-t.rot);
   D.getCtx().scale(t.fit, t.fit);
@@ -168,14 +222,10 @@ function renderCameraViewScene(cam, trackAlphaOpts) {
   D.renderScene(list, Object.assign({ isExporting: false }, trackAlphaOpts));
   D.getCtx().restore();
 
-  /* 取景框外遮罩 */
-  D.getCtx().save();
-  D.getCtx().fillStyle = 'rgba(15,23,42,.55)';
-  D.getCtx().beginPath();
-  D.getCtx().rect(0, 0, t.cw, t.ch);
-  D.getCtx().rect(t.left, t.top, t.viewW, t.viewH);
-  D.getCtx().fill('evenodd');
-  D.getCtx().restore();
+  /* 取景框外遮罩：尺寸直接取当前取景变换，透明度与 3D 相机视角共用一份设置。 */
+  drawCameraViewMask(D.getCtx(), t.cw, t.ch,
+    { left: t.left, top: t.top, width: t.viewW, height: t.viewH },
+    { alpha: getCameraMaskAlpha() });
 
   /* 取景框 + 安全框 + 提示 */
   D.getCtx().save();
@@ -203,11 +253,20 @@ function updateCameraPreview() {
   const cvs = document.getElementById('cameraPreviewCanvas');
   if (!el || !cvs) return;
   if (!D.isCameraPreviewVisible()) { el.style.display = 'none'; return; }
+
+  /* 3D 开启后，预览浮窗必须显示 3D 摄像机视角的导出画面，
+     不能继续用旧的 2D 摄像机裁切渲染，否则用户看到的和导出不一致。 */
+  const S3 = window.SKFE && window.SKFE.systems && window.SKFE.systems.space3d;
+  const S3E = window.SKFE && window.SKFE.systems && window.SKFE.systems.space3dExport;
+  const preview3D = !!(S3 && typeof S3.isEnabled === 'function' && S3.isEnabled() &&
+    S3E && typeof S3E.isActive === 'function' && S3E.isActive());
+
   const cam = D.getCurrentCameraObject();
-  if (!cam) { el.style.display = 'none'; return; }
+  if (!cam && !preview3D) { el.style.display = 'none'; return; }
   el.style.display = 'block';
+
   const wrapW = Math.max(120, (el.clientWidth || 260) - 16);
-  const aspect = Math.max(0.05, cam.w / Math.max(1, cam.h));
+  const aspect = cam ? Math.max(0.05, cam.w / Math.max(1, cam.h)) : 16 / 9;
   let pw = wrapW;
   let ph = Math.round(pw / aspect);
   const maxH = Math.max(100, Math.round(window.innerHeight * 0.42));
@@ -215,9 +274,23 @@ function updateCameraPreview() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const needW = Math.max(2, Math.round(pw * dpr));
   const needH = Math.max(2, Math.round(ph * dpr));
+  cvs.style.width = pw + 'px';
+  cvs.style.height = ph + 'px';
+
+  if (preview3D) {
+    const bg = D.getPageBgAlpha() < 1
+      ? SKFE.core.colorUtils.themeHexToRgba(D.getPageBgColor(), D.getPageBgAlpha())
+      : D.getPageBgColor();
+    const ok = S3E.renderFrameToCanvas(cvs, needW, needH,
+      D.AppState ? D.AppState.currentFrameIndex : 0,
+      { showGrid: false, bgColor: bg });
+    if (ok) return;
+  }
+
+  /* 2D 路径保持不变；3D 渲染失败时也退回这里，不让浮窗空白。 */
+  if (!cam) return;
   if (cvs.width !== needW) cvs.width = needW;
   if (cvs.height !== needH) cvs.height = needH;
-  cvs.style.height = ph + 'px';
   const pc = cvs.getContext('2d');
   pc.setTransform(dpr, 0, 0, dpr, 0, 0);
   pc.clearRect(0, 0, pw, ph);
@@ -331,9 +404,22 @@ function fitCameraViewToAvailableArea() {
 function initCameraUI() {
   const addBtn = document.getElementById('btnCamera');
   if (addBtn) addBtn.addEventListener('click', () => {
+    /* 同一个「摄像机」按钮：2D 模式只添加 / 替换 2D 摄像机；3D 模式只重置 3D 摄像机。 */
+    const in3D = typeof D.is3DModeActive === 'function' ? !!D.is3DModeActive() : false;
+    if (in3D) {
+      if (!confirm('当前项目中已有 3D 摄像机，是否替换为默认 3D 摄像机？')) return;
+      const cam3d = typeof D.resetCamera3DToDefault === 'function' ? D.resetCamera3DToDefault() : null;
+      if (!cam3d) return;
+      D.AppState.objects = D.getCombinedObjectsForRender();
+      D.AppState.selected = cam3d;
+      if (typeof D.refreshSubTrackOptions === 'function') D.refreshSubTrackOptions();
+      D.EventBus.emit('app:update', '替换 3D 摄像机');
+      return;
+    }
+
     const existing = findCameraObject();
     if (existing) {
-      if (!confirm('当前项目中已存在摄像机，是否替换为新摄像机？')) return;
+      if (!confirm('当前项目中已存在 2D 摄像机，是否替换为新摄像机？')) return;
       for (const id in D.AppState.tracks) {
         const t = D.AppState.tracks[id];
         if (t && t.frames && t.frames.some(d => d && d.type === 'camera')) delete D.AppState.tracks[id];
@@ -343,19 +429,16 @@ function initCameraUI() {
     }
     const sp = D.getSpawnPoint();
     const cam = makeCamera(sp.x, sp.y);
-    D.generateName(cam);
+    /* 摄像机默认名固定 camera，不再走通用数字命名。 */
     D.addObjectToFrames(cam);
-    /* v7.8.3：摄像机默认铺满总轨道长度（镜头贯穿全片）。
-       之后要分段就用轨道上的「添加关键帧」把某几帧固定，其余帧靠整体调节/补间。 */
+    /* 摄像机默认铺满总轨道长度（镜头贯穿全片）。 */
     if (typeof D.fillCameraToFullLength === 'function') D.fillCameraToFullLength(cam);
     else D.syncMainLengthFromTracks();
-    if (D.isCameraTrackId(D.AppState.activeTrackId) || !D.isSubTrackMode()) {
-      D.AppState.activeTrackId = String(cam.id);
-    }
+    /* 添加 / 替换摄像机后不自动进入摄像机视角；进入视角只能点右上角浮窗按钮。 */
     D.AppState.objects = D.getCombinedObjectsForRender();
     D.AppState.selected = cam;
     D.refreshSubTrackOptions();
-    D.EventBus.emit('app:update', '添加摄像机');
+    D.EventBus.emit('app:update', '添加 2D 摄像机');
   });
 
   document.querySelectorAll('.camera-ratio-btn').forEach(btn => {
@@ -400,6 +483,10 @@ function initCameraUI() {
     findCameraHit,
     queueCamera,
     renderCameraViewScene,
+    drawCameraViewMask,
+    getCameraMaskPrimary,
+    getCameraMaskAlpha,
+    setCameraMaskAlpha,
     updateCameraPreview,
     initPreviewFloat: initCameraPreviewFloat,
     fitCameraViewToAvailableArea,

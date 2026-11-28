@@ -37,6 +37,7 @@
   const HANDLE_W_TOUCH = 12;
   const HOLD_MS = 1000;    /* v7.9.4：触屏元件长条长按多久才进入拖动 */
   const KEY_HIT = 13;      /* 关键帧菱形的命中直径 */
+  const KEY_DRAG_SLOP = 6; /* 关键帧：移动超过这个像素数才算拖拽，轻微手抖仍是点选 */
   const MIN_H = 160;       /* 面板最小高度 */
   const MAX_FRAMES = 600;  /* 拖拽时允许撑长的上限，防止误拖出几万帧 */
   const TIME_MIN_CW = 14;  /* 列宽小于它就改用「分:秒」刻度 */
@@ -80,6 +81,62 @@
   }
   function KF() { return root.SKFE.systems.keyframes; }
   function tracksMap() { return api ? api.tracks() : {}; }
+  /* 3D 摄像机虚拟轨：不允许删除，只能在 3D 摄像机面板里调整 / 重置。 */
+  function s3ModeActive() {
+    const S3 = root.SKFE && root.SKFE.systems && root.SKFE.systems.space3d;
+    const D = root.SKFE && root.SKFE.systems && root.SKFE.systems.space3dData;
+    if (S3 && typeof S3.isEnabled === 'function' && S3.isEnabled()) return true;
+    return !!(D && typeof D.getProjectState === 'function' && D.getProjectState().space3dMode);
+  }
+  function isTrackCamera2D(id) {
+    const t = tracksMap()[id];
+    return !!(t && t.frames && t.frames.some(d => d && d.type === 'camera'));
+  }
+  function isTrackCamera3D(id) {
+    const t = tracksMap()[id];
+    return !!(t && t.frames && t.frames.some(d => d && d.type === 'camera3d'));
+  }
+  function isTrackCamera(id) {
+    return isTrackCamera2D(id) || isTrackCamera3D(id);
+  }
+  function isProtectedCameraTrack(id) {
+    return s3ModeActive() && isTrackCamera3D(id);
+  }
+  /* 摄像机是单例镜头轨：缺口一律补齐，保证长条贯通全片；补出来的帧不是关键帧。 */
+  function cloneCameraFrame(fr) {
+    if (!fr) return null;
+    let out;
+    try { out = JSON.parse(JSON.stringify(fr)); } catch (_) { out = Object.assign({}, fr); }
+    delete out.__k;
+    delete out.__d;
+    return out;
+  }
+  function normalizeCameraClips() {
+    const map = tracksMap();
+    const total = totalFrames();
+    Object.keys(map).forEach((id) => {
+      if (!isTrackCamera(id)) return;
+      const t = map[id];
+      if (!t.frames) t.frames = [];
+      while (t.frames.length < total) t.frames.push(null);
+      let src = null;
+      for (let i = 0; i < t.frames.length; i++) {
+        const fr = t.frames[i];
+        if (fr && (fr.type === 'camera' || fr.type === 'camera3d')) { src = fr; break; }
+      }
+      if (!src) return;
+      for (let i = 0; i < total; i++) {
+        const cur = t.frames[i];
+        if (cur && cur.type === src.type) continue;
+        const c = cloneCameraFrame(src);
+        if (!c) continue;
+        c.id = src.id;
+        c.type = src.type;
+        if (src.name) c.name = src.name;
+        t.frames[i] = c;
+      }
+    });
+  }
   function totalFrames() { return Math.max(1, api ? api.totalFrames() : 1); }
   function fps() { const f = api && api.fps ? api.fps() : 12; return (f > 0 ? f : 12); }
   /* v7.9.4-fix：PC 与手机是两套播放头范式，必须按「运行模式」而不是指针类型分流。
@@ -476,6 +533,7 @@
     updateTrackLoopButton();
 
     const map = tracksMap();
+    normalizeCameraClips();   /* 摄像机轨永远贯通全片，不允许被拖短 / 分割后出现缺口 */
     /* v7.4.7：全空白帧的轨道不画行 —— 元件已经彻底删掉了，这一行不该留在面板里。
        （数据层由 pruneEmptyTracks 清，这里再兜一层，避免别的入口漏扫。） */
     const G = root.SKFE && root.SKFE.systems && root.SKFE.systems.group;
@@ -492,18 +550,23 @@
       }
       return null;
     };
+    const in3D = s3ModeActive();
     const ids = Object.keys(map).filter(id => {
       if (!(map[id] && map[id].frames && map[id].frames.some(d => d != null))) return false;
+      /* 2D 摄像机轨只在 2D 出现；3D 摄像机虚拟轨只在 3D 出现。 */
+      if (in3D && isTrackCamera2D(id)) return false;
+      if (!in3D && isTrackCamera3D(id)) return false;
       const gi = groupInfoOf(id);
       if (editingGid) return !!gi && !gi.isCarrier && gi.gid === String(editingGid);
       return !(gi && !gi.isCarrier);
     });
-    /* v7.8.1：音频轨永远置底（元件列表里根本不出现），其余保持原顺序 */
+    /* v7.8.1：音频轨永远置底；摄像机轨永远占据元件第一行。 */
     const isAudioTrack = (id) => {
       const frames = map[id] && map[id].frames;
       return !!(frames && frames.some(d => d && d.type === 'audioClip'));
     };
-    ids.sort((a, b) => (isAudioTrack(a) ? 1 : 0) - (isAudioTrack(b) ? 1 : 0));
+    const trackRank = (id) => isTrackCamera(id) ? 0 : (isAudioTrack(id) ? 2 : 1);
+    ids.sort((a, b) => trackRank(a) - trackRank(b));
     const total = Math.max(totalFrames(), 1);
     const width = total * colW;
     const rowsH = Math.max(ids.length, 1) * ROW_H;
@@ -1342,6 +1405,10 @@
     if (!clip) return needClip();
     const t = trackOf(clip.id);
     if (!t) return needClip();
+    if (isTrackCamera(clip.id)) {
+      api.toast(T('track.cameraNoSplit', '摄像机轨道不能分割，也不能缩短；请打关键帧控制不同镜头。'));
+      return;
+    }
     const arr = t.frames;
     const i = api.currentFrame();
     if (i <= clip.a || i > clip.b) {
@@ -1362,9 +1429,19 @@
 
   /* 删除选中的长条（可以是框选出来的好几条；范围变空白，前后两段自动接上） */
   function deleteClip() {
-    const list = selClips.slice();
+    let list = selClips.slice();
     if (!list.length && selClip) list.push(selClip);
     if (!list.length) return needClip();
+    /* 3D 摄像机虚拟轨不可删除；多选时跳过它。 */
+    const hasCamera = list.some(c => isProtectedCameraTrack(c.id));
+    if (hasCamera) {
+      list = list.filter(c => !isProtectedCameraTrack(c.id));
+      if (!list.length) {
+        api.toast(T('track.camera3dNoDelete', '3D 模式下摄像机轨道不能删除，请点击摄像机按钮替换。'));
+        return;
+      }
+      api.toast(T('track.camera3dNoDeleteMulti', '3D 模式下摄像机轨道已保留，只删除了其他元件。'));
+    }
     /* v7.9.0：删到编组载体 = 删除整组（成员轨一起删），不能只清载体留下成员残留 */
     const groupIds = [];
     list.forEach((c) => {
@@ -1787,7 +1864,7 @@
             alt: !!e.altKey,
             moved: false
           };
-          els.forEach(x => x.el.classList.add('dragging'));
+          /* 不在这里加 .dragging：短暂按下抬手应当算点选，只有越过位移阈值才进入拖拽态。 */
           try { cv.setPointerCapture(e.pointerId); } catch (_) {}
         };
         armOrBegin(e, begin, () => tapKeys(items), els);
@@ -1826,8 +1903,15 @@
           el.classList.toggle('sel', isClipSelected(el.dataset.id, +el.dataset.a, +el.dataset.b));
         });
 
+        /* 摄像机长条只允许选中，不允许平移 / 拉长 / 缩短，始终保持铺满全轨道。 */
+        if (isTrackCamera(cid)) {
+          render();
+          e.preventDefault();
+          return;
+        }
+
         /* v7.4.9：多选之后抓中间 = 整组平移，抓任意一端 = 整组一起拉长 / 缩短 */
-        const group = selClips.length > 1 ? selClips.slice() : null;
+        const group = selClips.length > 1 ? selClips.filter(c => !isTrackCamera(c.id)) : null;
         const els = [];
         if (group) {
           group.forEach((c) => {
@@ -2032,11 +2116,14 @@
       }
 
       if (drag.kind === 'keys') {
+        /* 关键帧要先越过像素级阈值才认拖拽；否则鼠标点选时的轻微移动会把关键帧拖走。 */
+        if (!drag.moved && Math.abs(e.clientX - drag.startX) < KEY_DRAG_SLOP) return;
         const raw = Math.round((e.clientX - drag.startX) / colW);
         const d = clampKeyDelta(drag.items, raw);
         if (d === drag.d) return;
         drag.d = d;
         drag.moved = d !== 0;
+        if (drag.moved) drag.els.forEach((x) => x.el && x.el.classList.add('dragging'));
         /* 只挪 DOM，不碰数据 —— 整组一起走同一格数 */
         drag.els.forEach((x) => { x.el.style.left = cellCenter(x.i + d) + 'px'; });
         return;
@@ -2446,6 +2533,11 @@
         return;
       }
       if (e.target.closest('#btnKeyframe')) {
+        /* 2D / 3D 摄像机轨统一交给 app.js 的 btnKeyframe.onclick：
+           自由视角与摄像机视角都能落帧，且 3D 落到独立的 camera3d 虚拟轨。
+           以前在这里 stopPropagation，表面上“不抢”，实际上把 app.js 拦掉了。 */
+        const cameraScope = !!(api && typeof api.isCameraKeyframeScope === 'function' && api.isCameraKeyframeScope());
+        if (cameraScope) return;
         e.stopPropagation();
         e.preventDefault();
         toggleKey();

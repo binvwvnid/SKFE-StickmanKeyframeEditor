@@ -8,6 +8,22 @@ SKFE.features.export = (function () {
   let D = null;
   function init(deps) { D = deps; }
 
+  /* 阶段 4：3D 地面网格由导出面板单独控制；未找到开关时按旧行为包含。 */
+  function s3ExportGridEnabled() {
+    const cb = document.getElementById('s3ExportGrid');
+    return !cb || !!cb.checked;
+  }
+
+  /* 导出帧率必须以工程 FPS 设置为准。
+     旧逻辑从首帧 duration 反推，首帧若是自定义时长就会和设置不符；
+     桌面录制路还写死 captureStream(30)，导出文件会被标成 30fps。 */
+  function exportFPS() {
+    const n = D && typeof D.getDefaultFPS === 'function' ? Number(D.getDefaultFPS()) : NaN;
+    if (Number.isFinite(n) && n >= 1 && n <= 60) return Math.round(n);
+    const dur = Number(D && D.AppState && D.AppState.frames && D.AppState.frames[0] && D.AppState.frames[0].duration);
+    return Math.max(1, Math.min(60, Math.round(1000 / (Number.isFinite(dur) && dur > 0 ? dur : 83))));
+  }
+
   let jszipLoading = null;
   function getJSZip() {
     if (window.JSZip) return Promise.resolve(window.JSZip);
@@ -342,6 +358,11 @@ SKFE.features.export = (function () {
   }
 
   async function exportSVGsAsZip(frameList, trackId, options) {
+    const S3X = window.SKFE && window.SKFE.systems && SKFE.systems.space3dExport;
+    if (S3X && typeof S3X.isSvgAllowed === 'function' && !S3X.isSvgAllowed()) {
+      alert('3D 模式不支持 SVG 序列导出。\n请关闭 3D 后导出，或改用 PNG / GIF / MP4。');
+      return;
+    }
     if (!frameList || !frameList.length) return;
     const btn = document.getElementById('btnExportSVGSeq');
     const oldText = btn ? btn.textContent : '';
@@ -446,7 +467,13 @@ SKFE.features.export = (function () {
         btn.textContent = `GIF ${i + 1}/${list.length}`;
         const gidx = D.AppState.frames.indexOf(list[i]);
         await D.prepareVideoClipsForFrame(gidx >= 0 ? gidx : i);
-        const off = D.renderFrameToDataURL(list[i], outW, outH, { transparent, crop }, tid);
+        /* 3D GIF 只有 256 色，编辑器里 0.38 的细网格线会被量化成断续小块；
+           导出帧临时提高网格不透明度，量化后线条保持连续。showGrid 仍由导出面板开关控制。 */
+        const off = D.renderFrameToDataURL(list[i], outW, outH, {
+          transparent,
+          crop,
+          gridOpacity: 1
+        }, tid);
         const imgData = off.getContext('2d').getImageData(0, 0, outW, outH);
         if (transparent) {
           const data = imgData.data;
@@ -747,26 +774,37 @@ SKFE.features.export = (function () {
     try {
       for (let i = 0; i < vN; i++) {
         await D.prepareVideoClipsForFrame(i); /* v7.7.1：视频元件定格到该帧 */
-        recCtx.save();
-        recCtx.setTransform(1, 0, 0, 1, 0, 0);
-        recCtx.clearRect(0, 0, outW, outH);
-        recCtx.fillStyle = D.getPageBgColor();
-        recCtx.fillRect(0, 0, outW, outH);
-        recCtx.translate(outW / 2, outH / 2);
-        if (crop.rotation) recCtx.rotate(-crop.rotation);
-        recCtx.scale(crop.scale, crop.scale);
-        recCtx.translate(-crop.cx, -crop.cy);
-        if (D.AppState.canvasBoundsEnabled) {
+        const S3X = window.SKFE && window.SKFE.systems && SKFE.systems.space3dExport;
+        if (S3X && typeof S3X.isActive === 'function' && S3X.isActive()) {
+          S3X.renderFrameToCanvas(recCanvas, outW, outH, i, {
+            transparent: false,
+            bgColor: D.getPageBgColor(),
+            trackId: tid,
+            showGrid: s3ExportGridEnabled(),
+            camera3dFrame: D.getCamera3DFrame ? D.getCamera3DFrame(i) : null
+          });
+        } else {
           recCtx.save();
-          recCtx.translate(D.AppState.canvasBounds.x + D.AppState.canvasBounds.w / 2, D.AppState.canvasBounds.y + D.AppState.canvasBounds.h / 2);
-          recCtx.rotate(D.AppState.canvasBounds.rotation || 0);
-          recCtx.beginPath();
-          recCtx.rect(-D.AppState.canvasBounds.w / 2, -D.AppState.canvasBounds.h / 2, D.AppState.canvasBounds.w, D.AppState.canvasBounds.h);
-          recCtx.clip();
+          recCtx.setTransform(1, 0, 0, 1, 0, 0);
+          recCtx.clearRect(0, 0, outW, outH);
+          recCtx.fillStyle = D.getPageBgColor();
+          recCtx.fillRect(0, 0, outW, outH);
+          recCtx.translate(outW / 2, outH / 2);
+          if (crop.rotation) recCtx.rotate(-crop.rotation);
+          recCtx.scale(crop.scale, crop.scale);
+          recCtx.translate(-crop.cx, -crop.cy);
+          if (D.AppState.canvasBoundsEnabled) {
+            recCtx.save();
+            recCtx.translate(D.AppState.canvasBounds.x + D.AppState.canvasBounds.w / 2, D.AppState.canvasBounds.y + D.AppState.canvasBounds.h / 2);
+            recCtx.rotate(D.AppState.canvasBounds.rotation || 0);
+            recCtx.beginPath();
+            recCtx.rect(-D.AppState.canvasBounds.w / 2, -D.AppState.canvasBounds.h / 2, D.AppState.canvasBounds.w, D.AppState.canvasBounds.h);
+            recCtx.clip();
+            recCtx.restore();
+          }
+          D.renderScene(D.getObjectsForFrameAt(i, tid), { isExporting: true, frameIndex: i });
           recCtx.restore();
         }
-        D.renderScene(D.getObjectsForFrameAt(i, tid), { isExporting: true, frameIndex: i });
-        recCtx.restore();
         if (track.requestFrame) track.requestFrame();
         await new Promise(r => setTimeout(r, D.AppState.frames[i].duration));
       }
@@ -972,6 +1010,21 @@ SKFE.features.export = (function () {
     const cam = D.shouldSkipCameraForExport() ? null : (D.getCurrentCameraObject() || D.getCameraAtFrame(0));
     const baseSize = is1080 ? 1920 : (isHD ? 1200 : 800);
     let outW, outH;
+
+    /* 3D 模式：导出尺寸必须取 3D 摄像机宽高比，而不是 2D 摄像机 / 画布边界。 */
+    const S3X = window.SKFE && window.SKFE.systems && SKFE.systems.space3dExport;
+    if (S3X && typeof S3X.isActive === 'function' && S3X.isActive()) {
+      const cam3 = D.getCamera3DFrame ? D.getCamera3DFrame(0) : null;
+      const cw = Math.max(1, Number(cam3 && cam3.width) || 1920);
+      const ch = Math.max(1, Number(cam3 && cam3.height) || 1080);
+      const a = cw / ch;
+      if (a >= 1) { outW = baseSize; outH = Math.round(baseSize / a); }
+      else { outH = baseSize; outW = Math.round(baseSize * a); }
+      outW = Math.max(2, outW - (outW % 2));
+      outH = Math.max(2, outH - (outH % 2));
+      return { outW: outW, outH: outH, baseCrop: null, cam: null, bgColor: bgColor };
+    }
+
     if (cam && cam.w > 0 && cam.h > 0) {
       const a = cam.w / cam.h;
       if (a >= 1) { outW = baseSize; outH = Math.round(baseSize / a); }
@@ -993,6 +1046,19 @@ SKFE.features.export = (function () {
 
   /* 把第 i 帧画到导出画布上（两条路共用，免得改一处漏一处） */
   function paintFrame(recCtx, i, plan, tid) {
+    /* 阶段 4：3D 模式按摄像机视角直接渲染进录制画布；2D 路径逐行保持原样。 */
+    const S3X = window.SKFE && window.SKFE.systems && SKFE.systems.space3dExport;
+    if (S3X && typeof S3X.isActive === 'function' && S3X.isActive()) {
+      S3X.renderFrameToCanvas(recCtx.canvas, plan.outW, plan.outH, i, {
+        transparent: false,
+        bgColor: plan.bgColor,
+        trackId: tid,
+        showGrid: s3ExportGridEnabled(),
+        camera3dFrame: D.getCamera3DFrame ? D.getCamera3DFrame(i) : null
+      });
+      return;
+    }
+
     let curCrop = plan.baseCrop;
     if (plan.cam) {
       const frameCam = D.getCameraAtFrame(i) || plan.cam;
@@ -1035,7 +1101,7 @@ SKFE.features.export = (function () {
     const tried = Array.isArray(triedKeys) ? triedKeys : [];
     /* 每次回退都从用户最初选的尺寸重新算阶梯，避免越退越偏 */
     const reqW = plan.outW, reqH = plan.outH;
-    const fps = Math.max(1, Math.min(60, Math.round(1000 / ((D.AppState.frames[0] && D.AppState.frames[0].duration) || 83))));
+    const fps = exportFPS();
     const bitrate = Math.max(800000, Math.round(reqW * reqH * fps * 0.12));
     const picked = await pickAvcConfig(reqW, reqH, fps, bitrate, tried);
     if (!picked) {
@@ -1175,10 +1241,12 @@ SKFE.features.export = (function () {
   /* ① 浏览器自带 MP4 录制（桌面） */
   async function exportMP4WithRecorder(plan, mimeType, tid) {
     const n = contentFrameCount(tid);
+    const fps = exportFPS();
     const recCanvas = document.createElement('canvas');
     recCanvas.width = plan.outW; recCanvas.height = plan.outH;
     const recCtx = recCanvas.getContext('2d', { alpha: false });
-    const stream = recCanvas.captureStream(30);
+    /* 之前写死 30，导致界面设为 12fps 导出的 MP4 仍被标成 30fps。 */
+    const stream = recCanvas.captureStream(fps);
     const track = stream.getVideoTracks()[0];
     /* v7.8.4：桌面录制路也把离线混好的音频挂到同一个 stream */
     const audioBuffer = await renderExportAudio(n, tid);

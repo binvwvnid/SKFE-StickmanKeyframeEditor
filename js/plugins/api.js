@@ -17,6 +17,13 @@
   var Bus = SKFE.core && SKFE.core.eventBus && SKFE.core.eventBus.EventBus || null;
   var Group = SKFE.systems && SKFE.systems.group || null;
   var TrackStrip = SKFE.features && SKFE.features.trackStrip || null;
+  /* v8.0.0：新功能对应模块统一挂到 API，避免插件再通过字符串路径猜内部实现。 */
+  var Brush = SKFE.systems && SKFE.systems.brush || null;
+  var Eraser = SKFE.systems && SKFE.systems.eraser || null;
+  var Camera = SKFE.systems && SKFE.systems.camera || null;
+  var Space3D = SKFE.systems && SKFE.systems.space3d || null;
+  var Space3DData = SKFE.systems && SKFE.systems.space3dData || null;
+  var Space3DExport = SKFE.systems && SKFE.systems.space3dExport || null;
 
   function clone(value) {
     if (value == null) return value;
@@ -97,6 +104,11 @@
   function requireApp() {
     if (!App) throw new Error('SKFE.__skfe 未就绪');
     return App;
+  }
+
+  function requireModule(name, mod) {
+    if (!mod) throw new Error(name + ' 模块未加载');
+    return mod;
   }
 
   function find(selector, root) {
@@ -204,7 +216,7 @@
   }
 
   var api = {
-    version: '2.0.0',
+    version: '2.1.0',
     permissions: { fullAccess: true, sandbox: false, network: true, dom: true, data: true },
 
     /* 原始引用：与主程序完全同一份对象 */
@@ -215,7 +227,13 @@
       App: App,
       Bus: Bus,
       Group: Group,
-      TrackStrip: TrackStrip
+      TrackStrip: TrackStrip,
+      Brush: Brush,
+      Eraser: Eraser,
+      Camera: Camera,
+      Space3D: Space3D,
+      Space3DData: Space3DData,
+      Space3DExport: Space3DExport
     },
 
     /* 动态路径读写 / 调用：覆盖所有已挂到 window / SKFE 下的能力 */
@@ -560,6 +578,156 @@
       scene: function (list, opts) { requireApp().renderScene(list, opts); }
     },
 
+    /* v8.0.0：新功能全开放入口。全部保持完全信任模型，直接调用主程序同一份实例。 */
+    brush: {
+      setOn: function (on) { var m = requireModule('brush', Brush); m.setOn(!!on); return m.isOn(); },
+      isOn: function () { return requireModule('brush', Brush).isOn(); },
+      openNew: function () { var m = requireModule('brush', Brush); m.openNew(); return clone(m.getEditingInk()); },
+      openEdit: function (obj) { var m = requireModule('brush', Brush); m.openEdit(obj); return clone(m.getEditingInk()); },
+      finalize: function () { return requireModule('brush', Brush).finalize(); },
+      cancel: function () { return requireModule('brush', Brush).cancel(); },
+      undoLast: function () { return requireModule('brush', Brush).undoLast(); },
+      clearAll: function () { return requireModule('brush', Brush).clearAll(); },
+      getEditingInk: function () { return clone(requireModule('brush', Brush).getEditingInk()); },
+      bucketFill: function () { return requireModule('brush', Brush).bucketFill(); },
+      bucketFillAt: function (x, y) { return requireModule('brush', Brush).bucketFillAt(x, y); },
+      setBucketMode: function (on) { var m = requireModule('brush', Brush); m.setBucketMode(!!on); return m.isBucketMode(); },
+      isBucketMode: function () { return requireModule('brush', Brush).isBucketMode(); },
+      toggleBucketMode: function () { var m = requireModule('brush', Brush); m.toggleBucketMode(); return m.isBucketMode(); },
+      isStrokeClosed: function (stroke) { return requireModule('brush', Brush).isStrokeClosed(stroke); },
+      getPresets: function () { return clone(requireModule('brush', Brush).getPresets()); },
+      savePreset: function () { return requireModule('brush', Brush).savePreset(); },
+      applyPreset: function (id) { return requireModule('brush', Brush).applyPresetById(id); },
+      deletePreset: function (id) { return requireModule('brush', Brush).deletePresetById(id); },
+      /* 画笔类型：default / blob / crayon */
+      getType: function () { return requireModule('brush', Brush).getBrushType(); },
+      setType: function (type) { var m = requireModule('brush', Brush); m.setBrushType(type); return m.getBrushType(); },
+      listTypes: function () { return requireModule('brush', Brush).listBrushTypes().slice(); },
+      getConfig: function () { return clone(requireModule('brush', Brush).getBrushConfig()); },
+      setConfig: function (patch) { return clone(requireModule('brush', Brush).setBrushConfig(patch)); },
+      debug: function () { return clone(requireModule('brush', Brush)._debug()); }
+    },
+
+    eraser: {
+      setOn: function (on) { var m = requireModule('eraser', Eraser); m.setOn(!!on); return m.isOn(); },
+      isOn: function () { return requireModule('eraser', Eraser).isOn(); },
+      isDragging: function () { return requireModule('eraser', Eraser).isDragging(); },
+      size: function () { return requireModule('eraser', Eraser).size(); },
+      setSize: function (n) { var m = requireModule('eraser', Eraser); m.setSize(n); return m.size(); },
+      lineMode: function () { return requireModule('eraser', Eraser).lineMode(); },
+      setLineMode: function (on) { var m = requireModule('eraser', Eraser); m.setLineMode(!!on); return m.lineMode(); },
+      startStroke: function () { return requireModule('eraser', Eraser).startStroke.apply(Eraser, arguments); },
+      updateStroke: function () { return requireModule('eraser', Eraser).updateStroke.apply(Eraser, arguments); },
+      finishStroke: function () { return requireModule('eraser', Eraser).finishStroke.apply(Eraser, arguments); },
+      cancelStroke: function () { return requireModule('eraser', Eraser).cancelStroke(); },
+      hitObject: function () { return requireModule('eraser', Eraser).hitObject.apply(Eraser, arguments); },
+      hasStrokes: function (o) { return requireModule('eraser', Eraser).hasStrokes(o); },
+      clearFrame: function () { return requireModule('eraser', Eraser).clearFrame(); },
+      clearAll: function () { return requireModule('eraser', Eraser).clearAll(); }
+    },
+
+    camera: {
+      makeCamera: function (x, y) { return requireModule('camera', Camera).makeCamera(x, y); },
+      findCameraObject: function () { return clone(requireModule('camera', Camera).findCameraObject()); },
+      getViewObject: function () { return clone(requireModule('camera', Camera).getCameraViewObject()); },
+      getViewTransform: function (cam) { return clone(requireModule('camera', Camera).getCameraViewTransform(cam)); },
+      screenToWorld: function (screen, cam, t) { return clone(requireModule('camera', Camera).cameraScreenToWorld(screen, cam, t)); },
+      pointInRect: function (p, cam, pad) { return requireModule('camera', Camera).pointInCameraRect(cam, p, pad); },
+      pointNearBorder: function (p, cam, tol) { return requireModule('camera', Camera).pointNearCameraBorder(cam, p, tol); },
+      findHit: function (p) { return clone(requireModule('camera', Camera).findCameraHit(p)); },
+      queue: function (cam, isSel, isExporting, opts) { return requireModule('camera', Camera).queueCamera(cam, isSel, isExporting, opts); },
+      renderViewScene: function (cam, opts) { return requireModule('camera', Camera).renderCameraViewScene(cam, opts); },
+      drawMask: function (ctx, cw, ch, rect, opts) { return requireModule('camera', Camera).drawCameraViewMask(ctx, cw, ch, rect, opts); },
+      getMaskPrimary: function () { return requireModule('camera', Camera).getCameraMaskPrimary(); },
+      getMaskAlpha: function () { return requireModule('camera', Camera).getCameraMaskAlpha(); },
+      setMaskAlpha: function (alpha) { return requireModule('camera', Camera).setCameraMaskAlpha(alpha); },
+      updatePreview: function () { return requireModule('camera', Camera).updateCameraPreview(); },
+      fitViewToAvailableArea: function () { return requireModule('camera', Camera).fitCameraViewToAvailableArea(); }
+    },
+
+    space3d: {
+      raw: function () { return requireModule('space3d', Space3D); },
+      isEnabled: function () { return requireModule('space3d', Space3D).isEnabled(); },
+      setEnabled: function (on) { var m = requireModule('space3d', Space3D); m.setEnabled(!!on); return m.isEnabled(); },
+      renderFrame: function () { return requireModule('space3d', Space3D).renderFrame(); },
+      renderFrameToCanvas: function (canvas, w, h, frame, options) {
+        return requireModule('space3d', Space3D).renderFrameToCanvas(canvas, w, h, frame, options);
+      },
+      applyTheme: function () { return requireModule('space3d', Space3D).applyTheme(); },
+      getProjectState: function () { return clone(requireModule('space3d', Space3D).getProjectState()); },
+      applyProjectState: function (data) { return requireModule('space3d', Space3D).applyProjectState(clone(data)); },
+      getExportCamera: function () { return clone(requireModule('space3d', Space3D).getExportCamera()); },
+      getObjectWorldPosition: function (o) { return clone(requireModule('space3d', Space3D).getObjectWorldPosition(o)); },
+      getEffectiveCameraPosition: function (cam) { return clone(requireModule('space3d', Space3D).getEffectiveCameraPosition(cam)); },
+      bindExportCameraTarget: function (cam) { return requireModule('space3d', Space3D).bindExportCameraTarget(cam); },
+      setCameraMode: function (mode) { return requireModule('space3d', Space3D).setCameraMode(mode); },
+      alignViewToExportCamera: function () { return requireModule('space3d', Space3D).alignViewToExportCamera(); },
+      applyExportCameraLive: function () { return requireModule('space3d', Space3D).applyExportCameraLive(); },
+      isCameraView: function () { return requireModule('space3d', Space3D).isCameraView(); },
+      resetView: function () { return requireModule('space3d', Space3D).resetView(); },
+      resize: function () { return requireModule('space3d', Space3D).resize(); },
+      updateCameraMask: function () { return requireModule('space3d', Space3D).updateCameraMask(); },
+      setGizmoMode: function (mode) { return requireModule('space3d', Space3D).setGizmoMode(mode); },
+      getGizmoMode: function () { return requireModule('space3d', Space3D).getGizmoMode(); }
+    },
+
+    space3dData: {
+      projectDefaults: function () { return clone(requireModule('space3dData', Space3DData).projectDefaults()); },
+      objectDefaults: function () { return clone(requireModule('space3dData', Space3DData).objectDefaults()); },
+      normalizeProject: function (data) { return clone(requireModule('space3dData', Space3DData).normalizeProject(data)); },
+      getProjectState: function () { return clone(requireModule('space3dData', Space3DData).getProjectState()); },
+      setProjectState: function (data) { return requireModule('space3dData', Space3DData).setProjectState(clone(data)); },
+      setMode: function (on) { return requireModule('space3dData', Space3DData).setMode(!!on); },
+      ensureCamera2D: function () { return clone(requireModule('space3dData', Space3DData).ensureCamera2D()); },
+      ensureCamera3D: function () { return clone(requireModule('space3dData', Space3DData).ensureCamera3D()); },
+      readObjectState: function (o) { return clone(requireModule('space3dData', Space3DData).readObjectState(o)); },
+      ensureObjectState: function (o) { return clone(requireModule('space3dData', Space3DData).ensureObjectState(o)); },
+      interpolateInto: function () { return requireModule('space3dData', Space3DData).interpolateInto.apply(Space3DData, arguments); },
+      groupBase: function (list, obj) { return clone(requireModule('space3dData', Space3DData).groupBase(list, obj)); },
+      groupPointToWorld: function (list, obj, p) { return clone(requireModule('space3dData', Space3DData).groupPointToWorld(list, obj, p)); },
+      groupPointToLocal: function (list, obj, p) { return clone(requireModule('space3dData', Space3DData).groupPointToLocal(list, obj, p)); }
+    },
+
+    space3dExport: {
+      isActive: function () { return requireModule('space3dExport', Space3DExport).isActive(); },
+      renderFrameToCanvas: function (canvas, w, h, frame, options) {
+        return requireModule('space3dExport', Space3DExport).renderFrameToCanvas(canvas, w, h, frame, options);
+      },
+      renderFrameToDataURL: function (frame, w, h, options, trackId, outCanvas) {
+        return requireModule('space3dExport', Space3DExport).renderFrameToDataURL(frame, w, h, options, trackId, outCanvas);
+      },
+      isSvgAllowed: function () { return requireModule('space3dExport', Space3DExport).isSvgAllowed(); }
+    },
+
+    camera3d: {
+      trackId: function () { return requireApp().CAMERA3D_TRACK_ID; },
+      trackName: function () { return requireApp().CAMERA3D_TRACK_NAME; },
+      is3DMode: function () { return requireApp().is3DModeActive(); },
+      isCameraViewActive: function () { return requireApp().isCameraViewActiveNow(); },
+      set2DView: function (on) { return requireApp().setCameraView2D(on); },
+      makeFrame: function () { return clone(requireApp().makeCamera3DFrame()); },
+      ensureTrack: function () { return clone(requireApp().ensureCamera3DTrack()); },
+      fillFullLength: function (force) { return clone(requireApp().fillCamera3DTrackToFullLength(force)); },
+      resetToDefault: function () { return clone(requireApp().resetCamera3DToDefault()); },
+      getFrameAt: function (idx) { return clone(requireApp().getCamera3DFrameAt(idx)); },
+      getObject: function () { return clone(requireApp().getCamera3DObject()); },
+      syncFromState: function () { return clone(requireApp().syncCamera3DTrackFromState()); },
+      applyToState: function (idx) { return requireApp().applyCamera3DFrameToState(idx); }
+    },
+
+    canvas: {
+      getViewPinned: function () { return requireApp().getViewPinned(); },
+      setViewPinned: function (on) { return requireApp().setViewPinned(on); },
+      posLocked: function () { return requireApp().canvasPosLocked(); },
+      setBoundsEnabled: function (on) { return requireApp().setCanvasBoundsEnabled(on); },
+      getBounds: function () { return clone(requireApp().AppState.canvasBounds); },
+      getTransform: function () {
+        var s = requireApp().AppState;
+        return clone({ offset: s.viewOffset, scale: s.viewScale });
+      },
+      getExportSize: function () { return requireApp().getExportSize(); }
+    },
+
     /* MCP / JSON-RPC 风格入口：AI 插件只需要 call(method, params) 一个函数 */
     mcp: {
       methods: function () { return Object.keys(methods).sort(); },
@@ -636,6 +804,32 @@
         });
       });
     },
+    /* v8.0.0 新功能 */
+    'brush.on': function (p) { return api.brush.setOn(p.on); },
+    'brush.type.list': function () { return api.brush.listTypes(); },
+    'brush.type.get': function () { return api.brush.getType(); },
+    'brush.type.set': function (p) { return api.brush.setType(p.type); },
+    'brush.config.get': function () { return api.brush.getConfig(); },
+    'brush.config.set': function (p) { return api.brush.setConfig(p.patch || p); },
+    'brush.bucket': function (p) {
+      if (p && typeof p.x === 'number' && typeof p.y === 'number') return api.brush.bucketFillAt(p.x, p.y);
+      return api.brush.bucketFill();
+    },
+    'eraser.on': function (p) { return api.eraser.setOn(p.on); },
+    'eraser.size.set': function (p) { return api.eraser.setSize(p.size); },
+    'camera.view.fit': function () { return api.camera.fitViewToAvailableArea(); },
+    'camera.mask.alpha': function () { return api.camera.getMaskAlpha(); },
+    'space3d.enabled': function () { return api.space3d.isEnabled(); },
+    'space3d.set': function (p) { return api.space3d.setEnabled(p.on); },
+    'space3d.cameraView': function () { return api.space3d.isCameraView(); },
+    'space3d.resetView': function () { return api.space3d.resetView(); },
+    'space3d.gizmo.set': function (p) { return api.space3d.setGizmoMode(p.mode); },
+    'camera3d.track': function () { return api.camera3d.trackId(); },
+    'camera3d.frame': function (p) { return api.camera3d.getFrameAt(p.index); },
+    'camera3d.apply': function (p) { return api.camera3d.applyToState(p.index); },
+    'camera3d.reset': function () { return api.camera3d.resetToDefault(); },
+    'canvas.pin': function (p) { return api.canvas.setViewPinned(p.on); },
+    'canvas.bounds': function (p) { return api.canvas.setBoundsEnabled(p.on); },
     'export.mp4': function () { return api.export.mp4(); },
     'export.webm': function () { return api.export.webm(); },
     'export.project': function (p) { return api.export.project(p.name); },

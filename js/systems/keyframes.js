@@ -55,6 +55,11 @@
   /* ---------------- 关键帧标记 ---------------- */
   function markKey(d, origin, curve) {
     if (!isReal(d)) return null;
+    /* 通用落帧扩展点：3D 数据层在这里补齐 space3d 全字段，
+       保证摄像机和普通元件的关键帧都记录同一套三维属性。 */
+    if (preMarkKey) {
+      try { preMarkKey(d); } catch (_) {}
+    }
     d[KEY] = { o: origin === 'main' ? 'main' : 'sub' };
     if (curve) d[KEY].c = curve;
     return d;
@@ -207,6 +212,19 @@
      求值结果不带 __k，因此永远不会被当成关键帧写回。 */
   const IDENT = (u) => u;
 
+  /* 阶段 3：通用扩展钩子。这里只提供扩展点，不写任何 3D / space3d 专用逻辑。
+     默认 null，2D 行为完全不变；3D 数据层在自身文件里注册实现。
+       · preMarkKey   ：落关键帧前补齐元件级扩展字段（摄像机同样适用）；
+       · postInterpolate：派生帧求值后补齐 / 插值扩展字段。 */
+  let preMarkKey = null;
+  let postInterpolate = null;
+  function setPreMarkKey(fn) {
+    preMarkKey = (typeof fn === 'function') ? fn : null;
+  }
+  function setPostInterpolate(fn) {
+    postInterpolate = (typeof fn === 'function') ? fn : null;
+  }
+
   function lerp(a, b, t) { return a + (b - a) * t; }
   function lerpAngle(a, b, t) {
     let d = b - a;
@@ -349,6 +367,9 @@
     if (obj.ax === undefined) obj.ax = 0;
     if (obj.ay === undefined) obj.ay = 0;
     interpMask(obj, o1, o2, prog, col);
+    if (postInterpolate) {
+      try { postInterpolate(obj, o1, o2, prog, tt, u, ctx); } catch (_) {}
+    }
 
     if (obj.type === 'figure') {
       obj.x = lerp(o1.x, o2.x, prog('x'));
@@ -493,6 +514,28 @@
       return obj;
     }
 
+    /* 3D 摄像机虚拟轨：逐帧插值工程级 camera3d 参数，和 2D 摄像机元件互不影响。 */
+    if (obj.type === 'camera3d') {
+      const lerpVec = (a, b, k) => ({
+        x: lerp((a && a.x) || 0, (b && b.x) || 0, k),
+        y: lerp((a && a.y) || 0, (b && b.y) || 0, k),
+        z: lerp((a && a.z) || 0, (b && b.z) || 0, k)
+      });
+      obj.position = lerpVec(o1.position, o2.position, prog('position'));
+      obj.rotation = lerpVec(o1.rotation, o2.rotation, prog('rotation'));
+      obj.targetOffset = lerpVec(o1.targetOffset, o2.targetOffset, prog('targetOffset'));
+      obj.fov = lerp(o1.fov == null ? 50 : o1.fov, o2.fov == null ? 50 : o2.fov, prog('fov'));
+      obj.near = lerp(o1.near == null ? 1 : o1.near, o2.near == null ? 1 : o2.near, prog('near'));
+      obj.far = lerp(o1.far == null ? 20000 : o1.far, o2.far == null ? 20000 : o2.far, prog('far'));
+      obj.orthoHeight = lerp(o1.orthoHeight == null ? 1080 : o1.orthoHeight, o2.orthoHeight == null ? 1080 : o2.orthoHeight, prog('orthoHeight'));
+      obj.width = Math.max(1, lerp(o1.width == null ? 1920 : o1.width, o2.width == null ? 1920 : o2.width, tt));
+      obj.height = Math.max(1, lerp(o1.height == null ? 1080 : o1.height, o2.height == null ? 1080 : o2.height, tt));
+      obj.mode = tt < 1 ? (o1.mode || 'perspective') : (o2.mode || o1.mode || 'perspective');
+      obj.targetId = tt < 1 ? (o1.targetId || null) : (o2.targetId || null);
+      obj.name = obj.name || o2.name || o1.name || '3D 摄像机';
+      return obj;
+    }
+
     if (obj.type === 'camera') {
       obj.x = lerp(o1.x, o2.x, prog('x'));
       obj.y = lerp(o1.y, o2.y, prog('y'));
@@ -535,6 +578,7 @@
     keyIndices, prevKeyIndex, nextKeyIndex,
     segments, segmentContaining, locate, segmentsForRange, expandRangeToSegments,
     reconcileTrack, countKinds, derivedCount,
+    setPreMarkKey, setPostInterpolate,
     lerp, lerpAngle, lerpScale, interpolateObject, evaluateTrack
   };
 

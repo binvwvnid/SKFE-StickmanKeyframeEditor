@@ -249,6 +249,7 @@ function addEraserPointToDrag(drag, pUse) {
     const stroke = { size: drag.localSize, seg: hit.seg, points: [local] };
     if (!o.eraser[hit.limb]) o.eraser[hit.limb] = [];
     o.eraser[hit.limb].push(stroke);
+    if (Array.isArray(drag.createdStrokes)) drag.createdStrokes.push(stroke);
     drag.current = stroke;
     drag.currentKey = key;
     drag.currentLimb = hit.limb;
@@ -269,7 +270,7 @@ function addEraserPointToDrag(drag, pUse) {
     const L = Math.hypot(B.x - A.x, B.y - A.y);
     screenDist = Math.hypot(local.lx - last.lx, local.ly - last.ly) * L * vs;
   }
-  if (screenDist < 0.6) return;
+  if (screenDist < 0.35) return;
   drag.current.points.push(local);
 }
 
@@ -402,6 +403,7 @@ function startEraserStroke(p, e) {
     }
     eraserDrag = {
       o,
+      pointerId: e && typeof e.pointerId === 'number' ? e.pointerId : null,
       pre: D.getSnapshot(),
       localSize,
       current: null,
@@ -411,7 +413,8 @@ function startEraserStroke(p, e) {
       startLimb: null,
       startSeg: -1,
       startLocal: null,
-      hadNewStroke: false
+      hadNewStroke: false,
+      createdStrokes: []
     };
     /* 起点若命中某段，立即开一笔；未命中就等拖到肢体上再开 */
     addEraserPointToDrag(eraserDrag, pUse);
@@ -422,6 +425,7 @@ function startEraserStroke(p, e) {
     o.eraser.push(stroke);
     eraserDrag = {
       o,
+      pointerId: e && typeof e.pointerId === 'number' ? e.pointerId : null,
       pre: D.getSnapshot(),
       localSize,
       current: stroke,
@@ -431,7 +435,8 @@ function startEraserStroke(p, e) {
       startLimb: null,
       startSeg: -1,
       startLocal: local,
-      hadNewStroke: true
+      hadNewStroke: true,
+      createdStrokes: [stroke]
     };
   }
 
@@ -463,6 +468,7 @@ function updateEraserStroke(p) {
       if (!d.current) {
         const stroke = { size: d.localSize, seg: d.startSeg, points: [d.startLocal, currentLocal] };
         o.eraser[d.startLimb].push(stroke);
+        if (Array.isArray(d.createdStrokes)) d.createdStrokes.push(stroke);
         d.current = stroke;
         d.currentKey = d.startLimb + '_' + d.startSeg;
         d.currentLimb = d.startLimb;
@@ -480,13 +486,14 @@ function updateEraserStroke(p) {
     if (!d.current) {
       const stroke = { size: d.localSize, points: [local], z: nextMaskZ(o) };
       o.eraser.push(stroke);
+      if (Array.isArray(d.createdStrokes)) d.createdStrokes.push(stroke);
       d.current = stroke;
       d.hadNewStroke = true;
     } else {
       const last = d.current.points[d.current.points.length - 1];
       const vs = getActiveViewScale();
       const s = getEraserScale(o);
-      if (last && Math.hypot(local.x - last.x, local.y - last.y) * vs * s < 0.6) {
+      if (last && Math.hypot(local.x - last.x, local.y - last.y) * vs * s < 0.35) {
         D.EventBus.emit('need:render');
         return;
       }
@@ -579,6 +586,36 @@ function finishEraserStroke() {
   D.markCurrentFrameModified();
   if (d.pre) D.pushPreSnapshot(d.pre, '橡皮擦除');
   else D.EventBus.emit('history:save', '橡皮擦除');
+  D.EventBus.emit('need:render');
+}
+
+/* v7.9.5：中断一笔擦除（双指缩放 / 平移、切模式时用）。
+   整笔撤销，不写历史；否则移动端第二根手指落下后会把半笔擦除误提交。 */
+function cancelEraserStroke() {
+  const d = eraserDrag;
+  if (!d) return;
+  eraserDrag = null;
+
+  const made = Array.isArray(d.createdStrokes) ? d.createdStrokes : (d.current ? [d.current] : []);
+  if (made.length && d.o) {
+    const o = d.o;
+    if (o.type === 'figure' && o.eraser) {
+      for (const limb of ['head', 'body', 'armL', 'armR', 'legL', 'legR']) {
+        if (!Array.isArray(o.eraser[limb])) continue;
+        o.eraser[limb] = o.eraser[limb].filter(st => made.indexOf(st) === -1);
+      }
+    } else if (Array.isArray(o.eraser)) {
+      o.eraser = o.eraser.filter(st => made.indexOf(st) === -1);
+    }
+  }
+
+  try {
+    const canvas = D.getCanvas();
+    if (canvas && d.pointerId != null) canvas.releasePointerCapture(d.pointerId);
+  } catch (_) {}
+
+  const cursor = document.getElementById('eraserCursor');
+  if (cursor) cursor.style.display = 'none';
   D.EventBus.emit('need:render');
 }
 
@@ -724,7 +761,19 @@ function clearEraserAll() {
 }
 
 function setEraserOn(on) {
-  eraserOn = !!on;
+  on = !!on;
+  /* 三种绘制模式严格互斥：打开擦除时关闭画笔与油漆桶。 */
+  if (on) {
+    const B = window.SKFE && window.SKFE.systems && window.SKFE.systems.brush;
+    if (B && typeof B.isBucketMode === 'function' && B.isBucketMode() && typeof B.setBucketMode === 'function') {
+      B.setBucketMode(false, true);
+    }
+    if (B && typeof B.isOn === 'function' && B.isOn() && typeof B.setOn === 'function') {
+      B.setOn(false);
+    }
+  }
+  if (!on && eraserDrag) cancelEraserStroke();
+  eraserOn = on;
   document.body.classList.toggle('eraser-mode', eraserOn);
   const btn = document.getElementById('btnEraserToggle');
   if (btn) {
@@ -824,6 +873,7 @@ function initEraserUI() {
     startStroke: startEraserStroke,
     updateStroke: updateEraserStroke,
     finishStroke: finishEraserStroke,
+    cancelStroke: cancelEraserStroke,
     hitObject: eraserHitObject,
     hasStrokes: hasEraserStrokes,
     drawMask: drawEraseMask,
